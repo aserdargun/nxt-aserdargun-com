@@ -22,6 +22,22 @@ describe("NoteFrontmatterSchema", () => {
     expect(result.title).toBe("2026 Planı");
     expect(() => NoteFrontmatterSchema.parse({ ...result, visibility: "public" })).toThrow();
   });
+
+  it("accepts canonical UTC timestamps and rejects non-UTC offsets", () => {
+    const note = {
+      id: "018f47d2-6a34-7b2a-9f21-8a7034963aef",
+      title: "UTC Plan",
+      created: "2026-08-23T12:00:00.000Z",
+      updated: "2026-08-23T12:00:00.000Z",
+      tags: [],
+      aliases: []
+    };
+
+    expect(NoteFrontmatterSchema.parse(note).created).toBe("2026-08-23T12:00:00.000Z");
+    expect(() =>
+      NoteFrontmatterSchema.parse({ ...note, updated: "2026-08-23T15:00:00.000+03:00" })
+    ).toThrow();
+  });
 });
 
 it("normalizes note lists and rejects duplicate folded values", () => {

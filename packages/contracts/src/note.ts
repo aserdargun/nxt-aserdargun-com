@@ -16,7 +16,9 @@ const assertUniqueFoldedLists = (value: { tags: string[]; aliases: string[] }, c
 };
 
 export const NoteIdSchema = z.uuid();
-export const TimestampSchema = z.iso.datetime({ offset: true });
+export const TimestampSchema = z.iso.datetime({ offset: true }).refine((value) => value.endsWith("Z"), {
+  message: "timestamp must use canonical UTC Z form"
+});
 export const NoteTitleSchema = z.string().trim().min(1).max(160);
 
 export const NoteFrontmatterSchema = z
