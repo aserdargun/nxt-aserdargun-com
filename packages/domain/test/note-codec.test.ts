@@ -38,9 +38,15 @@ describe("wiki links", () => {
     ]);
   });
 
-  it("ignores multi-backtick spans and only closes an exact bare fence", () => {
+  it("ignores multi-backtick spans and only closes a bare compatible fence", () => {
     expect(extractWikiLinks("``[[Inline]]`` [[Visible]]\n\n````md\n[[FourFence]]\n```\n[[StillFenced]]\n```` trailing\n[[AlsoFenced]]\n````\n[[Open]]")).toEqual([
       { target: "Visible", label: null },
+      { target: "Open", label: null }
+    ]);
+  });
+
+  it("accepts a longer bare closing fence", () => {
+    expect(extractWikiLinks("````md\n[[Hidden]]\n`````\n[[Open]]")).toEqual([
       { target: "Open", label: null }
     ]);
   });

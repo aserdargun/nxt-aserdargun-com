@@ -51,8 +51,9 @@ function openingFence(line) {
     return { marker: first, length: marker.length };
 }
 function closesFence(line, fence) {
-    const marker = fence.marker.repeat(fence.length);
-    return new RegExp(`^ {0,3}${marker}[\\t ]*$`, "u").test(line);
+    const match = new RegExp(`^ {0,3}(?<marker>${fence.marker}+)[\\t ]*$`, "u").exec(line);
+    const marker = match?.groups?.marker ?? "";
+    return marker.length >= fence.length;
 }
 /** Extracts only unambiguous wiki syntax outside fenced and inline code. */
 export function extractWikiLinks(source) {
