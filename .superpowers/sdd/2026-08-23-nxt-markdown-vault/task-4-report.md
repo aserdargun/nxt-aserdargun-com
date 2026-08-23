@@ -249,3 +249,61 @@ All commands exited 0 under Node 22:
 
 Fix commit: `a16d868e64e114447cdcb2abfd681e9b73c3e16e` —
 `fix: serialize local storage recovery`.
+
+## Fix round 4 — fail-closed locking and content-bound journals
+
+### RED evidence
+
+After the required lock-decision checkpoint, added six focused regressions and
+ran under Node 22:
+
+```text
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH \
+  pnpm --filter @nxt/api test -- local-drive-adapter
+```
+
+The command failed as intended:
+
+- an old active lock was treated as an unsafe/stale artifact rather than a
+  bounded fail-closed timeout;
+- owner release deleted lock artifacts and exposed no successor-release probe;
+- a bogus regular Trash file finalized a journal without matching its content;
+- an `EEXIST` lock handoff that disappeared during inspection failed instead of
+  retrying;
+- malformed metadata arrays were accepted during adapter creation; and
+- the journal swap hook was never reached, leaving a check-then-read path.
+
+### Implementation
+
+- Replaced the time-based file lock with a non-stealable `.mutation.lock`
+  directory. Acquisition uses atomic `mkdir`, never archives or breaks an
+  existing lock due to age, waits only for the configured bounded interval, and
+  then throws a timeout. `EEXIST` followed by `ENOENT` loops and retries.
+  Release verifies the owner token and atomically renames the directory into
+  `.lock-history`; it does not unlink an artifact, so a protocol successor can
+  acquire only after the owner directory has moved.
+- Each file Trash journal now records the source size and SHA-256 checksum.
+  Recovery finalizes a trashed file only when the exact regular Trash artifact
+  matches that descriptor; bogus, missing, or legacy-unbound file artifacts
+  restore the original readable metadata and are retained rather than deleted.
+- Existing metadata is validated during `create()`, including record shape, not
+  deferred to the first operation. Journal JSON is opened once with
+  `O_NOFOLLOW`, `fstat`ed, and read from that same handle; a swap to a symlink
+  fails closed.
+
+### GREEN validation
+
+All commands exited 0 under Node 22:
+
+- `pnpm --filter @nxt/api test -- local-drive-adapter root-boundary` — 2 files,
+  24 tests.
+- `pnpm --filter @nxt/api typecheck`
+- `pnpm --filter @nxt/api build`
+- `pnpm lint`
+- `pnpm test` — contracts 6, domain 15, API 24 tests.
+- `pnpm typecheck`
+- `pnpm build`
+- `git diff --check`
+
+Fix commit: `f9900b257a873a9fedde08bbd7307917f6fc87ed` —
+`fix: fail closed local storage locks`.
