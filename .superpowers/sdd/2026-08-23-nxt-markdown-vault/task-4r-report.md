@@ -19,6 +19,9 @@ Node 22 path; the final evidence set explicitly printed `v22.23.1`.
 - Implementation:
   `d51283ec831d90854be965e35a44ee4811c39ed8` —
   `fix: redesign local Trash recovery`.
+- Fix round 1:
+  `3c1ac325eb9457d47dc7c115bb73a8fae0738424` —
+  `fix: bind Trash recovery to committed revision`.
 - The documentation-only report commit is intentionally separate; its hash is
   reported in the Task 4R handoff because a commit cannot contain its own hash.
 
@@ -183,6 +186,92 @@ Observed results:
 - root tests: contracts 6, domain 15, API 38 — 59 tests passed;
 - root typecheck and build: all three workspace packages passed; and
 - `git diff --check`: no errors.
+
+## Fix round 1 — bind recovery to the committed projection
+
+### Review finding and root cause
+
+Schema-2 recovery checked that current metadata was trashed and had the expected
+item kind, but it verified the journal descriptor against the immutable revision
+selected by `originalMetadata`. A different, internally valid current metadata
+record could select revision `2` while the journal and Trash artifact remained
+bound to original revision `1`; recovery would incorrectly finalize. A direct
+descriptor/revision mismatch also threw before rollback rather than treating the
+missing proof as a recovery outcome.
+
+### RED evidence
+
+Under the required direct Node 22 path, the focused command was:
+
+```text
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH \
+  pnpm --filter @nxt/api test -- local-drive-adapter trash-transaction root-boundary
+```
+
+It exited `1` with 3 failed and 47 passed tests across three files:
+
+1. current committed trashed metadata validly selected immutable revision `2`
+   (`two`), while original metadata, the schema-2 journal, and `.trash/<id>`
+   selected revision `1` (`one`); recovery incorrectly left the file trashed;
+2. a journal/artifact descriptor for `two` against the current active immutable
+   revision containing `one` threw `Trash transaction content does not match
+   immutable revision` instead of rolling back; and
+3. the pure state module had no explicit restart planner for `prepared`,
+   `artifact-verified`, `finalized`, and `rolled-back` outcomes.
+
+The invalid-jump and same-state/idempotent state-table characterization cases
+were already green in this RED run, confirming the minor review gap was missing
+committed coverage rather than a second production defect.
+
+### Implementation
+
+- `planTrashRecovery()` now returns one discriminated outcome: resume success
+  through explicit remaining transitions, advance to `rolled-back`, or restore
+  an already rolled-back transaction.
+- Recovery derives the one valid current Trash projection by cloning the
+  validated original metadata and applying only the normal Trash mutation:
+  `trashed`, the file version and modified time, metadata sequence, and metadata
+  generation. The full current metadata must deep-equal that projection; extra
+  revisions or any unrelated mutation invalidate success.
+- File success then reads the active immutable revision selected by that exact
+  current metadata and requires its checksum plus size to equal the journal
+  descriptor. The regular no-follow `.trash/<id>` artifact must equal the same
+  descriptor.
+- Missing or mismatched proof returns `false` rather than throwing before
+  recovery. The planner restores validated original readable/untrashed metadata,
+  advances the durable journal to `rolled-back`, and uniquely archives both the
+  journal and untrusted artifact. A second fresh adapter is idempotent.
+- `api/test/trash-transaction.test.ts` now directly protects invalid transition
+  rejection, same-state replay for every state, success resumption from
+  `prepared` and `artifact-verified`, proof-dependent `finalized` behavior, and
+  terminal `rolled-back` restoration.
+
+### GREEN and final validation
+
+The final combined validation printed `v22.23.1`; all commands exited `0`:
+
+```text
+pnpm --filter @nxt/api test -- local-drive-adapter trash-transaction root-boundary
+pnpm --filter @nxt/api typecheck
+pnpm --filter @nxt/api build
+pnpm lint
+pnpm test
+pnpm typecheck
+pnpm build
+git diff --check
+```
+
+Observed results:
+
+- focused API: 3 files, 50 tests passed;
+- API typecheck and build: passed;
+- root lint: passed;
+- root tests: contracts 6, domain 15, API 50 — 71 tests passed;
+- root typecheck and build: all three workspace packages passed; and
+- `git diff --check`: no errors.
+
+Fix implementation commit:
+`3c1ac325eb9457d47dc7c115bb73a8fae0738424`.
 
 ## Remaining concerns
 
