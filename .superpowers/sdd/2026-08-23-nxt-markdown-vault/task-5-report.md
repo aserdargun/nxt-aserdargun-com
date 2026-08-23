@@ -237,3 +237,114 @@ All commands exited `0`:
 ### Fix round 1 concerns
 
 None.
+
+## Fix round 2 — exact environment bytes and proxy-first bounded sanitization
+
+### Status and commit
+
+DONE. The three remaining Important findings were reproduced, fixed, and
+validated locally without using an external service.
+
+- Fix implementation: `88f90bf3971627a17335b7f366d860679d672419` —
+  `fix: bound session response sanitization`.
+
+### Implementation
+
+1. Local bypass no longer trims its environment. It admits only a complete
+   ASCII `development` or `test` string; ASCII case variants remain supported
+   and tested. Leading/trailing spaces, tabs, newlines, carriage returns,
+   controls, and invisible characters fail closed.
+2. Sanitization and error-code extraction use Node's `util/types.isProxy`
+   before `Array.isArray`, native Error inspection, `instanceof`, reflection,
+   or conversion. Transparent Error proxies, plain-data proxies, revoked
+   proxies, and explosive `ownKeys` traps become static safe markers without a
+   trap invocation. General `json()` also treats any key normalized to
+   `message` as sensitive.
+3. `errorResponse()` no longer passes its trusted schema body through the
+   general sanitizer. It constructs the exact `ApiError` body directly from a
+   validated enum code, the corresponding static official message, and a
+   validated or generated request ID. A caller message is never included, and
+   even a runtime-mutated `ApiResponseError.code` fails closed to
+   `DRIVE_UNAVAILABLE`.
+4. Admitted records no longer create an explicit eager `Reflect.ownKeys()`
+   array. A guarded `for...in` loop considers only enumerable string keys,
+   confirms each is an own data descriptor, and stops at the monotonic entry,
+   node, or output budget. Symbols, non-enumerables, inherited entries, and
+   accessors are not serialized.
+5. Keys longer than 256 UTF-16 code units truncate before lowercase, regex
+   normalization, or serialized-byte counting. A one-million-code-unit key
+   that would normalize to `authorization` therefore performs no sensitive-key
+   normalization and produces only the deterministic truncation marker.
+
+JavaScript does not expose a cancellable own-key iterator for ordinary objects;
+an engine may internally prepare enumeration metadata for `for...in`. The
+implementation cannot bound that engine-internal work, but it removes the
+application-level eager key array, rejects proxies before enumeration, avoids
+unbounded application-level key scans, and stops application processing at the
+global budget.
+
+### RED evidence
+
+All commands ran with the exported Node 22 path and verified both the shell and
+pnpm subprocess runtime as `v22.23.1`.
+
+The main RED added the environment, proxy, message-spoof, oversized-key, and
+many-key behavioral cases before production changes:
+
+```text
+pnpm --filter @nxt/api exec vitest run test/auth.test.ts test/api-response.test.ts --reporter=dot
+```
+
+Exit `1`: 10 tests failed and 89 passed. The six whitespace/control environment
+forms were incorrectly admitted; transparent Error and plain-data proxies were
+enumerated; a normalized `message` data property leaked; and the million-unit
+key was normalized before truncation.
+
+A later mutation check added a fail-closed enum regression before simplifying
+error-code extraction:
+
+```text
+pnpm --filter @nxt/api exec vitest run test/api-response.test.ts -t "runtime-mutated" --reporter=dot
+```
+
+Exit `1`: the selected regression failed because a runtime-mutated
+`ApiResponseError.code` reached an undefined error definition and threw. The
+other 24 tests in that file were skipped by the name filter.
+
+### GREEN and final validation
+
+Focused file-level GREEN:
+
+```text
+pnpm --filter @nxt/api exec vitest run test/auth.test.ts test/api-response.test.ts
+```
+
+Both files passed, 101/101 tests. The one-million-code-unit key completed below
+the 500 ms behavioral ceiling with a serialized marker below 64 bytes; the
+explosive proxy trap was not invoked; and the many-key ordinary record stopped
+at the global entry budget.
+
+The complete validation under Node `v22.23.1` was:
+
+```text
+pnpm --filter @nxt/api test -- auth api-response
+pnpm --filter @nxt/api typecheck
+pnpm --filter @nxt/api build
+pnpm lint
+pnpm test
+pnpm typecheck
+pnpm build
+git diff --check
+```
+
+All commands exited `0`:
+
+- focused API: 5 files, 151 tests passed;
+- root tests: contracts 6, domain 15, API 151 — 172 tests passed;
+- API and all-workspace typechecks/builds passed;
+- root ESLint passed; and
+- staged and unstaged diff checks reported no errors.
+
+### Fix round 2 concerns
+
+None beyond the documented JavaScript engine-level enumeration limitation.
