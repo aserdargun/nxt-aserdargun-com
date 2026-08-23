@@ -1,9 +1,13 @@
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 
+const productionTypeScript = ["**/src/**/*.{ts,tsx}"];
+const testTypeScript = ["**/test/**/*.{ts,tsx}", "**/*.test.{ts,tsx}"];
+
 export default [
   {
     ignores: [
+      "**/dist/**",
       "web/dist/**",
       "api-dist/**",
       "coverage/**",
@@ -12,12 +16,16 @@ export default [
     ]
   },
   js.configs.recommended,
+  ...tseslint.configs.recommended.map((config) => ({
+    ...config,
+    files: testTypeScript
+  })),
   ...tseslint.configs.recommendedTypeChecked.map((config) => ({
     ...config,
-    files: ["**/*.{ts,tsx}"]
+    files: productionTypeScript
   })),
   {
-    files: ["**/*.{ts,tsx}"],
+    files: productionTypeScript,
     languageOptions: {
       parserOptions: {
         projectService: true
