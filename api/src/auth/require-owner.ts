@@ -16,12 +16,12 @@ export interface RequireOwnerInput {
 }
 
 export const requireOwner = (input: RequireOwnerInput): OwnerIdentity => {
-  if (
-    input.localBypass === true &&
-    isLocalEnvironment(input.environment) &&
-    isLoopbackHost(input.host)
-  ) {
-    return { provider: "github", userId: "local-bypass", userDetails: requireConfiguredOwner(input.allowedUser) };
+  if (input.localBypass === true && isLocalEnvironment(input.environment) && isLoopbackHost(input.host)) {
+    return {
+      provider: "github",
+      userId: "local-bypass",
+      userDetails: requireConfiguredOwner(input.allowedUser)
+    };
   }
 
   let principal;
@@ -61,10 +61,13 @@ const requireConfiguredOwner = (allowedUser: string): string => {
 };
 
 const isLocalEnvironment = (environment: string): boolean => {
-  if (!/^[A-Za-z\t\n\r ]+$/u.test(environment)) {
+  if (environment.length !== 4 && environment.length !== 11) {
     return false;
   }
-  const normalized = environment.trim().toLowerCase();
+  if (!/^[A-Za-z]+$/u.test(environment)) {
+    return false;
+  }
+  const normalized = environment.toLowerCase();
   return normalized === "development" || normalized === "test";
 };
 

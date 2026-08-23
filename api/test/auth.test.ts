@@ -76,7 +76,10 @@ describe("decodeClientPrincipal", () => {
       JSON.parse(withDangerousKey) as unknown,
       { ...ownerPrincipal, userDetails: " " },
       { ...ownerPrincipal, userId: "" },
-      { ...ownerPrincipal, userRoles: ["authenticated", ...Array.from({ length: 32 }, () => "role")] },
+      {
+        ...ownerPrincipal,
+        userRoles: ["authenticated", ...Array.from({ length: 32 }, () => "role")]
+      },
       { ...ownerPrincipal, userRoles: ["authenticated", { role: "owner" }] }
     ];
 
@@ -102,14 +105,38 @@ describe("requireOwner", () => {
         allowedUser: "Aserdargun",
         localBypass: false
       })
-    ).toEqual({ provider: "github", userId: "owner-id", userDetails: "Aserdargun" });
+    ).toEqual({
+      provider: "github",
+      userId: "owner-id",
+      userDetails: "Aserdargun"
+    });
   });
 
   it.each([
-    { identityProvider: "github", userDetails: "other", userRoles: ["authenticated"], userId: "x" },
-    { identityProvider: "aad", userDetails: "aserdargun", userRoles: ["authenticated"], userId: "x" },
-    { identityProvider: "github", userDetails: "aserdargun", userRoles: ["anonymous"], userId: "x" },
-    { identityProvider: "github", userDetails: "aserdargun", userRoles: ["Authenticated"], userId: "x" }
+    {
+      identityProvider: "github",
+      userDetails: "other",
+      userRoles: ["authenticated"],
+      userId: "x"
+    },
+    {
+      identityProvider: "aad",
+      userDetails: "aserdargun",
+      userRoles: ["authenticated"],
+      userId: "x"
+    },
+    {
+      identityProvider: "github",
+      userDetails: "aserdargun",
+      userRoles: ["anonymous"],
+      userId: "x"
+    },
+    {
+      identityProvider: "github",
+      userDetails: "aserdargun",
+      userRoles: ["Authenticated"],
+      userId: "x"
+    }
   ])("classifies a valid non-owner principal as forbidden %#", (principal) => {
     expectAuthFailure(
       () =>
@@ -153,7 +180,11 @@ describe("requireOwner", () => {
           allowedUser: "aserdargun",
           localBypass: true
         })
-      ).toEqual({ provider: "github", userId: "local-bypass", userDetails: "aserdargun" });
+      ).toEqual({
+        provider: "github",
+        userId: "local-bypass",
+        userDetails: "aserdargun"
+      });
     }
   );
 
@@ -205,8 +236,8 @@ describe("requireOwner", () => {
     }
   });
 
-  it.each(["development", " Development ", "test", "TEST"])(
-    "allows bypass only for the normalized local environment %s",
+  it.each(["development", "Development", "DEVELOPMENT", "test", "TEST"])(
+    "allows bypass only for the exact ASCII local environment %s",
     (environment) => {
       expect(
         requireOwner({
@@ -216,13 +247,23 @@ describe("requireOwner", () => {
           allowedUser: "aserdargun",
           localBypass: true
         })
-      ).toEqual({ provider: "github", userId: "local-bypass", userDetails: "aserdargun" });
+      ).toEqual({
+        provider: "github",
+        userId: "local-bypass",
+        userDetails: "aserdargun"
+      });
     }
   );
 
   it.each([
     "",
     " ",
+    "\tdevelopment",
+    "development\n",
+    "test\r",
+    " development",
+    "development ",
+    " test ",
     "prod",
     "staging",
     "production",
@@ -295,12 +336,18 @@ describe("private session handler", () => {
     const response = await sessionHandler(request);
 
     expect(response.status).toBe(200);
-    expect(SessionResponseSchema.parse(response.jsonBody)).toEqual({ user: { userDetails: "aserdargun" } });
+    expect(SessionResponseSchema.parse(response.jsonBody)).toEqual({
+      user: { userDetails: "aserdargun" }
+    });
   });
 
   it.each([
     { principal: null, status: 401, code: "UNAUTHORIZED" },
-    { principal: { ...ownerPrincipal, userDetails: "other" }, status: 403, code: "FORBIDDEN" }
+    {
+      principal: { ...ownerPrincipal, userDetails: "other" },
+      status: 403,
+      code: "FORBIDDEN"
+    }
   ])("returns a redacted typed error for a rejected request %#", async ({ principal, status, code }) => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("NXT_ALLOWED_GITHUB_USER", "aserdargun");
@@ -348,7 +395,9 @@ describe("private session handler", () => {
     const response = await sessionHandler(requestWithRawAuthority(rawUrl, rawAuthority));
 
     expect(response.status).toBe(401);
-    expect(response.jsonBody).toMatchObject({ error: { code: "UNAUTHORIZED" } });
+    expect(response.jsonBody).toMatchObject({
+      error: { code: "UNAUTHORIZED" }
+    });
   });
 
   it.each([
@@ -364,26 +413,47 @@ describe("private session handler", () => {
     const response = await sessionHandler(requestWithRawAuthority(rawUrl, rawAuthority));
 
     expect(response.status).toBe(200);
-    expect(SessionResponseSchema.parse(response.jsonBody)).toEqual({ user: { userDetails: "aserdargun" } });
+    expect(SessionResponseSchema.parse(response.jsonBody)).toEqual({
+      user: { userDetails: "aserdargun" }
+    });
   });
 
   it.each([
     { header: null, status: 401, code: "UNAUTHORIZED" },
     { header: "not-base64", status: 401, code: "UNAUTHORIZED" },
-    { header: encode({ ...ownerPrincipal, identityProvider: "aad" }), status: 403, code: "FORBIDDEN" },
-    { header: encode({ ...ownerPrincipal, userRoles: ["anonymous"] }), status: 403, code: "FORBIDDEN" },
-    { header: encode({ ...ownerPrincipal, userDetails: "unknown-owner" }), status: 503, code: "DRIVE_UNAVAILABLE" }
-  ] as const)("does not expose configuration state before principal classification %#", async ({ header, status, code }) => {
-    vi.stubEnv("NODE_ENV", "production");
-    vi.stubEnv("NXT_ALLOWED_GITHUB_USER", "");
-    vi.stubEnv("NXT_LOCAL_AUTH_BYPASS", "0");
-    const headers = header === null ? {} : { "x-ms-client-principal": header };
+    {
+      header: encode({ ...ownerPrincipal, identityProvider: "aad" }),
+      status: 403,
+      code: "FORBIDDEN"
+    },
+    {
+      header: encode({ ...ownerPrincipal, userRoles: ["anonymous"] }),
+      status: 403,
+      code: "FORBIDDEN"
+    },
+    {
+      header: encode({ ...ownerPrincipal, userDetails: "unknown-owner" }),
+      status: 503,
+      code: "DRIVE_UNAVAILABLE"
+    }
+  ] as const)(
+    "does not expose configuration state before principal classification %#",
+    async ({ header, status, code }) => {
+      vi.stubEnv("NODE_ENV", "production");
+      vi.stubEnv("NXT_ALLOWED_GITHUB_USER", "");
+      vi.stubEnv("NXT_LOCAL_AUTH_BYPASS", "0");
+      const headers = header === null ? {} : { "x-ms-client-principal": header };
 
-    const response = await sessionHandler(
-      new HttpRequest({ method: "GET", url: "https://nxt.example/api/private/session", headers })
-    );
+      const response = await sessionHandler(
+        new HttpRequest({
+          method: "GET",
+          url: "https://nxt.example/api/private/session",
+          headers
+        })
+      );
 
-    expect(response.status).toBe(status);
-    expect(response.jsonBody).toMatchObject({ error: { code } });
-  });
+      expect(response.status).toBe(status);
+      expect(response.jsonBody).toMatchObject({ error: { code } });
+    }
+  );
 });

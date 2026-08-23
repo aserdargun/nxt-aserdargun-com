@@ -1,7 +1,7 @@
 import type { HttpResponseInit } from "@azure/functions";
 import type { ApiError } from "@nxt/contracts";
 import { randomUUID } from "node:crypto";
-import { isNativeError as nodeIsNativeError } from "node:util/types";
+import { isNativeError as nodeIsNativeError, isProxy as nodeIsProxy } from "node:util/types";
 
 type ApiErrorCode = ApiError["error"]["code"];
 
@@ -9,21 +9,30 @@ const ERROR_DEFINITIONS = {
   UNAUTHORIZED: { status: 401, message: "Authentication is required." },
   FORBIDDEN: { status: 403, message: "This account cannot access the vault." },
   NOT_FOUND: { status: 404, message: "The requested resource was not found." },
-  CONFLICT: { status: 409, message: "The resource changed. Refresh and try again." },
+  CONFLICT: {
+    status: 409,
+    message: "The resource changed. Refresh and try again."
+  },
   INVALID_INPUT: { status: 400, message: "The request is invalid." },
-  DRIVE_UNAVAILABLE: { status: 503, message: "The service is temporarily unavailable." },
+  DRIVE_UNAVAILABLE: {
+    status: 503,
+    message: "The service is temporarily unavailable."
+  },
   UNSAFE_FILE: { status: 400, message: "The file is not safe to use." },
   TOO_LARGE: { status: 413, message: "The file is too large." }
 } as const satisfies Record<ApiErrorCode, { status: number; message: string }>;
 
 const ERROR_CODES = new Set<ApiErrorCode>(Object.keys(ERROR_DEFINITIONS) as ApiErrorCode[]);
-const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" } as const;
+const JSON_HEADERS = {
+  "content-type": "application/json; charset=utf-8"
+} as const;
 const MAX_SANITIZATION_DEPTH = 32;
 const MAX_SANITIZATION_NODES = 8_192;
 const MAX_SANITIZATION_ENTRIES = 16_384;
 const MAX_SANITIZATION_OUTPUT_BYTES = 262_144;
 const TRUNCATION_RESERVE_BYTES = 64;
 const MAX_STRING_CODE_UNITS = MAX_SANITIZATION_OUTPUT_BYTES;
+const MAX_KEY_CODE_UNITS = 256;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
 const TRUNCATED = "[Truncated]";
 const UNSERIALIZABLE = "[Unserializable]";
@@ -68,15 +77,19 @@ export const errorResponse = (error: unknown, suppliedRequestId?: string): HttpR
       requestId
     }
   };
-  return json(body, definition.status);
+  return {
+    status: definition.status,
+    headers: JSON_HEADERS,
+    jsonBody: body
+  };
 };
 
 const extractErrorCode = (error: unknown): ApiErrorCode | null => {
   try {
-    if (error instanceof ApiResponseError) {
-      return error.code;
-    }
     if ((typeof error !== "object" && typeof error !== "function") || error === null) {
+      return null;
+    }
+    if (inspectProxy(error) !== false) {
       return null;
     }
     const descriptor = Object.getOwnPropertyDescriptor(error, "code");
@@ -125,6 +138,12 @@ const sanitize = (value: unknown, state: SanitizationState, depth: number): unkn
       return emitMarker(UNSERIALIZABLE, state);
     }
     return emitPrimitive(converted, state);
+  }
+  if ((typeof value !== "object" && typeof value !== "function") || value === null) {
+    return emitPrimitive(null, state);
+  }
+  if (inspectProxy(value) !== false) {
+    return emitMarker(UNSERIALIZABLE, state);
   }
   if (typeof value !== "object") {
     return emitPrimitive(null, state);
@@ -198,47 +217,31 @@ const sanitizeObject = (value: object, state: SanitizationState, depth: number):
   if (!reserveOutput(state, 2)) {
     return truncate(state);
   }
-  let keys: readonly PropertyKey[];
-  try {
-    keys = Reflect.ownKeys(value);
-  } catch {
-    return emitMarker(UNSERIALIZABLE, state);
-  }
 
   const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-  for (const key of keys) {
-    if (!visitEntry(state)) {
-      return truncate(state);
+  try {
+    for (const key in value) {
+      if (!visitEntry(state) || key.length > MAX_KEY_CODE_UNITS) {
+        return truncate(state);
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor === undefined || descriptor.enumerable !== true || !("value" in descriptor)) {
+        continue;
+      }
+      if (isSensitiveKey(key)) {
+        continue;
+      }
+      const keyBytes = serializedStringBytes(key);
+      if (keyBytes === null || !reserveOutput(state, keyBytes + 2)) {
+        return truncate(state);
+      }
+      result[key] = sanitize(descriptor.value, state, depth + 1);
+      if (state.exhausted) {
+        break;
+      }
     }
-    if (typeof key !== "string") {
-      continue;
-    }
-    let sensitive: boolean;
-    try {
-      sensitive = isSensitiveKey(key);
-    } catch {
-      return emitMarker(UNSERIALIZABLE, state);
-    }
-    if (sensitive) {
-      continue;
-    }
-    let descriptor: PropertyDescriptor | undefined;
-    try {
-      descriptor = Object.getOwnPropertyDescriptor(value, key);
-    } catch {
-      continue;
-    }
-    if (descriptor === undefined || !("value" in descriptor)) {
-      continue;
-    }
-    const keyBytes = serializedStringBytes(key);
-    if (keyBytes === null || !reserveOutput(state, keyBytes + 2)) {
-      return truncate(state);
-    }
-    result[key] = sanitize(descriptor.value, state, depth + 1);
-    if (state.exhausted) {
-      break;
-    }
+  } catch {
+    return emitMarker(UNSERIALIZABLE, state);
   }
   return result;
 };
@@ -325,11 +328,13 @@ const inspectArray = (value: object): boolean | null => {
 };
 
 const isSensitiveKey = (key: string): boolean => {
-  const normalized = key.toLowerCase().replace(/[^a-z0-9]/gu, "");
-  if (["__proto__", "prototype", "constructor"].includes(key.toLowerCase())) {
+  const lowered = key.toLowerCase();
+  const normalized = lowered.replace(/[^a-z0-9]/gu, "");
+  if (["__proto__", "prototype", "constructor"].includes(lowered)) {
     return true;
   }
   if (
+    normalized === "message" ||
     normalized === "authorization" ||
     normalized === "proxyauthorization" ||
     normalized.includes("stack") ||
@@ -350,5 +355,13 @@ const isNativeError = (value: object): boolean => {
     return nodeIsNativeError(value);
   } catch {
     return false;
+  }
+};
+
+const inspectProxy = (value: object): boolean | null => {
+  try {
+    return nodeIsProxy(value);
+  } catch {
+    return null;
   }
 };

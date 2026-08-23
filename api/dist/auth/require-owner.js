@@ -1,10 +1,12 @@
 import { decodeClientPrincipal } from "./client-principal.js";
 import { ApiResponseError } from "../http/api-response.js";
 export const requireOwner = (input) => {
-    if (input.localBypass === true &&
-        isLocalEnvironment(input.environment) &&
-        isLoopbackHost(input.host)) {
-        return { provider: "github", userId: "local-bypass", userDetails: requireConfiguredOwner(input.allowedUser) };
+    if (input.localBypass === true && isLocalEnvironment(input.environment) && isLoopbackHost(input.host)) {
+        return {
+            provider: "github",
+            userId: "local-bypass",
+            userDetails: requireConfiguredOwner(input.allowedUser)
+        };
     }
     let principal;
     try {
@@ -38,10 +40,13 @@ const requireConfiguredOwner = (allowedUser) => {
     return canonicalOwner;
 };
 const isLocalEnvironment = (environment) => {
-    if (!/^[A-Za-z\t\n\r ]+$/u.test(environment)) {
+    if (environment.length !== 4 && environment.length !== 11) {
         return false;
     }
-    const normalized = environment.trim().toLowerCase();
+    if (!/^[A-Za-z]+$/u.test(environment)) {
+        return false;
+    }
+    const normalized = environment.toLowerCase();
     return normalized === "development" || normalized === "test";
 };
 const isLoopbackHost = (host) => {
