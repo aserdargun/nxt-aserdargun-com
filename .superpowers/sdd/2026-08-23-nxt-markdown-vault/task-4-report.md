@@ -194,3 +194,58 @@ All commands exited 0 under Node 22:
 
 Fix commit: `6610438da0ad12e999cae00bc94cdfb40198b40f` —
 `fix: recover local storage transactions`.
+
+## Fix round 3 — cross-instance lock and durable Trash recovery
+
+### RED evidence
+
+Added a controlled two-adapter interleaving regression and a double-failure
+Trash regression, then ran under Node 22:
+
+```text
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH \
+  pnpm --filter @nxt/api test -- local-drive-adapter
+```
+
+The command failed as intended:
+
+- a second adapter could not enter a controlled pre-load mutation window, so
+  there was no root-wide serialization point to prevent stale metadata from
+  racing reconciliation; and
+- forcing the Trash move failure followed by a rollback-metadata failure still
+  reported the move error and left no durable recovery record for a fresh
+  adapter to repair.
+
+### Implementation
+
+- All reads and mutations now use a root-local filesystem lock,
+  `.mutation.lock`, acquired with exclusive creation. Locks carry an ownership
+  token for safe release, wait for a bounded interval, and archive only stale
+  lock files rather than deleting them. Mutations acquire the lock before the
+  testable pre-load point, recover any pending Trash transaction, and only then
+  reload metadata and reconcile/create revisions. This applies across adapter
+  instances and processes, rather than relying on an in-process map.
+- Trash writes `.trash-rollback.json` before staging metadata. If the final
+  content move fails, it attempts an explicit rollback; a failed rollback leaves
+  that symlink-checked journal durable. The next locked adapter initialization
+  or operation restores the original metadata when the required regular
+  `.trash/<id>` artifact is absent, then archives the completed journal without
+  permanently deleting it. A journal observed with both trashed metadata and a
+  regular Trash artifact is finalized as a successful Trash.
+
+### GREEN validation
+
+All commands exited 0 under Node 22:
+
+- `pnpm --filter @nxt/api test -- local-drive-adapter root-boundary` — 2 files,
+  18 tests.
+- `pnpm --filter @nxt/api typecheck`
+- `pnpm --filter @nxt/api build`
+- `pnpm lint`
+- `pnpm test` — contracts 6, domain 15, API 18 tests.
+- `pnpm typecheck`
+- `pnpm build`
+- `git diff --check`
+
+Fix commit: `a16d868e64e114447cdcb2abfd681e9b73c3e16e` —
+`fix: serialize local storage recovery`.
