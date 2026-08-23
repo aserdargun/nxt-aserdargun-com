@@ -60,22 +60,33 @@ liveDescribe("GoogleDriveAdapter live integration", () => {
       const readback = await storage.readText(fileId);
       expect(readback).toMatchObject({ text: "two" });
       expect(readback.file.parentIds).toEqual([integrationFolderId]);
-      const firstPage = await storage.listChildren({
-        parentId: integrationFolderId,
-        pageSize: 1
-      });
-      expect(firstPage.files.length).toBeLessThanOrEqual(1);
-      for (const file of firstPage.files) {
-        expect(file.parentIds).toEqual([integrationFolderId]);
+      const seenFileIds = new Set<string>();
+      const seenPageTokens = new Set<string>();
+      let pageToken: string | undefined;
+      let exhausted = false;
+      for (let page = 0; page < 1000; page += 1) {
+        const children = await storage.listChildren({
+          parentId: integrationFolderId,
+          pageSize: 1,
+          ...(pageToken === undefined ? {} : { pageToken })
+        });
+        assertDirectActiveIntegrationChildren(
+          children.files,
+          integrationFolderId,
+          seenFileIds
+        );
+        if (children.nextPageToken === undefined) {
+          exhausted = true;
+          break;
+        }
+        if (seenPageTokens.has(children.nextPageToken)) {
+          throw new Error("Live Drive integration pagination is invalid.");
+        }
+        seenPageTokens.add(children.nextPageToken);
+        pageToken = children.nextPageToken;
       }
-      if (firstPage.nextPageToken !== undefined) {
-        await expect(
-          storage.listChildren({
-            parentId: integrationFolderId,
-            pageSize: 1,
-            pageToken: firstPage.nextPageToken
-          })
-        ).resolves.toMatchObject({ files: expect.any(Array) });
+      if (!exhausted) {
+        throw new Error("Live Drive integration pagination limit exceeded.");
       }
       expect((await storage.listRevisions(fileId)).length).toBeGreaterThan(0);
     } finally {
@@ -88,4 +99,31 @@ const requireSetting = (value: string | undefined): string => {
   if (value === undefined || value.trim() === "")
     throw new Error("Live Drive integration setting is missing.");
   return value;
+};
+
+const assertDirectActiveIntegrationChildren = (
+  files: ReadonlyArray<{
+    id: string;
+    mimeType: string;
+    parentIds: string[];
+    trashed: boolean;
+  }>,
+  integrationFolderId: string,
+  seenFileIds: Set<string>
+): void => {
+  for (const file of files) {
+    if (
+      file.id.length === 0 ||
+      file.id.length > 512 ||
+      /[\r\n\0]/u.test(file.id) ||
+      seenFileIds.has(file.id) ||
+      file.trashed ||
+      file.mimeType === "application/vnd.google-apps.shortcut" ||
+      file.parentIds.length !== 1 ||
+      file.parentIds[0] !== integrationFolderId
+    ) {
+      throw new Error("Live Drive integration child verification failed.");
+    }
+    seenFileIds.add(file.id);
+  }
 };

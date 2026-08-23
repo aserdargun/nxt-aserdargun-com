@@ -33,6 +33,36 @@ describe("LocalDriveAdapter", () => {
     expect(await readFile(join(root, ".metadata.json"), "utf8")).not.toContain("refresh_token");
   });
 
+  it("matches StoragePort MIME-change and same-parent no-op behavior", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({
+      parentId: "vault",
+      name: "note.txt",
+      mimeType: "text/plain",
+      text: "one"
+    });
+    const updated = await storage.updateText({
+      fileId: file.id,
+      expectedVersion: file.version,
+      mimeType: "text/markdown",
+      text: "two"
+    });
+
+    expect(updated.mimeType).toBe("text/markdown");
+    await expect(storage.readText(file.id)).resolves.toMatchObject({
+      text: "two",
+      file: { mimeType: "text/markdown" }
+    });
+    await expect(
+      storage.move({
+        fileId: file.id,
+        fromParentId: "vault",
+        toParentId: "vault"
+      })
+    ).rejects.toThrow("same-parent move requires a rename");
+  });
+
   it("uses opaque IDs, bounded names, and optimistic versions", async () => {
     const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
     const storage = await LocalDriveAdapter.create(root);

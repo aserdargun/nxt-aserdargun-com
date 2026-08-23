@@ -185,8 +185,6 @@ export class GoogleDriveAdapter implements StoragePort {
     assertSingleParent(before, "Google Drive upload verification failed.");
     if (before.version !== input.expectedVersion)
       throw new DriveContractError("version conflict");
-    if (input.mimeType !== before.mimeType)
-      throw new DriveContractError("Google Drive MIME type change is not allowed.");
     const bytes = new TextEncoder().encode(input.text);
     let response;
     try {
@@ -209,7 +207,7 @@ export class GoogleDriveAdapter implements StoragePort {
       md5(bytes),
       before.version
     );
-    if (!matchesActiveSnapshot(after, before)) {
+    if (!matchesActiveSnapshot(after, before, input.mimeType)) {
       throw new DriveContractError("Google Drive upload verification failed.");
     }
     return after;
@@ -240,13 +238,21 @@ export class GoogleDriveAdapter implements StoragePort {
         "Google Drive ancestry does not match the requested move."
       );
     }
+    const sameParent = input.fromParentId === input.toParentId;
+    if (sameParent && input.newName === undefined) {
+      throw new DriveContractError("same-parent move requires a rename");
+    }
     const request: GoogleDriveUpdateInput = {
       fileId: input.fileId,
       ...(input.newName === undefined
         ? {}
         : { requestBody: { name: input.newName } }),
-      addParents: input.toParentId,
-      removeParents: input.fromParentId,
+      ...(sameParent
+        ? {}
+        : {
+            addParents: input.toParentId,
+            removeParents: input.fromParentId
+          }),
       fields: "id"
     };
     let response;
@@ -476,6 +482,7 @@ const toStoredFile = (raw: unknown, rootId?: string): StoredFile => {
   const mimeType = requireNonEmptyString(file.mimeType);
   const parents = id === rootId ? [] : requireStringArray(file.parents);
   const version = requireNonEmptyString(file.version);
+  assertVersion(version);
   const modifiedTime = requireNonEmptyString(file.modifiedTime);
   const trashed = requireBoolean(file.trashed);
   return {
@@ -506,11 +513,12 @@ const assertSingleParent = (file: StoredFile, message: string): void => {
 
 const matchesActiveSnapshot = (
   after: StoredFile,
-  before: StoredFile
+  before: StoredFile,
+  expectedMimeType: string
 ): boolean =>
   after.id === before.id &&
   after.name === before.name &&
-  after.mimeType === before.mimeType &&
+  after.mimeType === expectedMimeType &&
   !after.trashed &&
   after.parentIds.length === 1 &&
   after.parentIds[0] === before.parentIds[0];
@@ -626,7 +634,7 @@ const assertMimeType = (value: string): void => {
 };
 
 const assertVersion = (value: string): void => {
-  if (!/^\d+$/u.test(value))
+  if (!/^[1-9]\d*$/u.test(value))
     throw new DriveContractError("Invalid Google Drive version.");
 };
 

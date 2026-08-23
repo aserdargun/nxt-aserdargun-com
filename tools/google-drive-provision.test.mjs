@@ -558,11 +558,22 @@ test("callback validation rejects duplicate or ambiguous query parameters withou
   }
 });
 
-test("environment parsing rejects noncanonical key whitespace, duplicates, and injected newlines", () => {
+test("environment parsing canonicalizes CRLF and rejects controls, duplicates, and injected newlines", () => {
+  assert.deepEqual(parseEnvFile("SAFE=ok\r\nSECOND=two\r\n"), {
+    SAFE: "ok",
+    SECOND: "two"
+  });
+  assert.equal(
+    buildEnvFile("SAFE=ok\r\nSECOND=two\r\n", { SAFE: "next" }),
+    "SAFE=next\nSECOND=two\n"
+  );
   for (const source of [
     "  GOOGLE_REFRESH_TOKEN=old\n",
     "\tGOOGLE_REFRESH_TOKEN=old\n",
-    "GOOGLE_REFRESH_TOKEN=one\nGOOGLE_REFRESH_TOKEN=two\n"
+    "GOOGLE_REFRESH_TOKEN=one\nGOOGLE_REFRESH_TOKEN=two\n",
+    "SAFE=ok\rINJECTED=1",
+    "SAFE=ok\0INJECTED=1",
+    "SAFE=ok\u0001INJECTED=1"
   ]) {
     assert.throws(() => parseEnvFile(source), /environment/iu);
     assert.throws(
@@ -574,6 +585,11 @@ test("environment parsing rejects noncanonical key whitespace, duplicates, and i
     () => buildEnvFile("", { GOOGLE_REFRESH_TOKEN: "line-one\nline-two" }),
     /unsafe/iu
   );
+  for (const value of ["one\rINVALID=two", "one\0INVALID=two", "one\tunsafe"])
+    assert.throws(
+      () => buildEnvFile("", { GOOGLE_REFRESH_TOKEN: value }),
+      /unsafe/iu
+    );
 });
 
 test("downloaded Desktop OAuth credential filename patterns are ignored without hiding unrelated JSON", () => {

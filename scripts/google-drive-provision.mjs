@@ -57,12 +57,11 @@ export const systemFileDefinitions = () =>
   }));
 
 export const buildEnvFile = (source, updates) => {
-  if (typeof source !== "string")
-    throw new Error("Environment source must be text.");
-  parseEnvFile(source);
+  const normalizedSource = normalizeEnvSource(source);
+  parseEnvFile(normalizedSource);
   const entries = Object.entries(updates);
   for (const [key, value] of entries) assertEnvEntry(key, value);
-  const lines = source === "" ? [] : source.replace(/\r\n/gu, "\n").split("\n");
+  const lines = normalizedSource === "" ? [] : normalizedSource.split("\n");
   if (lines.at(-1) === "") lines.pop();
   const seen = new Set();
   const replaced = lines.map((line) => {
@@ -91,7 +90,7 @@ export const readEnvFile = async (path) => {
 
 export const parseEnvFile = (source) => {
   const values = {};
-  for (const rawLine of source.replace(/\r\n/gu, "\n").split("\n")) {
+  for (const rawLine of normalizeEnvSource(source).split("\n")) {
     const line = rawLine;
     if (line === "" || line.startsWith("#")) continue;
     const separator = line.indexOf("=");
@@ -436,10 +435,35 @@ const assertEnvEntry = (key, value) => {
   if (
     !ENV_KEY_PATTERN.test(key) ||
     typeof value !== "string" ||
-    /[\r\n\0]/u.test(value)
+    hasUnsafeEnvControl(value, false)
   ) {
     throw new Error("Environment update contains an unsafe key or value.");
   }
+};
+
+const normalizeEnvSource = (source) => {
+  if (typeof source !== "string")
+    throw new Error("Environment source must be text.");
+  const normalized = source.replace(/\r\n/gu, "\n");
+  if (hasUnsafeEnvControl(normalized, true)) {
+    throw new Error("Environment file contains an unsafe control character.");
+  }
+  return normalized;
+};
+
+const hasUnsafeEnvControl = (value, allowLineFeed) => {
+  for (const character of value) {
+    const code = character.codePointAt(0);
+    if (
+      code === 127 ||
+      (code !== undefined &&
+        code < 32 &&
+        !(allowLineFeed && code === 10))
+    ) {
+      return true;
+    }
+  }
+  return false;
 };
 
 const requireEnvValue = (env, key) => {

@@ -183,6 +183,9 @@ export class LocalDriveAdapter implements StoragePort {
       if (file.parentIds.length !== 1 || file.parentIds[0] !== input.fromParentId) {
         throw new Error("from parent does not match file parent");
       }
+      if (input.fromParentId === input.toParentId && input.newName === undefined) {
+        throw new Error("same-parent move requires a rename");
+      }
       const destination = this.getActiveFolder(metadata, input.toParentId);
       if (file.kind === "folder") {
         this.assertMoveDoesNotCycle(metadata, file.id, destination.id);

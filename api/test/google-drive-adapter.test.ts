@@ -477,26 +477,145 @@ describe("GoogleDriveAdapter", () => {
     ).rejects.toThrow("create verification failed");
   });
 
-  it("rejects update MIME changes and any concurrent identity, name, MIME, ancestry, trash, or version change", async () => {
-    let writes = 0;
-    const changedMime = new GoogleDriveAdapter(
+  it("rejects noncanonical create readback versions without surfacing raw IDs", async () => {
+    const cases = [
+      { kind: "folder", version: "0" },
+      { kind: "folder", version: "1.0" },
+      { kind: "text", version: "+1" },
+      { kind: "bytes", version: "01" }
+    ] as const;
+    for (const testCase of cases) {
+      const rawId = `raw-created-${testCase.kind}-id`;
+      const bytes = new Uint8Array([1, 2, 3]);
+      const mimeType =
+        testCase.kind === "folder"
+          ? FOLDER_MIME_TYPE
+          : testCase.kind === "text"
+            ? "text/plain"
+            : "application/octet-stream";
+      const adapter = new GoogleDriveAdapter(
+        createClient({
+          create: async () => ({ data: { id: rawId } }),
+          get: async () => ({
+            data: driveFile({
+              id: rawId,
+              name: "item",
+              mimeType,
+              parents: ["parent-id"],
+              version: testCase.version,
+              size:
+                testCase.kind === "folder"
+                  ? undefined
+                  : testCase.kind === "text"
+                    ? "4"
+                    : "3",
+              md5Checksum:
+                testCase.kind === "folder"
+                  ? undefined
+                  : createHash("md5")
+                      .update(testCase.kind === "text" ? "text" : bytes)
+                      .digest("hex")
+            })
+          })
+        })
+      );
+      let message = "";
+      try {
+        if (testCase.kind === "folder") {
+          await adapter.createFolder({ parentId: "parent-id", name: "item" });
+        } else if (testCase.kind === "text") {
+          await adapter.createText({
+            parentId: "parent-id",
+            name: "item",
+            mimeType,
+            text: "text"
+          });
+        } else {
+          await adapter.createBytes({
+            parentId: "parent-id",
+            name: "item",
+            mimeType,
+            bytes
+          });
+        }
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toContain("version");
+      expect(message).not.toContain(rawId);
+    }
+  });
+
+  it("allows a text MIME change and verifies the exact requested readback MIME", async () => {
+    const updateInputs: unknown[] = [];
+    let metadataReads = 0;
+    const adapter = new GoogleDriveAdapter(
       createClient({
-        get: async () => ({ data: driveFile() }),
-        update: async () => {
-          writes += 1;
+        get: async () => ({
+          data:
+            metadataReads++ === 0
+              ? driveFile({ mimeType: "text/plain" })
+              : driveFile({
+                  mimeType: "text/markdown",
+                  version: "2",
+                  md5Checksum: createHash("md5").update("next").digest("hex")
+                })
+        }),
+        update: async (input) => {
+          updateInputs.push(input);
           return { data: { id: "file-id" } };
         }
       })
     );
     await expect(
-      changedMime.updateText({
+      adapter.updateText({
         fileId: "file-id",
         expectedVersion: "1",
-        mimeType: "text/plain",
+        mimeType: "text/markdown",
         text: "next"
       })
-    ).rejects.toThrow("MIME");
-    expect(writes).toBe(0);
+    ).resolves.toMatchObject({ mimeType: "text/markdown", version: "2" });
+    expect(updateInputs).toEqual([
+      {
+        fileId: "file-id",
+        requestBody: { mimeType: "text/markdown" },
+        media: { mimeType: "text/markdown", body: "next" },
+        fields: "id"
+      }
+    ]);
+
+    let wrongReadbackReads = 0;
+    let wrongReadbackWrites = 0;
+    const wrongReadback = new GoogleDriveAdapter(
+      createClient({
+        get: async () => ({
+          data:
+            wrongReadbackReads++ === 0
+              ? driveFile({ mimeType: "text/plain" })
+              : driveFile({
+                  mimeType: "text/plain",
+                  version: "2",
+                  md5Checksum: createHash("md5").update("next").digest("hex")
+                })
+        }),
+        update: async () => {
+          wrongReadbackWrites += 1;
+          return { data: { id: "file-id" } };
+        }
+      })
+    );
+    await expect(
+      wrongReadback.updateText({
+        fileId: "file-id",
+        expectedVersion: "1",
+        mimeType: "text/markdown",
+        text: "next"
+      })
+    ).rejects.toThrow("upload verification failed");
+    expect(wrongReadbackWrites).toBe(1);
+  });
+
+  it("rejects concurrent update identity, name, MIME, ancestry, trash, or version change", async () => {
 
     const mutations = [
       { id: "different-id" },
@@ -591,6 +710,7 @@ describe("GoogleDriveAdapter", () => {
     }
 
     let metadataReads = 0;
+    const crossParentUpdates: unknown[] = [];
     const renamed = new GoogleDriveAdapter(
       createClient({
         get: async () => ({
@@ -603,7 +723,10 @@ describe("GoogleDriveAdapter", () => {
                   version: "2"
                 })
         }),
-        update: async () => ({ data: { id: "file-id" } })
+        update: async (input) => {
+          crossParentUpdates.push(input);
+          return { data: { id: "file-id" } };
+        }
       })
     );
     await expect(
@@ -614,6 +737,76 @@ describe("GoogleDriveAdapter", () => {
         newName: "renamed.md"
       })
     ).resolves.toMatchObject({ name: "renamed.md", parentIds: ["to-parent"] });
+    expect(crossParentUpdates).toEqual([
+      {
+        fileId: "file-id",
+        requestBody: { name: "renamed.md" },
+        addParents: "to-parent",
+        removeParents: "from-parent",
+        fields: "id"
+      }
+    ]);
+  });
+
+  it("renames within one parent without contradictory parent mutations", async () => {
+    const updates: unknown[] = [];
+    let metadataReads = 0;
+    const adapter = new GoogleDriveAdapter(
+      createClient({
+        get: async () => ({
+          data:
+            metadataReads++ === 0
+              ? driveFile({ parents: ["same-parent"] })
+              : driveFile({
+                  name: "renamed.md",
+                  parents: ["same-parent"],
+                  version: "2"
+                })
+        }),
+        update: async (input) => {
+          updates.push(input);
+          return { data: { id: "file-id" } };
+        }
+      })
+    );
+
+    await expect(
+      adapter.move({
+        fileId: "file-id",
+        fromParentId: "same-parent",
+        toParentId: "same-parent",
+        newName: "renamed.md"
+      })
+    ).resolves.toMatchObject({ name: "renamed.md", parentIds: ["same-parent"] });
+    expect(updates).toEqual([
+      {
+        fileId: "file-id",
+        requestBody: { name: "renamed.md" },
+        fields: "id"
+      }
+    ]);
+  });
+
+  it("rejects a same-parent move without a rename before writing", async () => {
+    let writes = 0;
+    const adapter = new GoogleDriveAdapter(
+      createClient({
+        get: async () => ({ data: driveFile({ parents: ["same-parent"] }) }),
+        update: async () => {
+          writes += 1;
+          return { data: { id: "file-id" } };
+        }
+      })
+    );
+
+    await expect(
+      adapter.move({
+        fileId: "file-id",
+        fromParentId: "same-parent",
+        toParentId: "same-parent"
+      })
+    ).rejects.toThrow("same-parent move requires a rename");
+    expect(writes).toBe(0);
   });
 
   it("verifies trash identity, name, MIME, ancestry, prior active state, and newer version", async () => {
