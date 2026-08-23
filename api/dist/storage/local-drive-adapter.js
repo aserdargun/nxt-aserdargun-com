@@ -83,6 +83,7 @@ export class LocalDriveAdapter {
             assertMimeType(input.mimeType);
             const metadata = await this.loadMetadata();
             this.getActiveFolder(metadata, input.parentId);
+            await this.reconcileUncommittedCreate(metadata, this.nextFileId(metadata));
             const file = this.newFile(metadata, input.parentId, input.name, input.mimeType, "file", input.bytes.byteLength);
             await this.writeRevision(metadata, file.id, file.version, input.bytes);
             await this.saveMetadata(metadata);
@@ -136,10 +137,17 @@ export class LocalDriveAdapter {
             if (file.kind === "root") {
                 throw new Error("cannot trash configured root");
             }
+            const originalMetadata = cloneMetadata(metadata);
             this.bumpFile(metadata, file, { trashed: true });
             await this.saveMetadata(metadata);
-            if (file.kind === "file") {
-                await this.moveContentToTrash(file.id).catch(() => undefined);
+            try {
+                if (file.kind === "file") {
+                    await this.moveContentToTrash(file.id);
+                }
+            }
+            catch (error) {
+                await this.saveMetadata(originalMetadata, false);
+                throw error;
             }
             return this.toStoredFile(file);
         });
@@ -186,12 +194,14 @@ export class LocalDriveAdapter {
         const parsed = JSON.parse(await readFile(this.metadataPath(), "utf8"));
         return assertMetadata(parsed);
     }
-    async saveMetadata(metadata) {
-        await this.beforeMetadataWrite?.();
+    async saveMetadata(metadata, invokeHook = true) {
+        if (invokeHook) {
+            await this.beforeMetadataWrite?.();
+        }
         await this.atomicWrite(this.metadataPath(), new TextEncoder().encode(`${JSON.stringify(metadata, null, 2)}\n`));
     }
     newFile(metadata, parentId, name, mimeType, kind, size) {
-        const id = `file_${(metadata.sequence + 1).toString(36)}`;
+        const id = this.nextFileId(metadata);
         if (metadata.files[id] !== undefined) {
             throw new Error("duplicate deterministic file ID");
         }
@@ -212,6 +222,9 @@ export class LocalDriveAdapter {
         metadata.revisions[id] = [];
         metadata.generation += 1;
         return file;
+    }
+    nextFileId(metadata) {
+        return `file_${(metadata.sequence + 1).toString(36)}`;
     }
     bumpFile(metadata, file, changes) {
         Object.assign(file, changes);
@@ -278,6 +291,41 @@ export class LocalDriveAdapter {
     }
     async writeContent(fileId, bytes) {
         await this.atomicWrite(this.contentPath(fileId), bytes);
+    }
+    async reconcileUncommittedCreate(metadata, fileId) {
+        if (metadata.files[fileId] !== undefined) {
+            return;
+        }
+        const revisionDirectory = join(this.revisionsDirectory(), fileId);
+        try {
+            const revisionStat = await lstat(revisionDirectory);
+            if (revisionStat.isSymbolicLink() || !revisionStat.isDirectory()) {
+                throw new Error("unsafe orphan revision path");
+            }
+        }
+        catch (error) {
+            if (isNotFound(error)) {
+                return;
+            }
+            throw error;
+        }
+        const archiveDirectory = join(this.root, ".orphaned-revisions");
+        await ensureDirectory(archiveDirectory);
+        let archiveIndex = 1;
+        for (;;) {
+            const archivePath = join(archiveDirectory, `${fileId}-${archiveIndex}`);
+            try {
+                await lstat(archivePath);
+                archiveIndex += 1;
+            }
+            catch (error) {
+                if (!isNotFound(error)) {
+                    throw error;
+                }
+                await rename(revisionDirectory, archivePath);
+                return;
+            }
+        }
     }
     async writeRevision(metadata, fileId, revisionId, bytes) {
         const revisionDirectory = join(this.revisionsDirectory(), fileId);
@@ -397,6 +445,7 @@ const nextTime = (metadata) => {
     metadata.sequence += 1;
     return new Date(metadata.sequence).toISOString();
 };
+const cloneMetadata = (metadata) => JSON.parse(JSON.stringify(metadata));
 const assertMetadata = (value) => {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
         throw new Error("invalid local metadata");

@@ -110,6 +110,7 @@ export class LocalDriveAdapter implements StoragePort {
       assertMimeType(input.mimeType);
       const metadata = await this.loadMetadata();
       this.getActiveFolder(metadata, input.parentId);
+      await this.reconcileUncommittedCreate(metadata, this.nextFileId(metadata));
       const file = this.newFile(metadata, input.parentId, input.name, input.mimeType, "file", input.bytes.byteLength);
       await this.writeRevision(metadata, file.id, file.version, input.bytes);
       await this.saveMetadata(metadata);
@@ -166,10 +167,16 @@ export class LocalDriveAdapter implements StoragePort {
       if (file.kind === "root") {
         throw new Error("cannot trash configured root");
       }
+      const originalMetadata = cloneMetadata(metadata);
       this.bumpFile(metadata, file, { trashed: true });
       await this.saveMetadata(metadata);
-      if (file.kind === "file") {
-        await this.moveContentToTrash(file.id).catch(() => undefined);
+      try {
+        if (file.kind === "file") {
+          await this.moveContentToTrash(file.id);
+        }
+      } catch (error) {
+        await this.saveMetadata(originalMetadata, false);
+        throw error;
       }
       return this.toStoredFile(file);
     });
@@ -223,13 +230,15 @@ export class LocalDriveAdapter implements StoragePort {
     return assertMetadata(parsed);
   }
 
-  private async saveMetadata(metadata: LocalMetadata): Promise<void> {
-    await this.beforeMetadataWrite?.();
+  private async saveMetadata(metadata: LocalMetadata, invokeHook = true): Promise<void> {
+    if (invokeHook) {
+      await this.beforeMetadataWrite?.();
+    }
     await this.atomicWrite(this.metadataPath(), new TextEncoder().encode(`${JSON.stringify(metadata, null, 2)}\n`));
   }
 
   private newFile(metadata: LocalMetadata, parentId: string, name: string, mimeType: string, kind: "folder" | "file", size: number): LocalFile {
-    const id = `file_${(metadata.sequence + 1).toString(36)}`;
+    const id = this.nextFileId(metadata);
     if (metadata.files[id] !== undefined) {
       throw new Error("duplicate deterministic file ID");
     }
@@ -250,6 +259,10 @@ export class LocalDriveAdapter implements StoragePort {
     metadata.revisions[id] = [];
     metadata.generation += 1;
     return file;
+  }
+
+  private nextFileId(metadata: LocalMetadata): string {
+    return `file_${(metadata.sequence + 1).toString(36)}`;
   }
 
   private bumpFile(metadata: LocalMetadata, file: LocalFile, changes: Partial<Pick<LocalFile, "name" | "mimeType" | "parentIds" | "size" | "trashed">>): void {
@@ -324,6 +337,41 @@ export class LocalDriveAdapter implements StoragePort {
 
   private async writeContent(fileId: string, bytes: Uint8Array): Promise<void> {
     await this.atomicWrite(this.contentPath(fileId), bytes);
+  }
+
+  private async reconcileUncommittedCreate(metadata: LocalMetadata, fileId: string): Promise<void> {
+    if (metadata.files[fileId] !== undefined) {
+      return;
+    }
+    const revisionDirectory = join(this.revisionsDirectory(), fileId);
+    try {
+      const revisionStat = await lstat(revisionDirectory);
+      if (revisionStat.isSymbolicLink() || !revisionStat.isDirectory()) {
+        throw new Error("unsafe orphan revision path");
+      }
+    } catch (error) {
+      if (isNotFound(error)) {
+        return;
+      }
+      throw error;
+    }
+
+    const archiveDirectory = join(this.root, ".orphaned-revisions");
+    await ensureDirectory(archiveDirectory);
+    let archiveIndex = 1;
+    for (;;) {
+      const archivePath = join(archiveDirectory, `${fileId}-${archiveIndex}`);
+      try {
+        await lstat(archivePath);
+        archiveIndex += 1;
+      } catch (error) {
+        if (!isNotFound(error)) {
+          throw error;
+        }
+        await rename(revisionDirectory, archivePath);
+        return;
+      }
+    }
   }
 
   private async writeRevision(metadata: LocalMetadata, fileId: string, revisionId: string, bytes: Uint8Array): Promise<void> {
@@ -454,6 +502,8 @@ const nextTime = (metadata: LocalMetadata): string => {
   metadata.sequence += 1;
   return new Date(metadata.sequence).toISOString();
 };
+
+const cloneMetadata = (metadata: LocalMetadata): LocalMetadata => JSON.parse(JSON.stringify(metadata)) as LocalMetadata;
 
 const assertMetadata = (value: unknown): LocalMetadata => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {

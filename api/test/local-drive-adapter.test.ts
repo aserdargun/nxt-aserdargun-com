@@ -122,6 +122,31 @@ describe("LocalDriveAdapter", () => {
     expect(await readFile(join(root, ".revisions", file.id, "2"), "utf8")).toBe("two");
   });
 
+  it("reconciles a failed pre-commit create before reusing its deterministic ID", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    let rejectNextMetadataSave = false;
+    const storage = await LocalDriveAdapter.create(root, {
+      beforeMetadataWrite: () => {
+        if (rejectNextMetadataSave) {
+          rejectNextMetadataSave = false;
+          throw new Error("injected metadata failure");
+        }
+      }
+    });
+
+    rejectNextMetadataSave = true;
+    await expect(
+      storage.createText({ parentId: "vault", name: "failed.md", mimeType: "text/markdown", text: "failed content" })
+    ).rejects.toThrow("injected metadata failure");
+    expect((await storage.listChildren({ parentId: "vault", pageSize: 10 })).files).toEqual([]);
+
+    const created = await storage.createText({ parentId: "vault", name: "recovered.md", mimeType: "text/markdown", text: "recovered content" });
+    expect(created.id).toBe("file_1");
+    expect(created.name).toBe("recovered.md");
+    await expect(storage.readText(created.id)).resolves.toMatchObject({ text: "recovered content" });
+    expect(await readFile(join(root, ".revisions", created.id, "1"), "utf8")).toBe("recovered content");
+  });
+
   it("never overwrites an existing immutable revision", async () => {
     const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
     const storage = await LocalDriveAdapter.create(root);
@@ -154,5 +179,17 @@ describe("LocalDriveAdapter", () => {
     const file = await storage.createFolder({ parentId: "vault", name: "folder" });
 
     expect(file).not.toHaveProperty("kind");
+  });
+
+  it("rolls back metadata when moving active content to Trash fails after commit staging", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
+    await mkdir(join(root, ".trash", file.id));
+
+    await expect(storage.trash(file.id)).rejects.toThrow("trash destination already exists");
+    expect((await storage.get(file.id)).trashed).toBe(false);
+    await expect(storage.readText(file.id)).resolves.toMatchObject({ text: "one" });
+    await expect(access(join(root, ".content", file.id))).resolves.toBeUndefined();
   });
 });

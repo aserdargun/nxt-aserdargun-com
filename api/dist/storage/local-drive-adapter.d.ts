@@ -65,6 +65,7 @@ export declare class LocalDriveAdapter implements StoragePort {
     private loadMetadata;
     private saveMetadata;
     private newFile;
+    private nextFileId;
     private bumpFile;
     private getFile;
     private getActiveFile;
@@ -73,6 +74,7 @@ export declare class LocalDriveAdapter implements StoragePort {
     private getContentRevision;
     private assertMoveDoesNotCycle;
     private writeContent;
+    private reconcileUncommittedCreate;
     private writeRevision;
     private moveContentToTrash;
     private readRevision;
