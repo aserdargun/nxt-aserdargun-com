@@ -146,3 +146,51 @@ All commands exited 0 under Node 22:
 
 Fix commit: `0185420909d4bd8bbc918b4819c965672a65060e` —
 `fix: harden local storage transactions`.
+
+## Fix round 2 — create reconciliation and Trash rollback
+
+### RED evidence
+
+Added two focused local-adapter regressions and ran under Node 22:
+
+```text
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH \
+  pnpm --filter @nxt/api test -- local-drive-adapter
+```
+
+The command failed as intended:
+
+- a failed create left `file_1/1` as an uncommitted immutable revision, so a
+  later create with the reused deterministic ID and different content failed
+  with `immutable revision already exists`; and
+- a pre-existing `.trash/<file-id>` destination made the post-metadata content
+  move fail, but `trash()` swallowed that error and returned a trashed file.
+
+### Implementation
+
+- Before a new file claims its deterministic ID, the adapter identifies any
+  revision directory not represented in metadata and moves it, without
+  deletion, to the deterministic `.orphaned-revisions/<file-id>-<n>` archive.
+  The next create can then write its own exclusive revision, while successful
+  metadata-backed revisions remain immutable.
+- Trash now snapshots its metadata, commits the trashed state, and requires the
+  active-cache move to complete. A move error restores the original metadata
+  without invoking test fault hooks and rejects the operation; the active
+  content therefore remains readable and untrashed. A success is returned only
+  after the expected `.trash/<file-id>` content artifact exists.
+
+### GREEN validation
+
+All commands exited 0 under Node 22:
+
+- `pnpm --filter @nxt/api test -- local-drive-adapter` — 2 files, 16 tests.
+- `pnpm --filter @nxt/api typecheck`
+- `pnpm --filter @nxt/api build`
+- `pnpm lint`
+- `pnpm test` — contracts 6, domain 15, API 16 tests.
+- `pnpm typecheck`
+- `pnpm build`
+- `git diff --check`
+
+Fix commit: `6610438da0ad12e999cae00bc94cdfb40198b40f` —
+`fix: recover local storage transactions`.
