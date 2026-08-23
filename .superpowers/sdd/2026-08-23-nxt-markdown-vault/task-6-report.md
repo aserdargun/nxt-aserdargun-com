@@ -367,3 +367,80 @@ regenerated under Node `v22.23.1`.
 
 None. Live Drive integration remains intentionally unexecuted and requires a
 separate explicit authorization.
+
+## Fix round 3
+
+### Status and commit
+
+DONE. The Important C1-control finding and Minor live child-ID finding were
+addressed and committed as `a328474cae093e75c313120cfea9ed1a90702afe` —
+`fix: reject C1 controls in drive setup`.
+
+This round did not run a live OAuth flow, open a browser, bind a callback
+listener, make a Google/Drive/network request, read credentials, access
+`.env.local`, or create a Drive folder/file. Every API test invocation removed
+`NXT_DRIVE_INTEGRATION`, so the live integration body remained skipped.
+
+### Fixes
+
+- Environment source and update-value validation now reject every C0 and C1
+  control character: U+0000 through U+001F and U+007F through U+009F. Existing
+  source permits only LF as its canonical line separator after CRLF-to-LF
+  conversion; individual update values permit no LF. Focused cases cover
+  U+0080, U+0085, and U+009F through both `parseEnvFile` and `buildEnvFile`.
+- U+00A0 and ordinary Turkish, CJK, and emoji content remain accepted, proving
+  the range check does not reject normal Unicode.
+- The skipped live test now calls an extracted pure child guard whose ID check
+  rejects all C0/C1 controls. Unit coverage executes that exact helper locally
+  without enabling integration and also retains its bounded-length, uniqueness,
+  active, non-shortcut, and exact-direct-parent checks.
+
+### Fix-round-3 RED evidence
+
+Every Node/pnpm command used Node `v22.23.1` through the required PATH prefix.
+
+```text
+node --test tools/google-drive-provision.test.mjs tools/google-drive-runtime.test.mjs
+```
+
+Exit `1`: 17 passed and 1 failed because environment parsing/building accepted
+a C1 control.
+
+```text
+env -u NXT_DRIVE_INTEGRATION pnpm --filter @nxt/api test -- google-drive-live-guard google-drive-adapter
+```
+
+Exit `1`: 189 passed, 1 failed, and 1 live test skipped because the exact live
+child guard accepted a C1-bearing Drive ID.
+
+### Fix-round-3 GREEN evidence
+
+```text
+node --test tools/google-drive-provision.test.mjs tools/google-drive-runtime.test.mjs
+```
+
+Exit `0`: all 18 tool tests passed.
+
+```text
+env -u NXT_DRIVE_INTEGRATION pnpm --filter @nxt/api test -- google-drive-live-guard google-drive-adapter google-drive-client local-drive-adapter root-boundary
+```
+
+Exit `0`: 191 API tests passed and exactly 1 live test skipped.
+
+Final repository validation:
+
+```text
+pnpm lint
+pnpm typecheck
+pnpm build
+env -u NXT_DRIVE_INTEGRATION pnpm test
+git diff --check
+```
+
+All exited `0`. Root tests passed contracts 6, domain 15, and API 191, for 212
+passing tests plus the one expected live skip.
+
+### Fix-round-3 concerns
+
+None. Live Drive integration remains intentionally unexecuted and requires a
+separate explicit authorization.
