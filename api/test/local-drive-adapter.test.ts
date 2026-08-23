@@ -297,7 +297,7 @@ describe("LocalDriveAdapter", () => {
     expect((await readdir(join(root, ".lock-history"))).length).toBeGreaterThanOrEqual(2);
   });
 
-  it("does not finalize a Trash journal against a bogus regular file", async () => {
+  it("does not finalize a Trash journal against a bogus regular file and archives the untrusted artifact", async () => {
     const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
     const storage = await LocalDriveAdapter.create(root);
     const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
@@ -319,7 +319,9 @@ describe("LocalDriveAdapter", () => {
     const recovered = await LocalDriveAdapter.create(root);
     expect((await recovered.get(file.id)).trashed).toBe(false);
     await expect(recovered.readText(file.id)).resolves.toMatchObject({ text: "one" });
-    expect(await readFile(join(root, ".trash", file.id), "utf8")).toBe("bogus");
+    await expect(access(join(root, ".trash", file.id))).rejects.toThrow();
+    const [historyEntry] = await readdir(join(root, ".transaction-history"));
+    expect(await readFile(join(root, ".transaction-history", historyEntry as string, "artifact"), "utf8")).toBe("bogus");
   });
 
   it("writes Trash from the immutable revision rather than a mutable active cache", async () => {
@@ -360,6 +362,202 @@ describe("LocalDriveAdapter", () => {
     await writeFile(join(root, ".metadata.json"), '{"schemaVersion":1,"sequence":0,"generation":0,"files":[],"revisions":[]}\n');
 
     await expect(LocalDriveAdapter.create(root)).rejects.toThrow("invalid local metadata");
+  });
+
+  it("rejects persisted parent cycles during adapter creation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const first = await storage.createFolder({ parentId: "vault", name: "first" });
+    const second = await storage.createFolder({ parentId: first.id, name: "second" });
+    const metadata = JSON.parse(await readFile(join(root, ".metadata.json"), "utf8"));
+    metadata.files[first.id].parentIds = [second.id];
+    await writeFile(join(root, ".metadata.json"), `${JSON.stringify(metadata)}\n`);
+
+    await expect(LocalDriveAdapter.create(root)).rejects.toThrow("invalid local metadata");
+  });
+
+  it("rejects a version one file whose active content revision is two", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
+    const metadata = JSON.parse(await readFile(join(root, ".metadata.json"), "utf8"));
+    metadata.files[file.id].contentRevision = "2";
+    metadata.revisions[file.id].push({ id: "2", modifiedTime: file.modifiedTime });
+    await writeFile(join(root, ".revisions", file.id, "2"), "future revision", { flag: "wx" });
+    await writeFile(join(root, ".metadata.json"), `${JSON.stringify(metadata)}\n`);
+
+    await expect(LocalDriveAdapter.create(root)).rejects.toThrow("invalid local metadata");
+  });
+
+  it("recovers a staged legacy unbound file journal without losing its journal or artifact", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
+    const originalMetadata = JSON.parse(await readFile(join(root, ".metadata.json"), "utf8"));
+    const stagedMetadata = structuredClone(originalMetadata);
+    stagedMetadata.sequence = 2;
+    stagedMetadata.generation = 2;
+    stagedMetadata.files[file.id].trashed = true;
+    stagedMetadata.files[file.id].version = "2";
+    stagedMetadata.files[file.id].modifiedTime = "1970-01-01T00:00:00.002Z";
+    await writeFile(join(root, ".metadata.json"), `${JSON.stringify(stagedMetadata)}\n`);
+    await writeFile(join(root, ".trash", file.id), "unbound staged artifact", { flag: "wx" });
+    await writeFile(
+      join(root, ".trash-rollback.json"),
+      `${JSON.stringify({ schemaVersion: 1, fileId: file.id, originalMetadata })}\n`,
+      { flag: "wx" }
+    );
+
+    const recovered = await LocalDriveAdapter.create(root);
+    expect((await recovered.get(file.id)).trashed).toBe(false);
+    await expect(recovered.readText(file.id)).resolves.toMatchObject({ text: "one" });
+    await expect(access(join(root, ".trash", file.id))).rejects.toThrow();
+
+    const historyEntries = await readdir(join(root, ".transaction-history"));
+    expect(historyEntries).toHaveLength(1);
+    expect(await readFile(join(root, ".transaction-history", historyEntries[0] as string, "artifact"), "utf8")).toBe("unbound staged artifact");
+    expect(JSON.parse(await readFile(join(root, ".transaction-history", historyEntries[0] as string, "journal.json"), "utf8"))).toMatchObject({
+      schemaVersion: 1,
+      fileId: file.id
+    });
+
+    const restarted = await LocalDriveAdapter.create(root);
+    await expect(restarted.readText(file.id)).resolves.toMatchObject({ text: "one" });
+    expect(await readdir(join(root, ".transaction-history"))).toEqual(historyEntries);
+  });
+
+  it("trashes a file from its immutable revision when the mutable cache is missing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "authoritative" });
+    await rename(join(root, ".content", file.id), join(root, "withheld-cache"));
+
+    await storage.trash(file.id);
+
+    expect(await readFile(join(root, ".trash", file.id), "utf8")).toBe("authoritative");
+    expect(await readFile(join(root, ".revisions", file.id, "1"), "utf8")).toBe("authoritative");
+  });
+
+  it("trashes verified revision bytes even when the mutable cache is corrupt", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "authoritative" });
+    await rename(join(root, ".content", file.id), join(root, "original-cache"));
+    await mkdir(join(root, ".content", file.id));
+
+    await storage.trash(file.id);
+
+    expect(await readFile(join(root, ".trash", file.id), "utf8")).toBe("authoritative");
+    expect(await readFile(join(root, ".revisions", file.id, "1"), "utf8")).toBe("authoritative");
+  });
+
+  it("persists the explicit file Trash state sequence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
+
+    await storage.trash(file.id);
+
+    const stateEntries = await readdir(join(root, ".transaction-state-history"));
+    const preservedStates = await Promise.all(
+      stateEntries.sort().map(async (entry) =>
+        JSON.parse(await readFile(join(root, ".transaction-state-history", entry, "journal.json"), "utf8")).state as string
+      )
+    );
+    expect(preservedStates).toEqual(["prepared", "metadata-staged", "artifact-verified"]);
+    const [historyEntry] = await readdir(join(root, ".transaction-history"));
+    expect(JSON.parse(await readFile(join(root, ".transaction-history", historyEntry as string, "journal.json"), "utf8"))).toMatchObject({
+      schemaVersion: 2,
+      state: "finalized"
+    });
+  });
+
+  it("resumes a metadata-staged file Trash through verification and finalization after restart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
+    const originalMetadata = JSON.parse(await readFile(join(root, ".metadata.json"), "utf8"));
+    const stagedMetadata = structuredClone(originalMetadata);
+    stagedMetadata.sequence = 2;
+    stagedMetadata.generation = 2;
+    stagedMetadata.files[file.id].trashed = true;
+    stagedMetadata.files[file.id].version = "2";
+    stagedMetadata.files[file.id].modifiedTime = "1970-01-01T00:00:00.002Z";
+    const descriptor = { size: 3, checksum: createHash("sha256").update("one").digest("hex") };
+    await writeFile(join(root, ".metadata.json"), `${JSON.stringify(stagedMetadata)}\n`);
+    await writeFile(join(root, ".trash", file.id), "one", { flag: "wx" });
+    await writeFile(
+      join(root, ".trash-rollback.json"),
+      `${JSON.stringify({
+        schemaVersion: 2,
+        operation: "trash",
+        itemKind: "file",
+        state: "metadata-staged",
+        fileId: file.id,
+        originalMetadata,
+        content: descriptor
+      })}\n`,
+      { flag: "wx" }
+    );
+    const recovered = await LocalDriveAdapter.create(root);
+
+    expect((await recovered.get(file.id)).trashed).toBe(true);
+    expect(await readFile(join(root, ".trash", file.id), "utf8")).toBe("one");
+    const stateEntries = await readdir(join(root, ".transaction-state-history"));
+    const preservedStates = await Promise.all(
+      stateEntries.sort().map(async (entry) =>
+        JSON.parse(await readFile(join(root, ".transaction-state-history", entry, "journal.json"), "utf8")).state as string
+      )
+    );
+    expect(preservedStates).toEqual(["metadata-staged", "artifact-verified"]);
+    const [historyEntry] = await readdir(join(root, ".transaction-history"));
+    expect(JSON.parse(await readFile(join(root, ".transaction-history", historyEntry as string, "journal.json"), "utf8"))).toMatchObject({
+      schemaVersion: 2,
+      state: "finalized",
+      itemKind: "file"
+    });
+  });
+
+  it("rolls back a metadata-staged file Trash with no verifiable artifact after restart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
+    const originalMetadata = JSON.parse(await readFile(join(root, ".metadata.json"), "utf8"));
+    const stagedMetadata = structuredClone(originalMetadata);
+    stagedMetadata.sequence = 2;
+    stagedMetadata.generation = 2;
+    stagedMetadata.files[file.id].trashed = true;
+    stagedMetadata.files[file.id].version = "2";
+    stagedMetadata.files[file.id].modifiedTime = "1970-01-01T00:00:00.002Z";
+    await writeFile(join(root, ".metadata.json"), `${JSON.stringify(stagedMetadata)}\n`);
+    await writeFile(
+      join(root, ".trash-rollback.json"),
+      `${JSON.stringify({
+        schemaVersion: 2,
+        operation: "trash",
+        itemKind: "file",
+        state: "metadata-staged",
+        fileId: file.id,
+        originalMetadata,
+        content: { size: 3, checksum: createHash("sha256").update("one").digest("hex") }
+      })}\n`,
+      { flag: "wx" }
+    );
+    const recovered = await LocalDriveAdapter.create(root);
+
+    expect((await recovered.get(file.id)).trashed).toBe(false);
+    await expect(recovered.readText(file.id)).resolves.toMatchObject({ text: "one" });
+    const [stateEntry] = await readdir(join(root, ".transaction-state-history"));
+    expect(JSON.parse(await readFile(join(root, ".transaction-state-history", stateEntry as string, "journal.json"), "utf8"))).toMatchObject({
+      schemaVersion: 2,
+      state: "metadata-staged"
+    });
+    const [historyEntry] = await readdir(join(root, ".transaction-history"));
+    expect(JSON.parse(await readFile(join(root, ".transaction-history", historyEntry as string, "journal.json"), "utf8"))).toMatchObject({
+      schemaVersion: 2,
+      state: "rolled-back",
+      itemKind: "file"
+    });
   });
 
   it("refuses a journal swapped to a symlink before the no-follow read", async () => {

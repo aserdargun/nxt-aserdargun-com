@@ -1,9 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readFile, realpath, rename, rmdir, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, open, readFile, realpath, rename, rmdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import type { StoragePort, StoredFile } from "./storage-port.js";
+import {
+  TRASH_TRANSACTION_SCHEMA_VERSION,
+  isTrashTransactionState,
+  transitionTrashTransaction,
+  type LegacyTrashJournal,
+  type TrashContentDescriptor,
+  type TrashTransaction,
+  type TrashTransactionState
+} from "./trash-transaction.js";
 
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const MAX_FILE_ID_LENGTH = 512;
@@ -21,12 +30,9 @@ type LocalMetadata = {
   revisions: Record<string, LocalRevision[]>;
 };
 type PageCursor = { parentId: string; offset: number; generation: number };
-type TrashRollbackJournal = {
-  schemaVersion: 1;
-  fileId: string;
-  originalMetadata: LocalMetadata;
-  expectedContent?: { size: number; checksum: string };
-};
+type LoadedTrashJournal =
+  | { format: "legacy"; journal: LegacyTrashJournal<LocalMetadata> }
+  | { format: "current"; journal: TrashTransaction<LocalMetadata> };
 
 export type LocalDriveAdapterOptions = {
   beforeMetadataWrite?: () => void | Promise<void>;
@@ -194,24 +200,46 @@ export class LocalDriveAdapter implements StoragePort {
       const originalMetadata = cloneMetadata(metadata);
       const authoritativeBytes = file.kind === "file" ? await this.readRevision(file.id, this.getContentRevision(file)) : undefined;
       const expectedContent = authoritativeBytes === undefined ? undefined : contentDescriptor(authoritativeBytes);
-      await this.saveTrashRollbackJournal({
-        schemaVersion: 1,
-        fileId: file.id,
-        originalMetadata,
-        ...(expectedContent === undefined ? {} : { expectedContent })
-      });
-      this.bumpFile(metadata, file, { trashed: true });
-      await this.saveMetadata(metadata, "normal");
+      let transaction: TrashTransaction<LocalMetadata> =
+        file.kind === "file"
+          ? {
+              schemaVersion: TRASH_TRANSACTION_SCHEMA_VERSION,
+              operation: "trash",
+              itemKind: "file",
+              state: "prepared",
+              fileId: file.id,
+              originalMetadata,
+              content: expectedContent as TrashContentDescriptor
+            }
+          : {
+              schemaVersion: TRASH_TRANSACTION_SCHEMA_VERSION,
+              operation: "trash",
+              itemKind: "folder",
+              state: "prepared",
+              fileId: file.id,
+              originalMetadata
+            };
+      await this.saveTrashTransaction(transaction);
       try {
-        if (file.kind === "file") {
-          await this.moveContentToTrash(file.id, authoritativeBytes as Uint8Array, expectedContent as { size: number; checksum: string });
+        this.bumpFile(metadata, file, { trashed: true });
+        await this.saveMetadata(metadata, "normal");
+        transaction = await this.advanceTrashTransaction(transaction, "metadata-staged");
+        if (transaction.itemKind === "file") {
+          await this.writeVerifiedTrashArtifact(transaction.fileId, authoritativeBytes as Uint8Array, transaction.content);
         }
+        if (!(await this.isSuccessfulTrash(transaction, metadata))) {
+          throw new Error("Trash transaction could not be verified");
+        }
+        transaction = await this.advanceTrashTransaction(transaction, "artifact-verified");
       } catch (error) {
-        await this.saveMetadata(originalMetadata, "rollback");
-        await this.archiveTrashRollbackJournal();
+        await this.rollbackTrashTransaction(transaction, "rollback");
         throw error;
       }
-      await this.archiveTrashRollbackJournal();
+      if (transaction.itemKind === "file") {
+        await this.archiveActiveCache(this.contentPath(file.id), file.id).catch(() => undefined);
+      }
+      transaction = await this.advanceTrashTransaction(transaction, "finalized");
+      await this.archiveTrashTransaction(transaction.fileId, false);
       return this.toStoredFile(file);
     });
   }
@@ -246,7 +274,7 @@ export class LocalDriveAdapter implements StoragePort {
         throw new Error("unsafe metadata path");
       }
       await this.loadMetadata();
-      await this.recoverTrashRollback();
+      await this.recoverTrashTransaction();
     });
   }
 
@@ -262,7 +290,7 @@ export class LocalDriveAdapter implements StoragePort {
   private read<T>(operation: (metadata: LocalMetadata) => Promise<T> | T): Promise<T> {
     return this.run(() =>
       this.withRootLock(async () => {
-        await this.recoverTrashRollback();
+        await this.recoverTrashTransaction();
         return operation(await this.loadMetadata());
       })
     );
@@ -272,7 +300,7 @@ export class LocalDriveAdapter implements StoragePort {
     return this.run(() =>
       this.withRootLock(async () => {
         await this.beforeMutationLoad?.();
-        await this.recoverTrashRollback();
+        await this.recoverTrashTransaction();
         return operation(await this.loadMetadata());
       })
     );
@@ -445,26 +473,129 @@ export class LocalDriveAdapter implements StoragePort {
     }
   }
 
-  private async recoverTrashRollback(): Promise<void> {
-    const journal = await this.loadTrashRollbackJournal();
-    if (journal === undefined) {
+  private async recoverTrashTransaction(): Promise<void> {
+    const loaded = await this.loadTrashJournal();
+    if (loaded === undefined) {
       return;
     }
-    const currentMetadata = await this.loadMetadata();
-    const currentFile = currentMetadata.files[journal.fileId];
-    const finalTrashPath = this.trashContentPath(journal.fileId);
-    const committed = currentFile?.trashed === true && (currentFile.kind !== "file" || (journal.expectedContent !== undefined && (await matchesContentDescriptor(finalTrashPath, journal.expectedContent))));
-    if (!committed) {
-      await this.saveMetadata(journal.originalMetadata, "recovery");
+    if (loaded.format === "legacy") {
+      await this.assertRestorableOriginalMetadata(loaded.journal);
+      await this.saveMetadata(loaded.journal.originalMetadata, "recovery");
+      await this.archiveTrashTransaction(loaded.journal.fileId, true);
+      return;
     }
-    await this.archiveTrashRollbackJournal();
+
+    let transaction = loaded.journal;
+    if (transaction.state === "rolled-back") {
+      await this.assertRestorableOriginalMetadata(transaction);
+      await this.saveMetadata(transaction.originalMetadata, "recovery");
+      await this.archiveTrashTransaction(transaction.fileId, true);
+      return;
+    }
+
+    const currentMetadata = await this.loadMetadata();
+    if (!(await this.isSuccessfulTrash(transaction, currentMetadata))) {
+      await this.rollbackTrashTransaction(transaction, "recovery");
+      return;
+    }
+    if (transaction.state === "prepared") {
+      transaction = await this.advanceTrashTransaction(transaction, "metadata-staged");
+    }
+    if (transaction.state === "metadata-staged") {
+      transaction = await this.advanceTrashTransaction(transaction, "artifact-verified");
+    }
+    if (transaction.state === "artifact-verified") {
+      transaction = await this.advanceTrashTransaction(transaction, "finalized");
+    }
+    await this.archiveTrashTransaction(transaction.fileId, false);
   }
 
-  private async saveTrashRollbackJournal(journal: TrashRollbackJournal): Promise<void> {
-    await this.atomicWrite(this.trashRollbackJournalPath(), new TextEncoder().encode(`${JSON.stringify(journal, null, 2)}\n`));
+  private async saveTrashTransaction(transaction: TrashTransaction<LocalMetadata>): Promise<void> {
+    await this.preserveCurrentTrashJournalState();
+    await this.atomicWrite(this.trashRollbackJournalPath(), new TextEncoder().encode(`${JSON.stringify(transaction, null, 2)}\n`));
   }
 
-  private async loadTrashRollbackJournal(): Promise<TrashRollbackJournal | undefined> {
+  private async preserveCurrentTrashJournalState(): Promise<void> {
+    const journalPath = this.trashRollbackJournalPath();
+    try {
+      const stat = await lstat(journalPath);
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new Error("unsafe Trash rollback journal path");
+      }
+    } catch (error) {
+      if (isNotFound(error)) {
+        return;
+      }
+      throw error;
+    }
+    const historyRoot = join(this.root, ".transaction-state-history");
+    await ensureDirectory(historyRoot);
+    for (let index = 1; ; index += 1) {
+      const container = join(historyRoot, `state-${index}`);
+      try {
+        await mkdir(container, { mode: 0o700 });
+      } catch (error) {
+        if (isAlreadyExists(error)) {
+          continue;
+        }
+        throw error;
+      }
+      await link(journalPath, join(container, "journal.json"));
+      return;
+    }
+  }
+
+  private async advanceTrashTransaction(
+    transaction: TrashTransaction<LocalMetadata>,
+    nextState: TrashTransactionState
+  ): Promise<TrashTransaction<LocalMetadata>> {
+    const advanced = transitionTrashTransaction(transaction, nextState);
+    await this.saveTrashTransaction(advanced);
+    return advanced;
+  }
+
+  private async rollbackTrashTransaction(
+    transaction: TrashTransaction<LocalMetadata>,
+    mode: "rollback" | "recovery"
+  ): Promise<void> {
+    await this.assertRestorableOriginalMetadata(transaction);
+    await this.saveMetadata(transaction.originalMetadata, mode);
+    const rolledBack = await this.advanceTrashTransaction(transaction, "rolled-back");
+    await this.archiveTrashTransaction(rolledBack.fileId, true);
+  }
+
+  private async assertRestorableOriginalMetadata(
+    journal: LegacyTrashJournal<LocalMetadata> | TrashTransaction<LocalMetadata>
+  ): Promise<void> {
+    const originalFile = journal.originalMetadata.files[journal.fileId];
+    if (originalFile === undefined || originalFile.trashed || originalFile.kind === "root") {
+      throw new Error("invalid Trash rollback journal");
+    }
+    if (originalFile.kind === "file") {
+      await this.readRevision(originalFile.id, this.getContentRevision(originalFile));
+    }
+  }
+
+  private async isSuccessfulTrash(transaction: TrashTransaction<LocalMetadata>, metadata: LocalMetadata): Promise<boolean> {
+    const currentFile = metadata.files[transaction.fileId];
+    if (currentFile === undefined || !currentFile.trashed || currentFile.kind !== transaction.itemKind) {
+      return false;
+    }
+    if (transaction.itemKind === "folder") {
+      return true;
+    }
+    const originalFile = transaction.originalMetadata.files[transaction.fileId];
+    if (originalFile === undefined || originalFile.kind !== "file") {
+      return false;
+    }
+    const revisionBytes = await this.readRevision(originalFile.id, this.getContentRevision(originalFile));
+    if (!sameContentDescriptor(contentDescriptor(revisionBytes), transaction.content)) {
+      throw new Error("Trash transaction content does not match immutable revision");
+    }
+    return matchesContentDescriptor(this.trashContentPath(transaction.fileId), transaction.content);
+  }
+
+  private async loadTrashJournal(): Promise<LoadedTrashJournal | undefined> {
     const path = this.trashRollbackJournalPath();
     let text: string | undefined;
     try {
@@ -491,36 +622,11 @@ export class LocalDriveAdapter implements StoragePort {
     if (text === undefined) {
       throw new Error("invalid Trash rollback journal");
     }
-    const value: unknown = JSON.parse(text);
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      throw new Error("invalid Trash rollback journal");
-    }
-    const journal = value as Partial<TrashRollbackJournal>;
-    if (journal.schemaVersion !== 1 || typeof journal.fileId !== "string" || journal.originalMetadata === undefined) {
-      throw new Error("invalid Trash rollback journal");
-    }
-    assertOpaqueFileId(journal.fileId);
-    const originalMetadata = assertMetadata(journal.originalMetadata);
-    const originalFile = originalMetadata.files[journal.fileId];
-    if (originalFile === undefined) {
-      throw new Error("invalid Trash rollback journal");
-    }
-    const expectedContent = journal.expectedContent;
-    if (expectedContent !== undefined && (typeof expectedContent !== "object" || expectedContent === null || !Number.isInteger(expectedContent.size) || expectedContent.size < 0 || typeof expectedContent.checksum !== "string" || !/^[a-f0-9]{64}$/u.test(expectedContent.checksum))) {
-      throw new Error("invalid Trash rollback journal");
-    }
-    if ((originalFile.kind === "file" && expectedContent === undefined) || (originalFile.kind !== "file" && expectedContent !== undefined)) {
-      throw new Error("invalid Trash rollback journal");
-    }
-    return {
-      schemaVersion: 1,
-      fileId: journal.fileId,
-      originalMetadata,
-      ...(expectedContent === undefined ? {} : { expectedContent })
-    };
+    return parseTrashJournal(JSON.parse(text));
   }
 
-  private async archiveTrashRollbackJournal(): Promise<void> {
+  private async archiveTrashTransaction(fileId: string, archiveArtifact: boolean): Promise<void> {
+    assertOpaqueFileId(fileId);
     const journalPath = this.trashRollbackJournalPath();
     try {
       const journalStat = await lstat(journalPath);
@@ -537,17 +643,28 @@ export class LocalDriveAdapter implements StoragePort {
     await ensureDirectory(archiveDirectory);
     let archiveIndex = 1;
     for (;;) {
-      const archivePath = join(archiveDirectory, `trash-rollback-${archiveIndex}.json`);
+      const archivePath = join(archiveDirectory, `trash-${archiveIndex}`);
       try {
-        await lstat(archivePath);
-        archiveIndex += 1;
+        await mkdir(archivePath, { mode: 0o700 });
       } catch (error) {
-        if (!isNotFound(error)) {
-          throw error;
+        if (isAlreadyExists(error)) {
+          archiveIndex += 1;
+          continue;
         }
-        await rename(journalPath, archivePath);
-        return;
+        throw error;
       }
+      if (archiveArtifact) {
+        await ensureDirectory(this.trashDirectory());
+        try {
+          await rename(this.trashContentPath(fileId), join(archivePath, "artifact"));
+        } catch (error) {
+          if (!isNotFound(error)) {
+            throw error;
+          }
+        }
+      }
+      await rename(journalPath, join(archivePath, "journal.json"));
+      return;
     }
   }
 
@@ -576,19 +693,26 @@ export class LocalDriveAdapter implements StoragePort {
     }
   }
 
-  private async moveContentToTrash(fileId: string, authoritativeBytes: Uint8Array, expected: { size: number; checksum: string }): Promise<void> {
-    const source = this.contentPath(fileId);
-    await ensureDirectory(dirname(source));
-    const sourceStat = await lstat(source);
-    if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
-      throw new Error("unsafe content path");
-    }
+  private async writeVerifiedTrashArtifact(fileId: string, authoritativeBytes: Uint8Array, expected: TrashContentDescriptor): Promise<void> {
     const destination = this.trashContentPath(fileId);
     await ensureDirectory(dirname(destination));
     try {
-      await writeFile(destination, authoritativeBytes, { flag: "wx", mode: 0o600 });
+      const handle = await open(
+        destination,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600
+      );
+      try {
+        await handle.writeFile(authoritativeBytes);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
     } catch (error) {
       if (isAlreadyExists(error)) {
+        if (await matchesContentDescriptor(destination, expected)) {
+          return;
+        }
         throw new Error("trash destination already exists", { cause: error });
       }
       throw error;
@@ -596,10 +720,18 @@ export class LocalDriveAdapter implements StoragePort {
     if (!(await matchesContentDescriptor(destination, expected))) {
       throw new Error("trash destination content verification failed");
     }
-    await this.archiveActiveCache(source, fileId);
   }
 
   private async archiveActiveCache(source: string, fileId: string): Promise<void> {
+    await ensureDirectory(dirname(source));
+    try {
+      await lstat(source);
+    } catch (error) {
+      if (isNotFound(error)) {
+        return;
+      }
+      throw error;
+    }
     const archiveRoot = join(this.root, ".trashed-caches");
     await ensureDirectory(archiveRoot);
     for (let index = 1; ; index += 1) {
@@ -784,13 +916,8 @@ const assertMetadata = (value: unknown): LocalMetadata => {
     if (!Array.isArray(fileRevisions) || !fileRevisions.every(isValidPersistedRevision)) {
       throw new Error("invalid local metadata");
     }
-    if (new Set(fileRevisions.map((revision) => revision.id)).size !== fileRevisions.length) {
-      throw new Error("invalid local metadata");
-    }
     if (file.kind === "file") {
-      if (file.contentRevision === undefined || !fileRevisions.some((revision) => revision.id === file.contentRevision)) {
-        throw new Error("invalid local metadata");
-      }
+      assertFileRevisionCoherence(file, fileRevisions);
     } else if (file.contentRevision !== undefined || fileRevisions.length !== 0) {
       throw new Error("invalid local metadata");
     }
@@ -798,10 +925,152 @@ const assertMetadata = (value: unknown): LocalMetadata => {
   if (Object.keys(revisions).some((id) => !Object.prototype.hasOwnProperty.call(files, id))) {
     throw new Error("invalid local metadata");
   }
+  assertPersistedParentGraphs(files as Record<string, LocalFile>);
   return value as LocalMetadata;
 };
 
+const assertFileRevisionCoherence = (file: LocalFile, revisions: LocalRevision[]): void => {
+  if (file.contentRevision === undefined || revisions.length === 0) {
+    throw new Error("invalid local metadata");
+  }
+  const fileVersion = BigInt(file.version);
+  let previousRevision = 0n;
+  let activeRevisionCount = 0;
+  for (const revision of revisions) {
+    const revisionNumber = BigInt(revision.id);
+    if (revisionNumber <= previousRevision || revisionNumber > fileVersion) {
+      throw new Error("invalid local metadata");
+    }
+    previousRevision = revisionNumber;
+    if (revision.id === file.contentRevision) {
+      activeRevisionCount += 1;
+    }
+  }
+  if (activeRevisionCount !== 1 || revisions.at(-1)?.id !== file.contentRevision || BigInt(file.contentRevision) > fileVersion) {
+    throw new Error("invalid local metadata");
+  }
+};
+
+const assertPersistedParentGraphs = (files: Record<string, LocalFile>): void => {
+  for (const startId of Object.keys(files)) {
+    let currentId = startId;
+    const visited = new Set<string>();
+    let terminatedAtRoot = false;
+    for (let nodes = 0; nodes < 100; nodes += 1) {
+      if (visited.has(currentId)) {
+        throw new Error("invalid local metadata");
+      }
+      visited.add(currentId);
+      const current = files[currentId];
+      if (current === undefined) {
+        throw new Error("invalid local metadata");
+      }
+      if (current.kind === "root") {
+        if (current.id !== "vault" && current.id !== "private") {
+          throw new Error("invalid local metadata");
+        }
+        terminatedAtRoot = true;
+        break;
+      }
+      if (current.parentIds.length !== 1) {
+        throw new Error("invalid local metadata");
+      }
+      currentId = current.parentIds[0] as string;
+    }
+    if (!terminatedAtRoot) {
+      throw new Error("invalid local metadata");
+    }
+  }
+};
+
+const parseTrashJournal = (value: unknown): LoadedTrashJournal => {
+  if (!isRecord(value) || typeof value.fileId !== "string" || value.originalMetadata === undefined) {
+    throw new Error("invalid Trash rollback journal");
+  }
+  assertOpaqueFileId(value.fileId);
+  const originalMetadata = assertMetadata(value.originalMetadata);
+  const originalFile = originalMetadata.files[value.fileId];
+  if (originalFile === undefined || originalFile.trashed || originalFile.kind === "root") {
+    throw new Error("invalid Trash rollback journal");
+  }
+
+  if (value.schemaVersion === 1) {
+    if (!hasOnlyKeys(value, ["schemaVersion", "fileId", "originalMetadata", "expectedContent"])) {
+      throw new Error("invalid Trash rollback journal");
+    }
+    const expectedContent = value.expectedContent;
+    if (expectedContent !== undefined && !isContentDescriptor(expectedContent)) {
+      throw new Error("invalid Trash rollback journal");
+    }
+    if (originalFile.kind !== "file" && expectedContent !== undefined) {
+      throw new Error("invalid Trash rollback journal");
+    }
+    return {
+      format: "legacy",
+      journal: {
+        schemaVersion: 1,
+        fileId: value.fileId,
+        originalMetadata,
+        ...(expectedContent === undefined ? {} : { expectedContent })
+      }
+    };
+  }
+
+  if (
+    value.schemaVersion !== TRASH_TRANSACTION_SCHEMA_VERSION ||
+    value.operation !== "trash" ||
+    (value.itemKind !== "file" && value.itemKind !== "folder") ||
+    !isTrashTransactionState(value.state) ||
+    originalFile.kind !== value.itemKind
+  ) {
+    throw new Error("invalid Trash rollback journal");
+  }
+  if (value.itemKind === "file") {
+    if (!hasOnlyKeys(value, ["schemaVersion", "operation", "itemKind", "state", "fileId", "originalMetadata", "content"]) || !isContentDescriptor(value.content)) {
+      throw new Error("invalid Trash rollback journal");
+    }
+    return {
+      format: "current",
+      journal: {
+        schemaVersion: TRASH_TRANSACTION_SCHEMA_VERSION,
+        operation: "trash",
+        itemKind: "file",
+        state: value.state,
+        fileId: value.fileId,
+        originalMetadata,
+        content: value.content
+      }
+    };
+  }
+  if (!hasOnlyKeys(value, ["schemaVersion", "operation", "itemKind", "state", "fileId", "originalMetadata"]) || value.content !== undefined) {
+    throw new Error("invalid Trash rollback journal");
+  }
+  return {
+    format: "current",
+    journal: {
+      schemaVersion: TRASH_TRANSACTION_SCHEMA_VERSION,
+      operation: "trash",
+      itemKind: "folder",
+      state: value.state,
+      fileId: value.fileId,
+      originalMetadata
+    }
+  };
+};
+
+const hasOnlyKeys = (value: Record<string, unknown>, allowedKeys: readonly string[]): boolean => {
+  const allowed = new Set(allowedKeys);
+  return Object.keys(value).every((key) => allowed.has(key));
+};
+
 const isNonNegativeInteger = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+const isContentDescriptor = (value: unknown): value is TrashContentDescriptor =>
+  isRecord(value) &&
+  Number.isSafeInteger(value.size) &&
+  (value.size as number) >= 0 &&
+  typeof value.checksum === "string" &&
+  /^[a-f0-9]{64}$/u.test(value.checksum);
 
 const isValidPersistedRevision = (value: unknown): value is LocalRevision => isRecord(value) && isPositiveDecimal(value.id) && isValidTimestamp(value.modifiedTime);
 
@@ -856,6 +1125,9 @@ const compareFiles = (left: LocalFile, right: LocalFile): number => left.name ==
 const checksum = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 
 const contentDescriptor = (bytes: Uint8Array): { size: number; checksum: string } => ({ size: bytes.byteLength, checksum: checksum(bytes) });
+
+const sameContentDescriptor = (left: TrashContentDescriptor, right: TrashContentDescriptor): boolean =>
+  left.size === right.size && left.checksum === right.checksum;
 
 const encodeCursor = (cursor: PageCursor): string => Buffer.from(JSON.stringify(cursor)).toString("base64url");
 
@@ -937,7 +1209,7 @@ const matchesContentDescriptor = async (path: string, expected: { size: number; 
       await handle.close();
     }
   } catch (error) {
-    if (isNotFound(error)) {
+    if (isNotFound(error) || isNoFollowViolation(error)) {
       return false;
     }
     throw error;
