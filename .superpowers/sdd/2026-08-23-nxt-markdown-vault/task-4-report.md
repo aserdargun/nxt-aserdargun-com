@@ -307,3 +307,70 @@ All commands exited 0 under Node 22:
 
 Fix commit: `f9900b257a873a9fedde08bbd7307917f6fc87ed` —
 `fix: fail closed local storage locks`.
+
+## Fix round 5 — ownership-safe release and authoritative Trash finalization
+
+### RED evidence
+
+Added focused final-round regressions and ran under Node 22:
+
+```text
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH \
+  pnpm --filter @nxt/api test -- local-drive-adapter
+```
+
+The first run failed as intended with five regressions:
+
+- a release hook placed after owner-token proof was never reached, leaving the
+  previous owner able to act on a swapped fixed lock pathname;
+- `NaN`, infinite, non-integer, non-positive, and overlarge lock timeouts were
+  accepted;
+- `files.vault = null` passed adapter initialization;
+- an empty root with a pending unbound Trash journal initialized fresh metadata;
+  and
+- replacing the canonical storage root with a symlink permitted a later
+  mutation-lock write below the moved target.
+
+An additional focused regression proved that Trash must copy the immutable
+revision rather than trust a deliberately tampered active `.content` cache.
+
+### Implementation
+
+- Replaced release-by-fixed-path with an owner-unique staging protocol. A
+  prepared directory containing `owner-<token>.json` is atomically renamed
+  into the fixed lock gate; release first creates a unique history container,
+  then renames only that token-bearing owner artifact into its empty child. It
+  never unlinks a lock artifact. An empty gate may be removed only with atomic
+  `rmdir`; a concurrently acquired successor is already nonempty and cannot be
+  removed by its predecessor. Contended staging directories are archived, not
+  deleted. Lock acquisition revalidates the stored canonical root before every
+  attempt, and validates finite integer timeouts in the inclusive 1–60,000 ms
+  range before touching storage.
+- Persisted metadata validation now checks both configured roots and every
+  file/revision relation: safe IDs, names and MIME types, exact parent shape,
+  positive versions, timestamps, sizes, kinds, revision membership, and
+  root/folder/file content-revision rules. Corruption fails during `create()`.
+- File Trash journals require an exact content descriptor; folder journals
+  forbid one. File Trash artifacts are written exclusively from a no-follow,
+  same-handle read of the authoritative immutable revision, then verified from
+  one no-follow Trash handle before the mutable cache is archived. Recovery
+  uses the same descriptor proof, restoring original metadata for bogus or
+  legacy-unbound artifacts while retaining artifacts and journals in history.
+- Empty-root initialization checks for a pending journal before writing fresh
+  metadata, failing closed rather than importing unrelated state later.
+
+### GREEN validation
+
+All commands exited 0 under Node 22:
+
+- `pnpm --filter @nxt/api test -- local-drive-adapter` — 2 files, 30 tests.
+- `pnpm --filter @nxt/api typecheck`
+- `pnpm --filter @nxt/api build`
+- `pnpm lint`
+- `pnpm test` — contracts 6, domain 15, API 30 tests.
+- `pnpm typecheck`
+- `pnpm build`
+- `git diff --check`
+
+Fix commit: `ed990d83bcc08cc366480b7b7707a75857f7b445` —
+`fix: finalize local storage hardening`.
