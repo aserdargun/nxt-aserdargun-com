@@ -1,4 +1,5 @@
-import { access, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rename, symlink, utimes, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -262,5 +263,113 @@ describe("LocalDriveAdapter", () => {
     expect((await recovered.get(file.id)).trashed).toBe(false);
     await expect(recovered.readText(file.id)).resolves.toMatchObject({ text: "one" });
     await expect(access(join(root, ".content", file.id))).resolves.toBeUndefined();
+  });
+
+  it("never steals an actively held old lock", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const first = await LocalDriveAdapter.create(root);
+    const committed = await first.createText({ parentId: "vault", name: "first.md", mimeType: "text/markdown", text: "first" });
+    const lockPath = join(root, ".mutation.lock");
+    await mkdir(lockPath);
+    await writeFile(join(lockPath, "owner.json"), JSON.stringify({ token: "active-owner" }));
+    await utimes(lockPath, new Date(0), new Date(0));
+
+    await expect(LocalDriveAdapter.create(root, { lockTimeoutMs: 50 })).rejects.toThrow("timed out waiting for storage mutation lock");
+    expect(await readFile(join(root, ".revisions", committed.id, "1"), "utf8")).toBe("first");
+  });
+
+  it("archives an owner lock before permitting a successor", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    let releaseProbeEnabled = false;
+    let successor: Promise<LocalDriveAdapter> | undefined;
+    const owner = await LocalDriveAdapter.create(root, {
+      beforeLockRelease: () => {
+        if (releaseProbeEnabled) {
+          successor = LocalDriveAdapter.create(root, { lockTimeoutMs: 250 });
+        }
+      }
+    });
+
+    releaseProbeEnabled = true;
+    await owner.createFolder({ parentId: "vault", name: "folder" });
+    expect(successor).toBeDefined();
+    await expect(successor).resolves.toBeInstanceOf(LocalDriveAdapter);
+    expect((await readdir(join(root, ".lock-history"))).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("does not finalize a Trash journal against a bogus regular file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
+    const originalMetadata = JSON.parse(await readFile(join(root, ".metadata.json"), "utf8"));
+    const stagedMetadata = structuredClone(originalMetadata);
+    stagedMetadata.files[file.id].trashed = true;
+    await writeFile(join(root, ".metadata.json"), `${JSON.stringify(stagedMetadata)}\n`);
+    await writeFile(join(root, ".trash", file.id), "bogus");
+    await writeFile(
+      join(root, ".trash-rollback.json"),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        fileId: file.id,
+        originalMetadata,
+        expectedContent: { size: 3, checksum: createHash("sha256").update("one").digest("hex") }
+      })}\n`
+    );
+
+    const recovered = await LocalDriveAdapter.create(root);
+    expect((await recovered.get(file.id)).trashed).toBe(false);
+    await expect(recovered.readText(file.id)).resolves.toMatchObject({ text: "one" });
+    expect(await readFile(join(root, ".trash", file.id), "utf8")).toBe("bogus");
+  });
+
+  it("retries lock acquisition when an existing lock disappears during handoff", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    await LocalDriveAdapter.create(root);
+    const lockPath = join(root, ".mutation.lock");
+    await mkdir(lockPath);
+    await writeFile(join(lockPath, "owner.json"), JSON.stringify({ token: "handoff-owner" }));
+    let handoffObserved = false;
+
+    await expect(
+      LocalDriveAdapter.create(root, {
+        lockTimeoutMs: 50,
+        onLockExists: async () => {
+          handoffObserved = true;
+          await rename(lockPath, join(root, ".manual-handoff-lock"));
+        }
+      })
+    ).resolves.toBeInstanceOf(LocalDriveAdapter);
+    expect(handoffObserved).toBe(true);
+  });
+
+  it("rejects malformed metadata during adapter creation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    await LocalDriveAdapter.create(root);
+    await writeFile(join(root, ".metadata.json"), '{"schemaVersion":1,"sequence":0,"generation":0,"files":[],"revisions":[]}\n');
+
+    await expect(LocalDriveAdapter.create(root)).rejects.toThrow("invalid local metadata");
+  });
+
+  it("refuses a journal swapped to a symlink before the no-follow read", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
+    const originalMetadata = JSON.parse(await readFile(join(root, ".metadata.json"), "utf8"));
+    const journalPath = join(root, ".trash-rollback.json");
+    const outsidePath = join(root, "outside-journal.json");
+    await writeFile(outsidePath, JSON.stringify({ schemaVersion: 1, fileId: file.id, originalMetadata }));
+    await writeFile(journalPath, JSON.stringify({ schemaVersion: 1, fileId: file.id, originalMetadata }));
+    let swapped = false;
+
+    await expect(
+      LocalDriveAdapter.create(root, {
+        beforeJournalOpen: async () => {
+          swapped = true;
+          await rename(journalPath, join(root, "journal-before-swap.json"));
+          await symlink(outsidePath, journalPath);
+        }
+      })
+    ).rejects.toThrow("unsafe Trash rollback journal");
+    expect(swapped).toBe(true);
   });
 });

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import type { StoragePort, StoredFile } from "./storage-port.js";
@@ -20,12 +21,21 @@ type LocalMetadata = {
   revisions: Record<string, LocalRevision[]>;
 };
 type PageCursor = { parentId: string; offset: number; generation: number };
-type TrashRollbackJournal = { schemaVersion: 1; fileId: string; originalMetadata: LocalMetadata };
+type TrashRollbackJournal = {
+  schemaVersion: 1;
+  fileId: string;
+  originalMetadata: LocalMetadata;
+  expectedContent?: { size: number; checksum: string };
+};
 
 export type LocalDriveAdapterOptions = {
   beforeMetadataWrite?: () => void | Promise<void>;
   beforeMetadataRollbackWrite?: () => void | Promise<void>;
   beforeMutationLoad?: () => void | Promise<void>;
+  beforeLockRelease?: () => void | Promise<void>;
+  onLockExists?: () => void | Promise<void>;
+  beforeJournalOpen?: () => void | Promise<void>;
+  lockTimeoutMs?: number;
 };
 
 export class LocalDriveAdapter implements StoragePort {
@@ -35,7 +45,11 @@ export class LocalDriveAdapter implements StoragePort {
     private readonly root: string,
     private readonly beforeMetadataWrite?: () => void | Promise<void>,
     private readonly beforeMetadataRollbackWrite?: () => void | Promise<void>,
-    private readonly beforeMutationLoad?: () => void | Promise<void>
+    private readonly beforeMutationLoad?: () => void | Promise<void>,
+    private readonly beforeLockRelease?: () => void | Promise<void>,
+    private readonly onLockExists?: () => void | Promise<void>,
+    private readonly beforeJournalOpen?: () => void | Promise<void>,
+    private readonly lockTimeoutMs?: number
   ) {}
 
   public static async create(root: string, options: LocalDriveAdapterOptions = {}): Promise<LocalDriveAdapter> {
@@ -45,7 +59,11 @@ export class LocalDriveAdapter implements StoragePort {
       await realpath(safeRoot),
       options.beforeMetadataWrite,
       options.beforeMetadataRollbackWrite,
-      options.beforeMutationLoad
+      options.beforeMutationLoad,
+      options.beforeLockRelease,
+      options.onLockExists,
+      options.beforeJournalOpen,
+      options.lockTimeoutMs
     );
     await adapter.initialize();
     return adapter;
@@ -170,7 +188,13 @@ export class LocalDriveAdapter implements StoragePort {
         throw new Error("cannot trash configured root");
       }
       const originalMetadata = cloneMetadata(metadata);
-      await this.saveTrashRollbackJournal({ schemaVersion: 1, fileId: file.id, originalMetadata });
+      const expectedContent = file.kind === "file" ? contentDescriptor(await this.readRevision(file.id, this.getContentRevision(file))) : undefined;
+      await this.saveTrashRollbackJournal({
+        schemaVersion: 1,
+        fileId: file.id,
+        originalMetadata,
+        ...(expectedContent === undefined ? {} : { expectedContent })
+      });
       this.bumpFile(metadata, file, { trashed: true });
       await this.saveMetadata(metadata, "normal");
       try {
@@ -213,6 +237,7 @@ export class LocalDriveAdapter implements StoragePort {
       if (metadataStat.isSymbolicLink() || !metadataStat.isFile()) {
         throw new Error("unsafe metadata path");
       }
+      await this.loadMetadata();
       await this.recoverTrashRollback();
     });
   }
@@ -246,10 +271,11 @@ export class LocalDriveAdapter implements StoragePort {
   }
 
   private async withRootLock<T>(operation: () => Promise<T>): Promise<T> {
-    const lock = await acquireRootLock(this.root);
+    const lock = await acquireRootLock(this.root, this.lockTimeoutMs, this.onLockExists);
     try {
       return await operation();
     } finally {
+      await this.beforeLockRelease?.();
       await releaseRootLock(lock);
     }
   }
@@ -419,7 +445,7 @@ export class LocalDriveAdapter implements StoragePort {
     const currentMetadata = await this.loadMetadata();
     const currentFile = currentMetadata.files[journal.fileId];
     const finalTrashPath = this.trashContentPath(journal.fileId);
-    const committed = currentFile?.trashed === true && (await isRegularFile(finalTrashPath));
+    const committed = currentFile?.trashed === true && (journal.expectedContent === undefined || (await matchesContentDescriptor(finalTrashPath, journal.expectedContent)));
     if (!committed) {
       await this.saveMetadata(journal.originalMetadata, "recovery");
     }
@@ -432,18 +458,32 @@ export class LocalDriveAdapter implements StoragePort {
 
   private async loadTrashRollbackJournal(): Promise<TrashRollbackJournal | undefined> {
     const path = this.trashRollbackJournalPath();
+    let text: string | undefined;
     try {
-      const journalStat = await lstat(path);
-      if (journalStat.isSymbolicLink() || !journalStat.isFile()) {
-        throw new Error("unsafe Trash rollback journal path");
+      await this.beforeJournalOpen?.();
+      const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const journalStat = await handle.stat();
+        if (!journalStat.isFile()) {
+          throw new Error("unsafe Trash rollback journal path");
+        }
+        text = await handle.readFile({ encoding: "utf8" });
+      } finally {
+        await handle.close();
       }
     } catch (error) {
       if (isNotFound(error)) {
         return undefined;
       }
+      if (isNoFollowViolation(error)) {
+        throw new Error("unsafe Trash rollback journal path", { cause: error });
+      }
       throw error;
     }
-    const value: unknown = JSON.parse(await readFile(path, "utf8"));
+    if (text === undefined) {
+      throw new Error("invalid Trash rollback journal");
+    }
+    const value: unknown = JSON.parse(text);
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       throw new Error("invalid Trash rollback journal");
     }
@@ -452,13 +492,25 @@ export class LocalDriveAdapter implements StoragePort {
       throw new Error("invalid Trash rollback journal");
     }
     assertOpaqueFileId(journal.fileId);
-    return { schemaVersion: 1, fileId: journal.fileId, originalMetadata: assertMetadata(journal.originalMetadata) };
+    const expectedContent = journal.expectedContent;
+    if (expectedContent !== undefined && (typeof expectedContent !== "object" || expectedContent === null || !Number.isInteger(expectedContent.size) || expectedContent.size < 0 || typeof expectedContent.checksum !== "string" || !/^[a-f0-9]{64}$/u.test(expectedContent.checksum))) {
+      throw new Error("invalid Trash rollback journal");
+    }
+    return {
+      schemaVersion: 1,
+      fileId: journal.fileId,
+      originalMetadata: assertMetadata(journal.originalMetadata),
+      ...(expectedContent === undefined ? {} : { expectedContent })
+    };
   }
 
   private async archiveTrashRollbackJournal(): Promise<void> {
     const journalPath = this.trashRollbackJournalPath();
     try {
-      await lstat(journalPath);
+      const journalStat = await lstat(journalPath);
+      if (journalStat.isSymbolicLink() || !journalStat.isFile()) {
+        throw new Error("unsafe Trash rollback journal path");
+      }
     } catch (error) {
       if (isNotFound(error)) {
         return;
@@ -623,12 +675,14 @@ const nextTime = (metadata: LocalMetadata): string => {
 
 const cloneMetadata = (metadata: LocalMetadata): LocalMetadata => JSON.parse(JSON.stringify(metadata)) as LocalMetadata;
 
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
 const assertMetadata = (value: unknown): LocalMetadata => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("invalid local metadata");
   }
   const metadata = value as Partial<LocalMetadata>;
-  if (metadata.schemaVersion !== 1 || !Number.isInteger(metadata.sequence) || !Number.isInteger(metadata.generation) || metadata.files === undefined || metadata.revisions === undefined) {
+  if (metadata.schemaVersion !== 1 || !Number.isInteger(metadata.sequence) || !Number.isInteger(metadata.generation) || !isRecord(metadata.files) || !isRecord(metadata.revisions)) {
     throw new Error("invalid local metadata");
   }
   return metadata as LocalMetadata;
@@ -661,6 +715,8 @@ const assertPageSize = (pageSize: number): void => {
 const compareFiles = (left: LocalFile, right: LocalFile): number => left.name === right.name ? left.id.localeCompare(right.id, "en") : left.name.localeCompare(right.name, "en");
 
 const checksum = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
+
+const contentDescriptor = (bytes: Uint8Array): { size: number; checksum: string } => ({ size: bytes.byteLength, checksum: checksum(bytes) });
 
 const encodeCursor = (cursor: PageCursor): string => Buffer.from(JSON.stringify(cursor)).toString("base64url");
 
@@ -729,10 +785,13 @@ const assertDirectory = async (path: string): Promise<void> => {
   }
 };
 
-const isRegularFile = async (path: string): Promise<boolean> => {
+const matchesContentDescriptor = async (path: string, expected: { size: number; checksum: string }): Promise<boolean> => {
   try {
     const fileStat = await lstat(path);
-    return !fileStat.isSymbolicLink() && fileStat.isFile();
+    if (fileStat.isSymbolicLink() || !fileStat.isFile() || fileStat.size !== expected.size) {
+      return false;
+    }
+    return checksum(await readFile(path)) === expected.checksum;
   } catch (error) {
     if (isNotFound(error)) {
       return false;
@@ -745,32 +804,42 @@ const isNotFound = (error: unknown): error is NodeJS.ErrnoException => typeof er
 
 const isAlreadyExists = (error: unknown): error is NodeJS.ErrnoException => typeof error === "object" && error !== null && "code" in error && (error as NodeJS.ErrnoException).code === "EEXIST";
 
+const isNoFollowViolation = (error: unknown): error is NodeJS.ErrnoException => typeof error === "object" && error !== null && "code" in error && (error as NodeJS.ErrnoException).code === "ELOOP";
+
 const equalBytes = (left: Uint8Array, right: Uint8Array): boolean => left.byteLength === right.byteLength && left.every((value, index) => value === right[index]);
 
 const LOCK_WAIT_MS = 10;
 const LOCK_TIMEOUT_MS = 2_000;
-const STALE_LOCK_MS = 30_000;
 
 type RootLock = { path: string; token: string };
 
-const acquireRootLock = async (root: string): Promise<RootLock> => {
+const acquireRootLock = async (root: string, timeoutMs = LOCK_TIMEOUT_MS, onLockExists?: () => void | Promise<void>): Promise<RootLock> => {
   const path = join(root, ".mutation.lock");
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   for (;;) {
     const token = randomUUID();
     try {
-      const handle = await open(path, "wx", 0o600);
+      await mkdir(path, { mode: 0o700 });
       try {
-        await handle.writeFile(JSON.stringify({ token, createdAt: Date.now() }));
-      } finally {
-        await handle.close();
+        await writeFile(join(path, "owner.json"), JSON.stringify({ token, createdAt: Date.now() }), { flag: "wx", mode: 0o600 });
+      } catch (error) {
+        await archiveRootLock(path, root, token);
+        throw error;
       }
       return { path, token };
     } catch (error) {
       if (!isAlreadyExists(error)) {
         throw error;
       }
-      await archiveStaleLock(root, path);
+      await onLockExists?.();
+      try {
+        await assertLockDirectory(path);
+      } catch (lockError) {
+        if (isNotFound(lockError)) {
+          continue;
+        }
+        throw lockError;
+      }
       if (Date.now() >= deadline) {
         throw new Error("timed out waiting for storage mutation lock", { cause: error });
       }
@@ -781,13 +850,10 @@ const acquireRootLock = async (root: string): Promise<RootLock> => {
 
 const releaseRootLock = async (lock: RootLock): Promise<void> => {
   try {
-    const lockStat = await lstat(lock.path);
-    if (lockStat.isSymbolicLink() || !lockStat.isFile()) {
-      throw new Error("unsafe storage mutation lock");
-    }
-    const value: unknown = JSON.parse(await readFile(lock.path, "utf8"));
+    await assertLockDirectory(lock.path);
+    const value: unknown = JSON.parse(await readFile(join(lock.path, "owner.json"), "utf8"));
     if (typeof value === "object" && value !== null && "token" in value && value.token === lock.token) {
-      await unlink(lock.path);
+      await archiveRootLock(lock.path, dirname(lock.path), lock.token);
     }
   } catch (error) {
     if (!isNotFound(error)) {
@@ -796,21 +862,35 @@ const releaseRootLock = async (lock: RootLock): Promise<void> => {
   }
 };
 
-const archiveStaleLock = async (root: string, lockPath: string): Promise<void> => {
-  const lockStat = await lstat(lockPath);
-  if (lockStat.isSymbolicLink() || !lockStat.isFile()) {
+const assertLockDirectory = async (path: string): Promise<void> => {
+  const lockStat = await lstat(path);
+  if (lockStat.isSymbolicLink() || !lockStat.isDirectory()) {
     throw new Error("unsafe storage mutation lock");
   }
-  if (Date.now() - lockStat.mtimeMs < STALE_LOCK_MS) {
-    return;
-  }
-  const staleDirectory = join(root, ".stale-locks");
-  await ensureDirectory(staleDirectory);
-  try {
-    await rename(lockPath, join(staleDirectory, `${Date.now()}-${randomUUID()}.lock`));
-  } catch (error) {
-    if (!isNotFound(error)) {
-      throw error;
+};
+
+const archiveRootLock = async (lockPath: string, root: string, token: string): Promise<void> => {
+  const archiveDirectory = join(root, ".lock-history");
+  await ensureDirectory(archiveDirectory);
+  let archiveIndex = 1;
+  for (;;) {
+    const archivePath = join(archiveDirectory, `${token}-${archiveIndex}.lock`);
+    try {
+      await lstat(archivePath);
+      archiveIndex += 1;
+    } catch (error) {
+      if (!isNotFound(error)) {
+        throw error;
+      }
+      try {
+        await rename(lockPath, archivePath);
+        return;
+      } catch (renameError) {
+        if (isNotFound(renameError)) {
+          return;
+        }
+        throw renameError;
+      }
     }
   }
 };

@@ -3,12 +3,20 @@ export type LocalDriveAdapterOptions = {
     beforeMetadataWrite?: () => void | Promise<void>;
     beforeMetadataRollbackWrite?: () => void | Promise<void>;
     beforeMutationLoad?: () => void | Promise<void>;
+    beforeLockRelease?: () => void | Promise<void>;
+    onLockExists?: () => void | Promise<void>;
+    beforeJournalOpen?: () => void | Promise<void>;
+    lockTimeoutMs?: number;
 };
 export declare class LocalDriveAdapter implements StoragePort {
     private readonly root;
     private readonly beforeMetadataWrite?;
     private readonly beforeMetadataRollbackWrite?;
     private readonly beforeMutationLoad?;
+    private readonly beforeLockRelease?;
+    private readonly onLockExists?;
+    private readonly beforeJournalOpen?;
+    private readonly lockTimeoutMs?;
     private operation;
     private constructor();
     static create(root: string, options?: LocalDriveAdapterOptions): Promise<LocalDriveAdapter>;
