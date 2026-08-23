@@ -6,7 +6,7 @@
 
 **Architecture:** A React/Vite/TypeScript SPA communicates only with managed Node.js 22 Azure Functions. Functions enforce the exact GitHub owner, own full-scope Google Drive OAuth, constrain all file operations to `NXT-ASERDARGUN-COM` or `NXT-PRIVATE-COM`, and expose immutable allowlisted public snapshots. IndexedDB protects unsynced browser drafts; Google Drive remains the sole canonical persistent store.
 
-**Tech Stack:** Node.js 22, pnpm 11.22.0, TypeScript 7.0.2, React 19.2.8, Vite 8.2.2, Azure Functions Node programming model v4, CodeMirror 6, unified/remark/rehype, Zod 4.4.3, Google Drive API v3, MiniSearch 7.2.0, IndexedDB via idb 8.0.3, Vitest 4.1.11, Playwright 1.62.1, and Azure Static Web Apps CLI 2.0.10.
+**Tech Stack:** Node.js 22, pnpm 11.22.0, TypeScript 5.9.3, React 19.2.8, Vite 8.2.2, Azure Functions Node programming model v4, CodeMirror 6, unified/remark/rehype, Zod 4.4.3, Google Drive API v3, MiniSearch 7.2.0, IndexedDB via idb 8.0.3, Vitest 4.1.11, Playwright 1.62.1, and Azure Static Web Apps CLI 2.0.10.
 
 **Spec:** `docs/superpowers/specs/2026-08-23-nxt-markdown-vault-design.md`
 
@@ -157,7 +157,7 @@ Expected: FAIL because `package.json` and `.gitignore` do not exist.
     "eslint": "10.9.0",
     "globals": "17.11.0",
     "prettier": "3.9.6",
-    "typescript": "7.0.2",
+    "typescript": "5.9.3",
     "typescript-eslint": "8.67.0",
     "yaml": "2.9.0"
   }
@@ -254,7 +254,7 @@ Expected: FAIL because the package and schemas do not exist.
 
 Use `zod@4.4.3`. Define the note schema with `.strict()`, a 160-character trimmed title, RFC 3339 UTC timestamps, unique case-folded tags/aliases, and UUID IDs. Define persisted schemas with `schemaVersion: z.literal(1)`.
 
-Create `packages/contracts/package.json` with scripts `build: "tsc -p tsconfig.json"`, `typecheck: "tsc --noEmit"`, and `test: "vitest run"`; put `zod@4.4.3` in dependencies and `typescript@7.0.2` plus `vitest@4.1.11` in devDependencies.
+Create `packages/contracts/package.json` with scripts `build: "tsc -p tsconfig.json"`, `typecheck: "tsc --noEmit"`, and `test: "vitest run"`; put `zod@4.4.3` in dependencies and `typescript@5.9.3` plus `vitest@4.1.11` in devDependencies.
 
 ```ts
 const fold = (value: string): string => value.normalize("NFKC").toLocaleLowerCase("en-US");
@@ -366,7 +366,7 @@ Expected: FAIL with unresolved exports.
 
 Parse only a leading `---` YAML block with `yaml@2.9.0`; reject duplicate YAML keys and schema violations without rewriting the source. Serialize frontmatter in the fixed field order `id`, `title`, `created`, `updated`, `tags`, `aliases`, followed by one blank line and the normalized body.
 
-Create `packages/domain/package.json` with the same build/typecheck/test scripts as `@nxt/contracts`. Dependencies are `@nxt/contracts: workspace:*`, `yaml@2.9.0`, `unified@11.0.5`, the pinned remark/rehype packages listed in Step 4, and devDependencies `typescript@7.0.2` plus `vitest@4.1.11`.
+Create `packages/domain/package.json` with the same build/typecheck/test scripts as `@nxt/contracts`. Dependencies are `@nxt/contracts: workspace:*`, `yaml@2.9.0`, `unified@11.0.5`, the pinned remark/rehype packages listed in Step 4, and devDependencies `typescript@5.9.3` plus `vitest@4.1.11`.
 
 Implement `[[Target]]` and `[[Target|Label]]` with a small tokenizer that ignores fenced and inline code. Resolution order is exact Unicode case-folded title, then alias. Return `resolved`, `unresolved`, or `ambiguous`; never select the first ambiguous result.
 
@@ -457,7 +457,7 @@ Expected: FAIL because the storage implementation does not exist.
 
 - [ ] **Step 3: Implement the port and root-boundary decorator**
 
-Create `api/package.json` with scripts `build: "tsc -p tsconfig.json"`, `typecheck: "tsc --noEmit"`, and `test: "vitest run"`. Dependencies are `@azure/functions@4.16.2`, `@nxt/contracts: workspace:*`, and `@nxt/domain: workspace:*`; devDependencies are `typescript@7.0.2` and `vitest@4.1.11`. Task 6 adds `googleapis`; Task 8 adds `file-type`.
+Create `api/package.json` with scripts `build: "tsc -p tsconfig.json"`, `typecheck: "tsc --noEmit"`, and `test: "vitest run"`. Dependencies are `@azure/functions@4.16.2`, `@nxt/contracts: workspace:*`, and `@nxt/domain: workspace:*`; devDependencies are `typescript@5.9.3` and `vitest@4.1.11`. Task 6 adds `googleapis`; Task 8 adds `file-type`.
 
 ```ts
 export interface StoredFile {
@@ -1041,7 +1041,7 @@ Expected: FAIL because the web package is missing.
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "jsdom": "30.0.1",
-    "typescript": "7.0.2",
+    "typescript": "5.9.3",
     "vitest": "4.1.11",
     "vite": "8.2.2"
   }

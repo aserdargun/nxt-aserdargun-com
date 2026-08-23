@@ -1,7 +1,7 @@
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 
-export default tseslint.config(
+export default [
   {
     ignores: [
       "web/dist/**",
@@ -12,7 +12,10 @@ export default tseslint.config(
     ]
   },
   js.configs.recommended,
-  ...tseslint.configs.recommendedTypeChecked,
+  ...tseslint.configs.recommendedTypeChecked.map((config) => ({
+    ...config,
+    files: ["**/*.{ts,tsx}"]
+  })),
   {
     files: ["**/*.{ts,tsx}"],
     languageOptions: {
@@ -21,4 +24,4 @@ export default tseslint.config(
       }
     }
   }
-);
+];
