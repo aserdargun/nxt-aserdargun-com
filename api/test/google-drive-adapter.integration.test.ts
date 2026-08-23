@@ -7,6 +7,7 @@ import {
   GoogleDriveAdapter,
   RootBoundaryStorage
 } from "../src/storage/index.js";
+import { assertDirectActiveIntegrationChildren } from "./support/google-drive-live-guard.js";
 
 const integrationEnabled = globalThis.process.env.NXT_DRIVE_INTEGRATION === "1";
 const liveDescribe = integrationEnabled ? describe : describe.skip;
@@ -99,31 +100,4 @@ const requireSetting = (value: string | undefined): string => {
   if (value === undefined || value.trim() === "")
     throw new Error("Live Drive integration setting is missing.");
   return value;
-};
-
-const assertDirectActiveIntegrationChildren = (
-  files: ReadonlyArray<{
-    id: string;
-    mimeType: string;
-    parentIds: string[];
-    trashed: boolean;
-  }>,
-  integrationFolderId: string,
-  seenFileIds: Set<string>
-): void => {
-  for (const file of files) {
-    if (
-      file.id.length === 0 ||
-      file.id.length > 512 ||
-      /[\r\n\0]/u.test(file.id) ||
-      seenFileIds.has(file.id) ||
-      file.trashed ||
-      file.mimeType === "application/vnd.google-apps.shortcut" ||
-      file.parentIds.length !== 1 ||
-      file.parentIds[0] !== integrationFolderId
-    ) {
-      throw new Error("Live Drive integration child verification failed.");
-    }
-    seenFileIds.add(file.id);
-  }
 };

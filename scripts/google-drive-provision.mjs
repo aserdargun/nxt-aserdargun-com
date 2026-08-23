@@ -455,10 +455,9 @@ const hasUnsafeEnvControl = (value, allowLineFeed) => {
   for (const character of value) {
     const code = character.codePointAt(0);
     if (
-      code === 127 ||
       (code !== undefined &&
-        code < 32 &&
-        !(allowLineFeed && code === 10))
+        ((code <= 31 && !(allowLineFeed && code === 10)) ||
+          (code >= 127 && code <= 159)))
     ) {
       return true;
     }
