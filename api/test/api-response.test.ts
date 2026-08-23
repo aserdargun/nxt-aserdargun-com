@@ -3,6 +3,10 @@ import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { ApiResponseError, errorResponse, json } from "../src/http/api-response.js";
 
+const CANONICAL_REQUEST_ID = "123e4567-e89b-42d3-a456-426614174000";
+const GENERATED_REQUEST_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+
 describe("json", () => {
   it("recursively removes sensitive fields without invoking getters or retaining cycles", () => {
     let getterCalls = 0;
@@ -195,6 +199,117 @@ describe("json", () => {
     expect(JSON.stringify(response.jsonBody)).not.toContain("proxied-message-secret");
   });
 
+  it("rejects an explosive Proxy used as the direct prototype before trap invocation", () => {
+    let prototypeReads = 0;
+    let ownKeyReads = 0;
+    const hostilePrototype = new Proxy(
+      { inherited: "Bearer direct-prototype-secret" },
+      {
+        getPrototypeOf() {
+          prototypeReads += 1;
+          throw new Error("Bearer direct-prototype-get-secret");
+        },
+        ownKeys() {
+          ownKeyReads += 1;
+          throw new Error("Bearer direct-prototype-ownKeys-secret");
+        }
+      }
+    );
+    const payload = Object.create(hostilePrototype) as Record<string, unknown>;
+    payload.safe = "not-admitted";
+
+    const response = json(payload);
+
+    expect(response.jsonBody).toBe("[Unserializable]");
+    expect(prototypeReads).toBe(0);
+    expect(ownKeyReads).toBe(0);
+    expect(JSON.stringify(response.jsonBody)).not.toContain("direct-prototype-secret");
+  });
+
+  it("rejects an explosive Proxy deeper in the prototype chain before trap invocation", () => {
+    let prototypeReads = 0;
+    let ownKeyReads = 0;
+    const hostilePrototype = new Proxy(
+      { inherited: "Bearer deep-prototype-secret" },
+      {
+        getPrototypeOf() {
+          prototypeReads += 1;
+          throw new Error("Bearer deep-prototype-get-secret");
+        },
+        ownKeys() {
+          ownKeyReads += 1;
+          throw new Error("Bearer deep-prototype-ownKeys-secret");
+        }
+      }
+    );
+    const admittedMiddle = Object.create(hostilePrototype) as Record<string, unknown>;
+    const payload = Object.create(admittedMiddle) as Record<string, unknown>;
+    payload.safe = "not-admitted";
+
+    const response = json(payload);
+
+    expect(response.jsonBody).toBe("[Unserializable]");
+    expect(prototypeReads).toBe(0);
+    expect(ownKeyReads).toBe(0);
+    expect(JSON.stringify(response.jsonBody)).not.toContain("deep-prototype-secret");
+  });
+
+  it("rejects a revoked Proxy in the prototype chain without invoking its traps", () => {
+    let prototypeReads = 0;
+    let ownKeyReads = 0;
+    const hostilePrototype = Proxy.revocable(
+      { inherited: "Bearer revoked-prototype-secret" },
+      {
+        getPrototypeOf(target) {
+          prototypeReads += 1;
+          return Reflect.getPrototypeOf(target);
+        },
+        ownKeys(target) {
+          ownKeyReads += 1;
+          return Reflect.ownKeys(target);
+        }
+      }
+    );
+    const payload = Object.create(hostilePrototype.proxy) as Record<string, unknown>;
+    payload.safe = "not-admitted";
+    hostilePrototype.revoke();
+
+    const response = json(payload);
+
+    expect(response.jsonBody).toBe("[Unserializable]");
+    expect(prototypeReads).toBe(0);
+    expect(ownKeyReads).toBe(0);
+    expect(JSON.stringify(response.jsonBody)).not.toContain("revoked-prototype-secret");
+  });
+
+  it("rejects an ordinary prototype chain beyond the bounded admission depth", () => {
+    let prototype: object | null = null;
+    for (let depth = 0; depth < 33; depth += 1) {
+      prototype = Object.create(prototype) as object;
+    }
+    const payload = Object.create(prototype) as Record<string, unknown>;
+    payload.safe = "not-admitted";
+
+    expect(json(payload).jsonBody).toBe("[Unserializable]");
+  });
+
+  it("counts inherited yielded keys before skipping non-own descriptors", () => {
+    const inherited = Object.create(null) as Record<string, unknown>;
+    for (let index = 0; index < 20_000; index += 1) {
+      Object.defineProperty(inherited, `inherited${index}`, {
+        enumerable: true,
+        get() {
+          throw new Error("inherited accessor must not run");
+        }
+      });
+    }
+    const payload = Object.create(inherited) as Record<string, unknown>;
+
+    const response = json(payload);
+
+    expect(response.jsonBody).toBe("[Truncated]");
+  });
+
   it("redacts an untrusted own data property normalized to message", () => {
     const payload = Object.create(null) as Record<string, unknown>;
     Object.defineProperty(payload, "mes-sage", {
@@ -292,12 +407,12 @@ describe("errorResponse", () => {
       cause: new Error("Bearer nested cause")
     });
 
-    const response = errorResponse(domainError, "req-fixed");
+    const response = errorResponse(domainError, CANONICAL_REQUEST_ID);
     const parsed = ApiErrorSchema.parse(response.jsonBody);
     const serialized = JSON.stringify(response.jsonBody);
 
     expect(response.status).toBe(status);
-    expect(parsed.error).toMatchObject({ code, requestId: "req-fixed" });
+    expect(parsed.error).toMatchObject({ code, requestId: CANONICAL_REQUEST_ID });
     expect(parsed.error.message).toBe(officialMessage);
     for (const secret of ["refresh_token", "Bearer", "credential", "drive-file-id", "nested cause", "stack", "cause"]) {
       expect(serialized).not.toContain(secret);
@@ -317,12 +432,15 @@ describe("errorResponse", () => {
 
     expect(response.status).toBe(503);
     expect(parsed.error.code).toBe("DRIVE_UNAVAILABLE");
-    expect(parsed.error.requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+    expect(parsed.error.requestId).toMatch(GENERATED_REQUEST_ID_PATTERN);
     expect(JSON.stringify(response.jsonBody)).not.toMatch(/Bearer|drive-file-id|refresh_token|code-getter/u);
   });
 
   it("uses only the official message for a caller-supplied enum error code", () => {
-    const response = errorResponse({ code: "FORBIDDEN", message: "Bearer caller-message-secret" }, "request.safe-123");
+    const response = errorResponse(
+      { code: "FORBIDDEN", message: "Bearer caller-message-secret" },
+      CANONICAL_REQUEST_ID
+    );
     const parsed = ApiErrorSchema.parse(response.jsonBody);
 
     expect(response.status).toBe(403);
@@ -330,7 +448,7 @@ describe("errorResponse", () => {
       error: {
         code: "FORBIDDEN",
         message: "This account cannot access the vault.",
-        requestId: "request.safe-123"
+        requestId: CANONICAL_REQUEST_ID
       }
     });
     expect(JSON.stringify(response.jsonBody)).not.toContain("caller-message-secret");
@@ -340,14 +458,46 @@ describe("errorResponse", () => {
     const mutated = new ApiResponseError("FORBIDDEN");
     Object.defineProperty(mutated, "code", { value: "CALLER_CONTROLLED" });
 
-    expect(() => errorResponse(mutated, "req-mutated")).not.toThrow();
-    expect(ApiErrorSchema.parse(errorResponse(mutated, "req-mutated").jsonBody)).toEqual({
+    expect(() => errorResponse(mutated, CANONICAL_REQUEST_ID)).not.toThrow();
+    expect(ApiErrorSchema.parse(errorResponse(mutated, CANONICAL_REQUEST_ID).jsonBody)).toEqual({
       error: {
         code: "DRIVE_UNAVAILABLE",
         message: "The service is temporarily unavailable.",
-        requestId: "req-mutated"
+        requestId: CANONICAL_REQUEST_ID
       }
     });
+  });
+
+  it.each([
+    "refresh_token",
+    "Bearer",
+    "drive-file-id",
+    "123e4567-e89B-42d3-a456-426614174000",
+    "a".repeat(129),
+    `${CANONICAL_REQUEST_ID}\nBearer`,
+    `${CANONICAL_REQUEST_ID}-refresh_token`
+  ])("generates a fresh canonical UUID instead of reflecting unsafe request ID %j", (unsafeRequestId) => {
+    const callerError = {
+      code: "FORBIDDEN",
+      message: "Bearer caller-message-secret",
+      refresh_token: "drive-file-id"
+    };
+
+    const response = errorResponse(callerError, unsafeRequestId);
+    const parsed = ApiErrorSchema.parse(response.jsonBody);
+    const serialized = JSON.stringify(response.jsonBody);
+
+    expect(parsed.error.requestId).toMatch(GENERATED_REQUEST_ID_PATTERN);
+    expect(parsed.error.requestId).not.toBe(unsafeRequestId);
+    expect(serialized).not.toContain(unsafeRequestId);
+    expect(serialized).not.toMatch(/caller-message-secret|refresh_token|drive-file-id/u);
+  });
+
+  it("preserves an exact canonical lowercase UUID request ID", () => {
+    const response = errorResponse(new ApiResponseError("UNAUTHORIZED"), CANONICAL_REQUEST_ID);
+    const parsed = ApiErrorSchema.parse(response.jsonBody);
+
+    expect(parsed.error.requestId).toBe(CANONICAL_REQUEST_ID);
   });
 
   it("fails closed when a hostile error proxy rejects prototype inspection", () => {

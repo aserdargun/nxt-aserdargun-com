@@ -33,7 +33,9 @@ const MAX_SANITIZATION_OUTPUT_BYTES = 262_144;
 const TRUNCATION_RESERVE_BYTES = 64;
 const MAX_STRING_CODE_UNITS = MAX_SANITIZATION_OUTPUT_BYTES;
 const MAX_KEY_CODE_UNITS = 256;
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
+const MAX_PROTOTYPE_CHAIN_DEPTH = 32;
+const REQUEST_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const TRUNCATED = "[Truncated]";
 const UNSERIALIZABLE = "[Unserializable]";
 const ERROR_MARKER = "[Error]";
@@ -214,6 +216,9 @@ const sanitizeArray = (value: object, state: SanitizationState, depth: number): 
 };
 
 const sanitizeObject = (value: object, state: SanitizationState, depth: number): unknown => {
+  if (!admitPrototypeChain(value, state)) {
+    return emitMarker(UNSERIALIZABLE, state);
+  }
   if (!reserveOutput(state, 2)) {
     return truncate(state);
   }
@@ -244,6 +249,34 @@ const sanitizeObject = (value: object, state: SanitizationState, depth: number):
     return emitMarker(UNSERIALIZABLE, state);
   }
   return result;
+};
+
+const admitPrototypeChain = (value: object, state: SanitizationState): boolean => {
+  let prototype: object | null;
+  try {
+    prototype = Object.getPrototypeOf(value) as object | null;
+  } catch {
+    return false;
+  }
+
+  const seen = new WeakSet<object>();
+  let depth = 0;
+  while (prototype !== null) {
+    if (inspectProxy(prototype) !== false) {
+      return false;
+    }
+    depth += 1;
+    if (!visitNode(state) || depth > MAX_PROTOTYPE_CHAIN_DEPTH || seen.has(prototype)) {
+      return false;
+    }
+    seen.add(prototype);
+    try {
+      prototype = Object.getPrototypeOf(prototype) as object | null;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 };
 
 const visitNode = (state: SanitizationState): boolean => {
