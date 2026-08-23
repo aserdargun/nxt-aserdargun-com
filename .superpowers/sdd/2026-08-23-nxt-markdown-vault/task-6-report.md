@@ -271,3 +271,99 @@ passing tests plus the one expected live skip. The loader probe printed
 
 None. The live integration test remains intentionally skipped pending separate,
 explicit authorization and credentials.
+
+## Fix round 2
+
+### Status and commit
+
+DONE. The four Important findings and one Minor finding were addressed and
+committed as `c954237ccec61da44ebce3c55ee372acad0906ee` —
+`fix: align drive mutation contracts`.
+
+This round did not run a live OAuth flow, open a browser, bind a callback
+listener, make a Google/Drive/network request, read credentials, access
+`.env.local`, or create a Drive folder/file. Every API test invocation removed
+`NXT_DRIVE_INTEGRATION`, so the live executable body remained skipped.
+
+### Fixes
+
+- Drive metadata versions now pass the existing validator during conversion to
+  `StoredFile`, and that validator requires a positive canonical decimal string
+  (`1`, `2`, and so on). Create folder, create text, and create bytes readbacks
+  reject zero, signed, leading-zero, and malformed decimal versions with a
+  static error that does not surface the created Drive ID.
+- The `StoragePort.updateText` contract again permits MIME changes. The Google
+  adapter sends the requested MIME in both request metadata and multipart
+  media, then verifies the post-write MIME is exactly the requested MIME while
+  retaining ID, name, single-parent ancestry, active state, newer-version, and
+  checksum verification. A local-adapter parity regression covers
+  `text/plain` to `text/markdown`.
+- A same-parent rename now sends only `fileId`, the exact name body, and the
+  field mask; it omits both `addParents` and `removeParents`. Cross-parent moves
+  retain their original add/remove-parent request. Both Local and Google
+  adapters consistently reject a same-parent request without `newName` before
+  writing.
+- Environment source is first canonicalized from CRLF to LF, then rejected if
+  any remaining ASCII control character other than LF is present. Existing
+  content and update values now reject stray CR, NUL, tab, DEL, and other unsafe
+  controls; update values also reject LF. Canonical CRLF files still parse and
+  rewrite to LF. These are pure parser/builder tests and no environment file was
+  written.
+- The still-skipped live test now paginates to exhaustion with a 1000-page
+  bound. Before continuing from every page it verifies every returned item has
+  a bounded control-free ID unique across pages, is active and not a shortcut,
+  and has exactly one parent equal to the integration root. Page-token cycles
+  fail closed.
+
+### Fix-round-2 RED evidence
+
+Every Node/pnpm command used Node `v22.23.1` through the required PATH prefix.
+
+```text
+node --test tools/google-drive-provision.test.mjs tools/google-drive-runtime.test.mjs
+```
+
+Exit `1`: 17 passed and 1 failed because a stray CR/NUL/control character in
+existing environment content was accepted.
+
+```text
+env -u NXT_DRIVE_INTEGRATION pnpm --filter @nxt/api test -- google-drive-adapter local-drive-adapter
+```
+
+Exit `1`: 184 passed, 5 failed, and 1 live test skipped. The failures proved
+noncanonical create versions were accepted, Google rejected an allowed MIME
+change, same-parent rename emitted contradictory parent mutations, and Google
+and Local did not yet share the chosen same-parent no-op rejection behavior.
+
+### Fix-round-2 GREEN evidence
+
+```text
+node --test tools/google-drive-provision.test.mjs tools/google-drive-runtime.test.mjs
+```
+
+Exit `0`: all 18 tool tests passed.
+
+```text
+env -u NXT_DRIVE_INTEGRATION pnpm --filter @nxt/api test -- google-drive-adapter google-drive-client local-drive-adapter root-boundary
+```
+
+Exit `0`: 189 API tests passed and exactly 1 live test skipped.
+
+Final repository validation:
+
+```text
+pnpm lint
+pnpm typecheck
+pnpm build
+env -u NXT_DRIVE_INTEGRATION pnpm test
+git diff --check
+```
+
+All exited `0`. Root tests passed contracts 6, domain 15, and API 189, for 210
+passing tests plus the one expected live skip. Tracked API build artifacts were
+regenerated under Node `v22.23.1`.
+
+### Fix-round-2 concerns
+
+None. Live Drive integration remains intentionally unexecuted and requires a
+separate explicit authorization.
