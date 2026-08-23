@@ -125,3 +125,115 @@ and the staged file list was restricted to `api/` (the lockfile was unchanged).
 ## Concerns
 
 None.
+
+## Fix round 1 — raw authority, classification order, and total sanitization
+
+### Status and commit
+
+DONE. All seven Important findings were reproduced with tests, fixed, and
+validated without using an external service.
+
+- Fix implementation: `ed10db20d6cb9fae9fb68e1bd86bd6882a118730` —
+  `fix: harden owner session boundary`.
+
+### Implementation
+
+1. The local bypass now reads the raw standard `Host` authority rather than
+   `request.url`. The Azure Functions `HttpRequest` constructor was verified to
+   canonicalize numeric/hex/short IPv4, expanded IPv6, empty userinfo, and
+   percent-encoded hosts before exposing `request.url`; the raw `Host` value
+   preserves the syntax that must be rejected. Only exact `localhost`
+   (case-insensitive), `127.0.0.1`, or `[::1]`, with an optional valid decimal
+   port, is accepted. `x-forwarded-host` is never consulted.
+2. Bypass environments now fail closed through an ASCII-only normalized
+   allowlist containing exactly `development` and `test`. Empty, abbreviated,
+   staging, production, unknown, zero-width, and control-character variants
+   fail.
+3. Non-bypass authorization now decodes and structurally classifies the
+   principal before reading owner configuration: missing/malformed principals
+   return `401`; valid wrong-provider or missing-role principals return `403`;
+   only a valid GitHub authenticated principal can reach the missing-config
+   `503`. Without configuration, a username cannot be classified as owner or
+   non-owner.
+4. Native Error detection uses Node's cross-realm-safe `util/types`
+   `isNativeError`. A `node:vm` Error with an attacker-controlled message getter
+   becomes `[Error]` without reading the getter; Error-spoofing accessors remain
+   untouched.
+5. Sanitization is total at the response boundary. Revoked array/object proxies,
+   `Array.isArray`, native-error inspection, reflection, descriptor reads, and
+   primitive conversion all fail to static markers rather than escaping the
+   response helper.
+6. One monotonic request-wide state now bounds visited nodes, visited entries,
+   recursion depth, and serialized output bytes. Budgets are never restored
+   while unwinding a branch; deterministic `[Truncated]`, `[Unserializable]`,
+   `[Error]`, and `[Circular]` markers preserve bounded output and existing
+   redaction behavior.
+7. `GET /api/private/session` now returns the existing shared contract shape
+   `{ user: { userDetails } }`. Endpoint tests parse the real response with
+   `SessionResponseSchema`.
+
+### RED evidence
+
+All commands used the direct Node 22 prefix recorded above.
+
+The first RED added all seven regression groups before production changes:
+
+```text
+pnpm --filter @nxt/api test -- auth api-response
+```
+
+Exit `1`: 32 tests failed and 105 passed. Expected failures covered cross-realm
+Error handling, revoked proxies, shared-DAG truncation, nine invalid environment
+forms, four pre-config principal classifications, all requested authority
+canonicalization probes, and the shared session response schema.
+
+Runtime inspection then proved that a real `HttpRequest` had already
+canonicalized its `url`. The endpoint tests were therefore tightened to use a
+real request with a raw `Host` header before changing production code:
+
+```text
+pnpm --filter @nxt/api exec vitest run test/auth.test.ts
+```
+
+Exit `1`: the seven requested numeric/hex/short IPv4, expanded IPv6, empty
+userinfo, and percent-encoded raw-authority probes returned `200` instead of
+`401`; the other 62 auth tests passed. Switching the handler from canonicalized
+`request.url` to raw `Host` made the same file pass 69/69.
+
+### GREEN and final validation
+
+Focused file-level GREEN evidence:
+
+```text
+pnpm --filter @nxt/api exec vitest run test/auth.test.ts
+pnpm --filter @nxt/api exec vitest run test/api-response.test.ts
+```
+
+The files passed 69/69 and 18/18 respectively. The shared-DAG probe produced a
+deterministic truncation after 910 reflected leaf visits with a serialized body
+of 260,051 bytes, below the 262,144-byte global output ceiling.
+
+The authoritative final validation under Node `v22.23.1` was:
+
+```text
+pnpm --filter @nxt/api test -- auth api-response
+pnpm --filter @nxt/api typecheck
+pnpm --filter @nxt/api build
+pnpm lint
+pnpm test
+pnpm typecheck
+pnpm build
+git diff --check
+```
+
+All commands exited `0`:
+
+- focused API: 5 files, 137 tests passed;
+- root tests: contracts 6, domain 15, API 137 — 158 tests passed;
+- API and all-workspace typechecks/builds passed;
+- root ESLint passed; and
+- staged and unstaged diff checks reported no errors.
+
+### Fix round 1 concerns
+
+None.
