@@ -4,6 +4,7 @@ export type LocalDriveAdapterOptions = {
     beforeMetadataRollbackWrite?: () => void | Promise<void>;
     beforeMutationLoad?: () => void | Promise<void>;
     beforeLockRelease?: () => void | Promise<void>;
+    afterLockOwnershipCheck?: () => void | Promise<void>;
     onLockExists?: () => void | Promise<void>;
     beforeJournalOpen?: () => void | Promise<void>;
     lockTimeoutMs?: number;
@@ -14,6 +15,7 @@ export declare class LocalDriveAdapter implements StoragePort {
     private readonly beforeMetadataRollbackWrite?;
     private readonly beforeMutationLoad?;
     private readonly beforeLockRelease?;
+    private readonly afterLockOwnershipCheck?;
     private readonly onLockExists?;
     private readonly beforeJournalOpen?;
     private readonly lockTimeoutMs?;
@@ -96,8 +98,10 @@ export declare class LocalDriveAdapter implements StoragePort {
     private archiveTrashRollbackJournal;
     private writeRevision;
     private moveContentToTrash;
+    private archiveActiveCache;
     private readRevision;
     private atomicWrite;
+    private hasTrashRollbackJournal;
     private contentDirectory;
     private revisionsDirectory;
     private trashDirectory;

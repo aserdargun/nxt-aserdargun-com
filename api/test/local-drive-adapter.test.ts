@@ -322,6 +322,18 @@ describe("LocalDriveAdapter", () => {
     expect(await readFile(join(root, ".trash", file.id), "utf8")).toBe("bogus");
   });
 
+  it("writes Trash from the immutable revision rather than a mutable active cache", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "authoritative" });
+    await writeFile(join(root, ".content", file.id), "tampered cache");
+
+    await storage.trash(file.id);
+
+    expect(await readFile(join(root, ".trash", file.id), "utf8")).toBe("authoritative");
+    expect(await readFile(join(root, ".revisions", file.id, "1"), "utf8")).toBe("authoritative");
+  });
+
   it("retries lock acquisition when an existing lock disappears during handoff", async () => {
     const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
     await LocalDriveAdapter.create(root);
@@ -371,5 +383,66 @@ describe("LocalDriveAdapter", () => {
       })
     ).rejects.toThrow("unsafe Trash rollback journal");
     expect(swapped).toBe(true);
+  });
+
+  it("does not archive a successor lock when the previous owner path is swapped after ownership proof", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    let swapEnabled = false;
+    let swapped = false;
+    const owner = await LocalDriveAdapter.create(root, {
+      afterLockOwnershipCheck: async () => {
+        if (swapEnabled) {
+          const lockPath = join(root, ".mutation.lock");
+          await rename(lockPath, join(root, "previous-owner-lock"));
+          await mkdir(lockPath);
+          await writeFile(join(lockPath, "owner.json"), JSON.stringify({ token: "successor" }));
+          swapped = true;
+        }
+      }
+    });
+
+    swapEnabled = true;
+    await owner.createFolder({ parentId: "vault", name: "folder" });
+    expect(swapped).toBe(true);
+    expect(JSON.parse(await readFile(join(root, ".mutation.lock", "owner.json"), "utf8"))).toMatchObject({ token: "successor" });
+  });
+
+  it("rejects invalid lock timeout values before touching storage", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    for (const lockTimeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, -1, 0, 1.5, 60_001]) {
+      await expect(LocalDriveAdapter.create(root, { lockTimeoutMs })).rejects.toThrow("invalid lock timeout");
+    }
+  });
+
+  it("rejects deeply malformed root metadata during creation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    await LocalDriveAdapter.create(root);
+    const metadata = JSON.parse(await readFile(join(root, ".metadata.json"), "utf8"));
+    metadata.files.vault = null;
+    await writeFile(join(root, ".metadata.json"), `${JSON.stringify(metadata)}\n`);
+
+    await expect(LocalDriveAdapter.create(root)).rejects.toThrow("invalid local metadata");
+  });
+
+  it("rejects an unbound file Trash journal before initializing an empty root", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    await writeFile(
+      join(root, ".trash-rollback.json"),
+      JSON.stringify({ schemaVersion: 1, fileId: "file_1", originalMetadata: { schemaVersion: 1, sequence: 0, generation: 0, files: {}, revisions: {} } })
+    );
+
+    await expect(LocalDriveAdapter.create(root)).rejects.toThrow("pending Trash journal without metadata");
+    await expect(access(join(root, ".metadata.json"))).rejects.toThrow();
+  });
+
+  it("revalidates a replaced canonical root before creating a mutation lock", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const movedRoot = `${root}-moved`;
+    await rename(root, movedRoot);
+    await symlink(movedRoot, root);
+
+    await expect(storage.createFolder({ parentId: "vault", name: "folder" })).rejects.toThrow("unsafe storage directory");
+    await expect(access(join(movedRoot, ".mutation.lock"))).rejects.toThrow();
   });
 });
