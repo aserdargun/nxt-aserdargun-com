@@ -560,6 +560,93 @@ describe("LocalDriveAdapter", () => {
     });
   });
 
+  it("rolls back when current trashed metadata selects a revision not bound by the journal", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
+    const originalMetadata = JSON.parse(await readFile(join(root, ".metadata.json"), "utf8"));
+    const currentMetadata = structuredClone(originalMetadata);
+    currentMetadata.sequence = 2;
+    currentMetadata.generation = 2;
+    currentMetadata.files[file.id].trashed = true;
+    currentMetadata.files[file.id].version = "2";
+    currentMetadata.files[file.id].modifiedTime = "1970-01-01T00:00:00.002Z";
+    currentMetadata.files[file.id].contentRevision = "2";
+    currentMetadata.revisions[file.id].push({ id: "2", modifiedTime: "1970-01-01T00:00:00.002Z" });
+    await writeFile(join(root, ".revisions", file.id, "2"), "two", { flag: "wx" });
+    await writeFile(join(root, ".metadata.json"), `${JSON.stringify(currentMetadata)}\n`);
+    await writeFile(join(root, ".trash", file.id), "one", { flag: "wx" });
+    await writeFile(
+      join(root, ".trash-rollback.json"),
+      `${JSON.stringify({
+        schemaVersion: 2,
+        operation: "trash",
+        itemKind: "file",
+        state: "artifact-verified",
+        fileId: file.id,
+        originalMetadata,
+        content: { size: 3, checksum: createHash("sha256").update("one").digest("hex") }
+      })}\n`,
+      { flag: "wx" }
+    );
+
+    const recovered = await LocalDriveAdapter.create(root);
+
+    expect((await recovered.get(file.id)).trashed).toBe(false);
+    await expect(recovered.readText(file.id)).resolves.toMatchObject({ text: "one" });
+    await expect(access(join(root, ".trash", file.id))).rejects.toThrow();
+    const [historyEntry] = await readdir(join(root, ".transaction-history"));
+    expect(await readFile(join(root, ".transaction-history", historyEntry as string, "artifact"), "utf8")).toBe("one");
+    expect(JSON.parse(await readFile(join(root, ".transaction-history", historyEntry as string, "journal.json"), "utf8"))).toMatchObject({
+      schemaVersion: 2,
+      state: "rolled-back"
+    });
+
+    const restarted = await LocalDriveAdapter.create(root);
+    await expect(restarted.readText(file.id)).resolves.toMatchObject({ text: "one" });
+    expect(await readdir(join(root, ".transaction-history"))).toEqual([historyEntry]);
+  });
+
+  it("rolls back instead of throwing when the journal descriptor mismatches the active immutable revision", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
+    const originalMetadata = JSON.parse(await readFile(join(root, ".metadata.json"), "utf8"));
+    const currentMetadata = structuredClone(originalMetadata);
+    currentMetadata.sequence = 2;
+    currentMetadata.generation = 2;
+    currentMetadata.files[file.id].trashed = true;
+    currentMetadata.files[file.id].version = "2";
+    currentMetadata.files[file.id].modifiedTime = "1970-01-01T00:00:00.002Z";
+    await writeFile(join(root, ".metadata.json"), `${JSON.stringify(currentMetadata)}\n`);
+    await writeFile(join(root, ".trash", file.id), "two", { flag: "wx" });
+    await writeFile(
+      join(root, ".trash-rollback.json"),
+      `${JSON.stringify({
+        schemaVersion: 2,
+        operation: "trash",
+        itemKind: "file",
+        state: "artifact-verified",
+        fileId: file.id,
+        originalMetadata,
+        content: { size: 3, checksum: createHash("sha256").update("two").digest("hex") }
+      })}\n`,
+      { flag: "wx" }
+    );
+
+    const recovered = await LocalDriveAdapter.create(root);
+
+    expect((await recovered.get(file.id)).trashed).toBe(false);
+    await expect(recovered.readText(file.id)).resolves.toMatchObject({ text: "one" });
+    await expect(access(join(root, ".trash", file.id))).rejects.toThrow();
+    const [historyEntry] = await readdir(join(root, ".transaction-history"));
+    expect(await readFile(join(root, ".transaction-history", historyEntry as string, "artifact"), "utf8")).toBe("two");
+    expect(JSON.parse(await readFile(join(root, ".transaction-history", historyEntry as string, "journal.json"), "utf8"))).toMatchObject({
+      schemaVersion: 2,
+      state: "rolled-back"
+    });
+  });
+
   it("refuses a journal swapped to a symlink before the no-follow read", async () => {
     const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
     const storage = await LocalDriveAdapter.create(root);

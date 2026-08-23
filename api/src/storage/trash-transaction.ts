@@ -39,11 +39,24 @@ export type LegacyTrashJournal<Metadata> = {
   expectedContent?: TrashContentDescriptor;
 };
 
+export type TrashRecoveryPlan =
+  | { outcome: "success"; transitions: readonly TrashTransactionState[] }
+  | { outcome: "rollback"; transitions: readonly ["rolled-back"] }
+  | { outcome: "restore"; transitions: readonly [] };
+
 const allowedTransitions: Record<TrashTransactionState, readonly TrashTransactionState[]> = {
   prepared: ["metadata-staged", "rolled-back"],
   "metadata-staged": ["artifact-verified", "rolled-back"],
   "artifact-verified": ["finalized", "rolled-back"],
   finalized: ["rolled-back"],
+  "rolled-back": []
+};
+
+const successfulRecoveryTransitions: Record<TrashTransactionState, readonly TrashTransactionState[]> = {
+  prepared: ["metadata-staged", "artifact-verified", "finalized"],
+  "metadata-staged": ["artifact-verified", "finalized"],
+  "artifact-verified": ["finalized"],
+  finalized: [],
   "rolled-back": []
 };
 
@@ -61,4 +74,14 @@ export const transitionTrashTransaction = <Metadata>(
     throw new Error(`invalid Trash transaction transition: ${transaction.state} -> ${nextState}`);
   }
   return { ...transaction, state: nextState };
+};
+
+export const planTrashRecovery = (state: TrashTransactionState, successProven: boolean): TrashRecoveryPlan => {
+  if (state === "rolled-back") {
+    return { outcome: "restore", transitions: [] };
+  }
+  if (!successProven) {
+    return { outcome: "rollback", transitions: ["rolled-back"] };
+  }
+  return { outcome: "success", transitions: successfulRecoveryTransitions[state] };
 };

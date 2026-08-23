@@ -3,7 +3,8 @@ import { constants } from "node:fs";
 import { link, lstat, mkdir, open, readFile, realpath, rename, rmdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
-import { TRASH_TRANSACTION_SCHEMA_VERSION, isTrashTransactionState, transitionTrashTransaction } from "./trash-transaction.js";
+import { isDeepStrictEqual } from "node:util";
+import { TRASH_TRANSACTION_SCHEMA_VERSION, isTrashTransactionState, planTrashRecovery, transitionTrashTransaction } from "./trash-transaction.js";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const MAX_FILE_ID_LENGTH = 512;
 const MAX_NAME_LENGTH = 255;
@@ -410,25 +411,21 @@ export class LocalDriveAdapter {
             return;
         }
         let transaction = loaded.journal;
-        if (transaction.state === "rolled-back") {
+        const recoveryPlan = transaction.state === "rolled-back"
+            ? planTrashRecovery(transaction.state, false)
+            : planTrashRecovery(transaction.state, await this.isSuccessfulTrash(transaction, await this.loadMetadata()));
+        if (recoveryPlan.outcome === "restore") {
             await this.assertRestorableOriginalMetadata(transaction);
             await this.saveMetadata(transaction.originalMetadata, "recovery");
             await this.archiveTrashTransaction(transaction.fileId, true);
             return;
         }
-        const currentMetadata = await this.loadMetadata();
-        if (!(await this.isSuccessfulTrash(transaction, currentMetadata))) {
+        if (recoveryPlan.outcome === "rollback") {
             await this.rollbackTrashTransaction(transaction, "recovery");
             return;
         }
-        if (transaction.state === "prepared") {
-            transaction = await this.advanceTrashTransaction(transaction, "metadata-staged");
-        }
-        if (transaction.state === "metadata-staged") {
-            transaction = await this.advanceTrashTransaction(transaction, "artifact-verified");
-        }
-        if (transaction.state === "artifact-verified") {
-            transaction = await this.advanceTrashTransaction(transaction, "finalized");
+        for (const nextState of recoveryPlan.transitions) {
+            transaction = await this.advanceTrashTransaction(transaction, nextState);
         }
         await this.archiveTrashTransaction(transaction.fileId, false);
     }
@@ -488,6 +485,15 @@ export class LocalDriveAdapter {
         }
     }
     async isSuccessfulTrash(transaction, metadata) {
+        const expectedMetadata = cloneMetadata(transaction.originalMetadata);
+        const expectedFile = expectedMetadata.files[transaction.fileId];
+        if (expectedFile === undefined || expectedFile.kind !== transaction.itemKind || expectedFile.trashed) {
+            return false;
+        }
+        this.bumpFile(expectedMetadata, expectedFile, { trashed: true });
+        if (!isDeepStrictEqual(metadata, expectedMetadata)) {
+            return false;
+        }
         const currentFile = metadata.files[transaction.fileId];
         if (currentFile === undefined || !currentFile.trashed || currentFile.kind !== transaction.itemKind) {
             return false;
@@ -495,15 +501,22 @@ export class LocalDriveAdapter {
         if (transaction.itemKind === "folder") {
             return true;
         }
-        const originalFile = transaction.originalMetadata.files[transaction.fileId];
-        if (originalFile === undefined || originalFile.kind !== "file") {
+        let revisionBytes;
+        try {
+            revisionBytes = await this.readRevision(currentFile.id, this.getContentRevision(currentFile));
+        }
+        catch {
             return false;
         }
-        const revisionBytes = await this.readRevision(originalFile.id, this.getContentRevision(originalFile));
         if (!sameContentDescriptor(contentDescriptor(revisionBytes), transaction.content)) {
-            throw new Error("Trash transaction content does not match immutable revision");
+            return false;
         }
-        return matchesContentDescriptor(this.trashContentPath(transaction.fileId), transaction.content);
+        try {
+            return await matchesContentDescriptor(this.trashContentPath(transaction.fileId), transaction.content);
+        }
+        catch {
+            return false;
+        }
     }
     async loadTrashJournal() {
         const path = this.trashRollbackJournalPath();

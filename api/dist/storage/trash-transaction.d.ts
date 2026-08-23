@@ -26,7 +26,18 @@ export type LegacyTrashJournal<Metadata> = {
     originalMetadata: Metadata;
     expectedContent?: TrashContentDescriptor;
 };
+export type TrashRecoveryPlan = {
+    outcome: "success";
+    transitions: readonly TrashTransactionState[];
+} | {
+    outcome: "rollback";
+    transitions: readonly ["rolled-back"];
+} | {
+    outcome: "restore";
+    transitions: readonly [];
+};
 export declare const isTrashTransactionState: (value: unknown) => value is TrashTransactionState;
 export declare const transitionTrashTransaction: <Metadata>(transaction: TrashTransaction<Metadata>, nextState: TrashTransactionState) => TrashTransaction<Metadata>;
+export declare const planTrashRecovery: (state: TrashTransactionState, successProven: boolean) => TrashRecoveryPlan;
 export {};
 //# sourceMappingURL=trash-transaction.d.ts.map
