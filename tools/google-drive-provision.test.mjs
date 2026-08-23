@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { URL } from "node:url";
 import {
@@ -16,6 +17,7 @@ import {
 import {
   buildEnvFile,
   createGoogleProvisioningClient,
+  parseEnvFile,
   provisionDriveLayout,
   systemFileDefinitions,
   writeEnvFileAtomic
@@ -389,7 +391,7 @@ test("authorization rejects missing refresh credentials or a wrong owner before 
   assert.equal(persistenceCalls, 0);
 });
 
-test("the Google provisioning client escapes exact-name queries and exhausts pagination", async () => {
+test("the Google provisioning client escapes queries, paginates, and disables every gaxios retry", async () => {
   const calls = [];
   const responses = [
     { data: { files: [{ id: "first" }], nextPageToken: "next" } },
@@ -397,9 +399,19 @@ test("the Google provisioning client escapes exact-name queries and exhausts pag
   ];
   const client = createGoogleProvisioningClient({
     files: {
-      list: async (input) => {
-        calls.push(input);
+      list: async (input, options) => {
+        calls.push({ method: "list", input, options });
         return responses.shift();
+      },
+      create: async (input, options) => {
+        calls.push({ method: "create", input, options });
+        return { data: { id: "created" } };
+      },
+      get: async (input, options) => {
+        calls.push({ method: "get", input, options });
+        return input.alt === "media"
+          ? { data: "content" }
+          : { data: { id: input.fileId } };
       }
     }
   });
@@ -410,21 +422,65 @@ test("the Google provisioning client escapes exact-name queries and exhausts pag
       mimeType: "application/json"
     })
   );
+  await client.create({
+    parentId: "parent",
+    name: "file.json",
+    mimeType: "application/json",
+    content: "{}"
+  });
+  await client.get("file-id");
+  await client.readText("file-id");
   assert.deepEqual(calls, [
     {
-      q: "'parent\\'\\\\unsafe' in parents and name = 'name\\'\\\\unsafe' and mimeType = 'application/json' and trashed = false",
-      spaces: "drive",
-      pageSize: 100,
-      fields:
-        "nextPageToken,files(id,name,mimeType,parents,trashed,ownedByMe,permissions(id,type,role,emailAddress),version,md5Checksum)"
+      method: "list",
+      input: {
+        q: "'parent\\'\\\\unsafe' in parents and name = 'name\\'\\\\unsafe' and mimeType = 'application/json' and trashed = false",
+        spaces: "drive",
+        pageSize: 100,
+        fields:
+          "nextPageToken,files(id,name,mimeType,parents,trashed,ownedByMe,permissions(id,type,role,emailAddress),version,md5Checksum)"
+      },
+      options: { retry: false }
     },
     {
-      q: "'parent\\'\\\\unsafe' in parents and name = 'name\\'\\\\unsafe' and mimeType = 'application/json' and trashed = false",
-      spaces: "drive",
-      pageSize: 100,
-      pageToken: "next",
-      fields:
-        "nextPageToken,files(id,name,mimeType,parents,trashed,ownedByMe,permissions(id,type,role,emailAddress),version,md5Checksum)"
+      method: "list",
+      input: {
+        q: "'parent\\'\\\\unsafe' in parents and name = 'name\\'\\\\unsafe' and mimeType = 'application/json' and trashed = false",
+        spaces: "drive",
+        pageSize: 100,
+        pageToken: "next",
+        fields:
+          "nextPageToken,files(id,name,mimeType,parents,trashed,ownedByMe,permissions(id,type,role,emailAddress),version,md5Checksum)"
+      },
+      options: { retry: false }
+    },
+    {
+      method: "create",
+      input: {
+        requestBody: {
+          name: "file.json",
+          mimeType: "application/json",
+          parents: ["parent"]
+        },
+        media: { mimeType: "application/json", body: "{}" },
+        fields:
+          "id,name,mimeType,parents,trashed,ownedByMe,permissions(id,type,role,emailAddress),version,md5Checksum"
+      },
+      options: { retry: false }
+    },
+    {
+      method: "get",
+      input: {
+        fileId: "file-id",
+        fields:
+          "id,name,mimeType,parents,trashed,ownedByMe,permissions(id,type,role,emailAddress),version,md5Checksum"
+      },
+      options: { retry: false }
+    },
+    {
+      method: "get",
+      input: { fileId: "file-id", alt: "media" },
+      options: { responseType: "text", retry: false }
     }
   ]);
 });
@@ -472,6 +528,69 @@ test("callback validation accepts only the bound loopback host, root path, and s
       /callback/iu
     );
   }
+});
+
+test("callback validation rejects duplicate or ambiguous query parameters without surfacing query values", () => {
+  const sensitive = "sensitive-code-value";
+  const callbackUrls = [
+    `http://127.0.0.1:34117/?code=${sensitive}&code=second&state=fixed-state`,
+    `http://127.0.0.1:34117/?code=${sensitive}&state=fixed-state&state=fixed-state`,
+    `http://127.0.0.1:34117/?code=${sensitive}&state=fixed-state&error=denied`,
+    "http://127.0.0.1:34117/?state=fixed-state",
+    "http://127.0.0.1:34117/?code=&state=fixed-state"
+  ];
+  for (const callbackUrl of callbackUrls) {
+    let message = "";
+    assert.throws(() => {
+      try {
+        validateOAuthCallback({
+          callbackUrl,
+          expectedRedirectUri: "http://127.0.0.1:34117/",
+          expectedState: "fixed-state"
+        });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+        throw error;
+      }
+    }, /OAuth/iu);
+    assert.equal(message.includes(sensitive), false);
+    assert.equal(message.includes("denied"), false);
+  }
+});
+
+test("environment parsing rejects noncanonical key whitespace, duplicates, and injected newlines", () => {
+  for (const source of [
+    "  GOOGLE_REFRESH_TOKEN=old\n",
+    "\tGOOGLE_REFRESH_TOKEN=old\n",
+    "GOOGLE_REFRESH_TOKEN=one\nGOOGLE_REFRESH_TOKEN=two\n"
+  ]) {
+    assert.throws(() => parseEnvFile(source), /environment/iu);
+    assert.throws(
+      () => buildEnvFile(source, { GOOGLE_REFRESH_TOKEN: "next" }),
+      /environment/iu
+    );
+  }
+  assert.throws(
+    () => buildEnvFile("", { GOOGLE_REFRESH_TOKEN: "line-one\nline-two" }),
+    /unsafe/iu
+  );
+});
+
+test("downloaded Desktop OAuth credential filename patterns are ignored without hiding unrelated JSON", () => {
+  for (const path of [
+    "Desktop-app-client.json",
+    "Desktop-app-client-123.json",
+    "client_secret_123.apps.googleusercontent.com.json"
+  ]) {
+    const result = spawnSync("git", ["check-ignore", "--no-index", "--quiet", "--", path], {
+      cwd: globalThis.process.cwd()
+    });
+    assert.equal(result.status, 0, path);
+  }
+  const unrelated = spawnSync("git", ["check-ignore", "--no-index", "--quiet", "--", "client-settings.json"], {
+    cwd: globalThis.process.cwd()
+  });
+  assert.equal(unrelated.status, 1);
 });
 
 test("atomic environment persistence writes mode 0600 and leaves no temporary file", async () => {

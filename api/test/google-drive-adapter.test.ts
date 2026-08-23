@@ -176,7 +176,7 @@ describe("GoogleDriveAdapter", () => {
       failing.updateText({
         fileId: "file-id",
         expectedVersion: "1",
-        mimeType: "text/plain",
+        mimeType: "text/markdown",
         text: "next"
       })
     ).rejects.toThrow("Drive write failed");
@@ -220,6 +220,38 @@ describe("GoogleDriveAdapter", () => {
       "Drive read failed"
     );
     expect(forbiddenAttempts).toBe(1);
+
+    for (const status of [408, 501]) {
+      let nonAllowlistedAttempts = 0;
+      const nonAllowlisted = new GoogleDriveAdapter(
+        createClient({
+          get: async () => {
+            nonAllowlistedAttempts += 1;
+            throw statusError(status, "non-allowlisted-token");
+          }
+        }),
+        { sleep: async () => undefined, random: () => 0 }
+      );
+      await expect(nonAllowlisted.get("file-id")).rejects.toThrow(
+        "Drive read failed"
+      );
+      expect(nonAllowlistedAttempts).toBe(1);
+    }
+
+    let unavailableAttempts = 0;
+    const unavailable = new GoogleDriveAdapter(
+      createClient({
+        get: async () => {
+          unavailableAttempts += 1;
+          throw statusError(503, "unavailable-token");
+        }
+      }),
+      { sleep: async () => undefined, random: () => 0 }
+    );
+    await expect(unavailable.get("file-id")).rejects.toThrow(
+      "Drive read failed"
+    );
+    expect(unavailableAttempts).toBe(3);
   });
 
   it("redacts client errors and emits no secret logs", async () => {
@@ -322,13 +354,19 @@ describe("GoogleDriveAdapter", () => {
 
   it("moves items to Trash only through files.update", async () => {
     const calls: unknown[] = [];
+    let metadataReads = 0;
     const adapter = new GoogleDriveAdapter(
       createClient({
         update: async (input) => {
           calls.push(input);
           return { data: { id: "file-id" } };
         },
-        get: async () => ({ data: driveFile({ trashed: true, version: "2" }) })
+        get: async () => ({
+          data: driveFile({
+            trashed: metadataReads++ > 0,
+            version: metadataReads > 1 ? "2" : "1"
+          })
+        })
       })
     );
     const trashed = await adapter.trash("file-id");
@@ -415,6 +453,212 @@ describe("GoogleDriveAdapter", () => {
     await expect(
       adapter.createFolder({ parentId: "parent-id", name: "expected" })
     ).rejects.toThrow("create verification failed");
+  });
+
+  it("rejects a create whose readback ID differs from the write response", async () => {
+    const adapter = new GoogleDriveAdapter(
+      createClient({
+        create: async () => ({ data: { id: "created-id" } }),
+        get: async () => ({
+          data: driveFile({
+            id: "different-id",
+            name: "expected",
+            mimeType: FOLDER_MIME_TYPE,
+            parents: ["parent-id"],
+            size: undefined,
+            md5Checksum: undefined
+          })
+        })
+      })
+    );
+
+    await expect(
+      adapter.createFolder({ parentId: "parent-id", name: "expected" })
+    ).rejects.toThrow("create verification failed");
+  });
+
+  it("rejects update MIME changes and any concurrent identity, name, MIME, ancestry, trash, or version change", async () => {
+    let writes = 0;
+    const changedMime = new GoogleDriveAdapter(
+      createClient({
+        get: async () => ({ data: driveFile() }),
+        update: async () => {
+          writes += 1;
+          return { data: { id: "file-id" } };
+        }
+      })
+    );
+    await expect(
+      changedMime.updateText({
+        fileId: "file-id",
+        expectedVersion: "1",
+        mimeType: "text/plain",
+        text: "next"
+      })
+    ).rejects.toThrow("MIME");
+    expect(writes).toBe(0);
+
+    const mutations = [
+      { id: "different-id" },
+      { name: "renamed.md" },
+      { mimeType: "text/plain" },
+      { parents: ["other-parent"] },
+      { parents: ["parent", "other-parent"] },
+      { trashed: true },
+      { version: "1" }
+    ];
+    for (const mutation of mutations) {
+      let metadataReads = 0;
+      const adapter = new GoogleDriveAdapter(
+        createClient({
+          get: async () => ({
+            data:
+              metadataReads++ === 0
+                ? driveFile()
+                : driveFile({
+                    version: "2",
+                    size: "4",
+                    md5Checksum: createHash("md5").update("next").digest("hex"),
+                    ...mutation
+                  })
+          }),
+          update: async () => ({ data: { id: "file-id" } })
+        })
+      );
+      await expect(
+        adapter.updateText({
+          fileId: "file-id",
+          expectedVersion: "1",
+          mimeType: "text/markdown",
+          text: "next"
+        })
+      ).rejects.toThrow("upload verification failed");
+    }
+
+    const wrongWriteId = new GoogleDriveAdapter(
+      createClient({
+        get: async () => ({ data: driveFile() }),
+        update: async () => ({ data: { id: "different-id" } })
+      })
+    );
+    await expect(
+      wrongWriteId.updateText({
+        fileId: "file-id",
+        expectedVersion: "1",
+        mimeType: "text/markdown",
+        text: "next"
+      })
+    ).rejects.toThrow("upload verification failed");
+  });
+
+  it("verifies move identity, name, MIME, active state, exact parent, and newer version", async () => {
+    const failures = [
+      { after: { id: "different-id" } },
+      { after: { name: "renamed.md" } },
+      { after: { mimeType: "text/plain" } },
+      { after: { trashed: true } },
+      { after: { parents: ["other-parent"] } },
+      { after: { parents: ["to-parent", "other-parent"] } },
+      { after: { version: "1" } },
+      { after: {}, writeId: "different-id" }
+    ];
+    for (const failure of failures) {
+      let metadataReads = 0;
+      const adapter = new GoogleDriveAdapter(
+        createClient({
+          get: async () => ({
+            data:
+              metadataReads++ === 0
+                ? driveFile({ parents: ["from-parent"] })
+                : driveFile({
+                    parents: ["to-parent"],
+                    version: "2",
+                    ...failure.after
+                  })
+          }),
+          update: async () => ({
+            data: { id: failure.writeId ?? "file-id" }
+          })
+        })
+      );
+      await expect(
+        adapter.move({
+          fileId: "file-id",
+          fromParentId: "from-parent",
+          toParentId: "to-parent"
+        })
+      ).rejects.toThrow("move verification failed");
+    }
+
+    let metadataReads = 0;
+    const renamed = new GoogleDriveAdapter(
+      createClient({
+        get: async () => ({
+          data:
+            metadataReads++ === 0
+              ? driveFile({ parents: ["from-parent"] })
+              : driveFile({
+                  name: "renamed.md",
+                  parents: ["to-parent"],
+                  version: "2"
+                })
+        }),
+        update: async () => ({ data: { id: "file-id" } })
+      })
+    );
+    await expect(
+      renamed.move({
+        fileId: "file-id",
+        fromParentId: "from-parent",
+        toParentId: "to-parent",
+        newName: "renamed.md"
+      })
+    ).resolves.toMatchObject({ name: "renamed.md", parentIds: ["to-parent"] });
+  });
+
+  it("verifies trash identity, name, MIME, ancestry, prior active state, and newer version", async () => {
+    const failures = [
+      { after: { id: "different-id" } },
+      { after: { name: "renamed.md" } },
+      { after: { mimeType: "text/plain" } },
+      { after: { trashed: false } },
+      { after: { parents: ["other-parent"] } },
+      { after: { parents: ["parent", "other-parent"] } },
+      { after: { version: "1" } },
+      { after: {}, writeId: "different-id" }
+    ];
+    for (const failure of failures) {
+      let metadataReads = 0;
+      const adapter = new GoogleDriveAdapter(
+        createClient({
+          get: async () => ({
+            data:
+              metadataReads++ === 0
+                ? driveFile()
+                : driveFile({ trashed: true, version: "2", ...failure.after })
+          }),
+          update: async () => ({
+            data: { id: failure.writeId ?? "file-id" }
+          })
+        })
+      );
+      await expect(adapter.trash("file-id")).rejects.toThrow(
+        "Trash verification failed"
+      );
+    }
+
+    let updateCalls = 0;
+    const alreadyTrashed = new GoogleDriveAdapter(
+      createClient({
+        get: async () => ({ data: driveFile({ trashed: true }) }),
+        update: async () => {
+          updateCalls += 1;
+          return { data: { id: "file-id" } };
+        }
+      })
+    );
+    await expect(alreadyTrashed.trash("file-id")).rejects.toThrow("trashed");
+    expect(updateCalls).toBe(0);
   });
 
   it("rejects a media read whose bytes do not match Drive checksum metadata", async () => {

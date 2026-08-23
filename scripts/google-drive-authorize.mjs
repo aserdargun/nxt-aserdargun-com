@@ -9,6 +9,7 @@ import { URL, pathToFileURL } from "node:url";
 import {
   createOAuthRequest,
   parseDesktopClient,
+  readDriveOwner,
   requireRefreshToken,
   validateOAuthCallback,
   verifyOwnerEmail
@@ -18,8 +19,10 @@ import {
   readEnvFile,
   writeEnvFileAtomic
 } from "./google-drive-provision.mjs";
+import { loadGoogleApisFromApiPackage } from "./google-drive-googleapis.mjs";
 
-const OWNER_FIELDS = "user(emailAddress,displayName)";
+export const loadGoogleApisForAuthorization = () =>
+  loadGoogleApisFromApiPackage();
 
 export const completeGoogleAuthorization = async ({
   clientConfig,
@@ -122,8 +125,7 @@ export const runAuthorizationCli = async ({
           throw new Error("OAuth client was not initialized.");
         authorizedClient.setCredentials(tokens);
         const drive = google.drive({ version: "v3", auth: authorizedClient });
-        const response = await drive.about.get({ fields: OWNER_FIELDS });
-        return response.data.user;
+        return readDriveOwner(drive);
       },
       persist: (settings) => writeEnvFileAtomic(envPath, settings),
       log
@@ -290,7 +292,7 @@ const main = async () => {
     await runAuthorizationCli({
       argv: globalThis.process.argv.slice(2),
       cwd: globalThis.process.cwd(),
-      loadGoogleApis: () => import("googleapis"),
+      loadGoogleApis: loadGoogleApisForAuthorization,
       openBrowser: openSystemBrowser,
       log: (message) => globalThis.console.log(message)
     });

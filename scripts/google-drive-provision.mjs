@@ -7,7 +7,12 @@ import {
   PublicationManifestSchema,
   VaultIndexSchema
 } from "../packages/contracts/dist/index.js";
-import { planFolders, verifyOwnerEmail } from "./google-drive-oauth.mjs";
+import {
+  planFolders,
+  readDriveOwner,
+  verifyOwnerEmail
+} from "./google-drive-oauth.mjs";
+import { loadGoogleApisFromApiPackage } from "./google-drive-googleapis.mjs";
 
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const JSON_MIME_TYPE = "application/json";
@@ -54,6 +59,7 @@ export const systemFileDefinitions = () =>
 export const buildEnvFile = (source, updates) => {
   if (typeof source !== "string")
     throw new Error("Environment source must be text.");
+  parseEnvFile(source);
   const entries = Object.entries(updates);
   for (const [key, value] of entries) assertEnvEntry(key, value);
   const lines = source === "" ? [] : source.replace(/\r\n/gu, "\n").split("\n");
@@ -86,7 +92,7 @@ export const readEnvFile = async (path) => {
 export const parseEnvFile = (source) => {
   const values = {};
   for (const rawLine of source.replace(/\r\n/gu, "\n").split("\n")) {
-    const line = rawLine.trim();
+    const line = rawLine;
     if (line === "" || line.startsWith("#")) continue;
     const separator = line.indexOf("=");
     if (separator <= 0)
@@ -137,13 +143,16 @@ export const createGoogleProvisioningClient = (drive) => ({
     const seenTokens = new Set();
     let pageToken;
     for (let page = 0; page < MAX_PROVISION_PAGES; page += 1) {
-      const response = await drive.files.list({
-        q,
-        spaces: "drive",
-        pageSize: 100,
-        ...(pageToken === undefined ? {} : { pageToken }),
-        fields: PROVISION_LIST_FIELDS
-      });
+      const response = await drive.files.list(
+        {
+          q,
+          spaces: "drive",
+          pageSize: 100,
+          ...(pageToken === undefined ? {} : { pageToken }),
+          fields: PROVISION_LIST_FIELDS
+        },
+        { retry: false }
+      );
       const pageFiles = response?.data?.files;
       if (pageFiles !== undefined) {
         if (!Array.isArray(pageFiles))
@@ -166,24 +175,32 @@ export const createGoogleProvisioningClient = (drive) => ({
     throw new Error("Google Drive provisioning pagination limit exceeded.");
   },
   async create({ parentId, name, mimeType, content }) {
-    const response = await drive.files.create({
-      requestBody: { name, mimeType, parents: [parentId] },
-      ...(content === undefined ? {} : { media: { mimeType, body: content } }),
-      fields: PROVISION_FIELDS
-    });
+    const response = await drive.files.create(
+      {
+        requestBody: { name, mimeType, parents: [parentId] },
+        ...(content === undefined
+          ? {}
+          : { media: { mimeType, body: content } }),
+        fields: PROVISION_FIELDS
+      },
+      { retry: false }
+    );
     return response.data;
   },
   async get(id) {
-    const response = await drive.files.get({
-      fileId: id,
-      fields: PROVISION_FIELDS
-    });
+    const response = await drive.files.get(
+      {
+        fileId: id,
+        fields: PROVISION_FIELDS
+      },
+      { retry: false }
+    );
     return response.data;
   },
   async readText(id) {
     const response = await drive.files.get(
       { fileId: id, alt: "media" },
-      { responseType: "text" }
+      { responseType: "text", retry: false }
     );
     if (typeof response.data !== "string")
       throw new Error("Google Drive system file content is invalid.");
@@ -202,17 +219,18 @@ export const runProvisioningCli = async ({ cwd, loadGoogleApis, log }) => {
   const auth = new google.auth.OAuth2(clientId, clientSecret);
   auth.setCredentials({ refresh_token: refreshToken });
   const drive = google.drive({ version: "v3", auth });
-  const ownerResponse = await drive.about.get({
-    fields: "user(emailAddress,displayName)"
-  });
+  const owner = await readDriveOwner(drive);
   const ownerEmail = verifyOwnerEmail({
     expectedEmail: expectedOwnerEmail,
-    actualEmail: ownerResponse.data.user?.emailAddress
+    actualEmail: owner?.emailAddress
   });
-  const rootResponse = await drive.files.get({
-    fileId: ROOT_PARENT_ID,
-    fields: "id"
-  });
+  const rootResponse = await drive.files.get(
+    {
+      fileId: ROOT_PARENT_ID,
+      fields: "id"
+    },
+    { retry: false }
+  );
   const rootParentId = requireDriveId(rootResponse.data?.id);
   const result = await provisionDriveLayout({
     client: createGoogleProvisioningClient(drive),
@@ -458,11 +476,14 @@ const safeErrorMessage = (error) => {
   return "Google Drive provisioning failed.";
 };
 
+export const loadGoogleApisForProvisioning = () =>
+  loadGoogleApisFromApiPackage();
+
 const main = async () => {
   try {
     await runProvisioningCli({
       cwd: globalThis.process.cwd(),
-      loadGoogleApis: () => import("googleapis"),
+      loadGoogleApis: loadGoogleApisForProvisioning,
       log: (message) => globalThis.console.log(message)
     });
   } catch (error) {

@@ -122,11 +122,15 @@ export class GoogleDriveAdapter {
             throw preserveSafeError(error, "Google Drive read failed.");
         }
         assertWritableContent(before);
+        assertSingleParent(before, "Google Drive upload verification failed.");
         if (before.version !== input.expectedVersion)
             throw new DriveContractError("version conflict");
+        if (input.mimeType !== before.mimeType)
+            throw new DriveContractError("Google Drive MIME type change is not allowed.");
         const bytes = new TextEncoder().encode(input.text);
+        let response;
         try {
-            await this.client.files.update({
+            response = await this.client.files.update({
                 fileId: input.fileId,
                 requestBody: { mimeType: input.mimeType },
                 media: { mimeType: input.mimeType, body: input.text },
@@ -136,7 +140,12 @@ export class GoogleDriveAdapter {
         catch {
             throw new DriveContractError("Google Drive write failed.");
         }
-        return this.verifyUpload(input.fileId, md5(bytes), before.version);
+        assertWriteResponseId(response.data, input.fileId, "Google Drive upload verification failed.");
+        const after = await this.verifyUpload(input.fileId, md5(bytes), before.version);
+        if (!matchesActiveSnapshot(after, before)) {
+            throw new DriveContractError("Google Drive upload verification failed.");
+        }
+        return after;
     }
     async move(input) {
         assertFileId(input.fileId);
@@ -165,15 +174,22 @@ export class GoogleDriveAdapter {
             removeParents: input.fromParentId,
             fields: "id"
         };
+        let response;
         try {
-            await this.client.files.update(request);
+            response = await this.client.files.update(request);
         }
         catch {
             throw new DriveContractError("Google Drive write failed.");
         }
+        assertWriteResponseId(response.data, input.fileId, "Google Drive move verification failed.");
         const after = await this.readBackAfterWrite(input.fileId);
-        if (after.parentIds.length !== 1 ||
-            after.parentIds[0] !== input.toParentId) {
+        if (after.id !== before.id ||
+            after.name !== (input.newName ?? before.name) ||
+            after.mimeType !== before.mimeType ||
+            after.trashed ||
+            after.parentIds.length !== 1 ||
+            after.parentIds[0] !== input.toParentId ||
+            !isNewerVersion(after.version, before.version)) {
             throw new DriveContractError("Google Drive move verification failed.");
         }
         return after;
@@ -182,8 +198,18 @@ export class GoogleDriveAdapter {
         assertFileId(fileId);
         if (fileId === this.rootId)
             throw new DriveContractError("cannot trash configured root");
+        let before;
         try {
-            await this.client.files.update({
+            before = toStoredFile(await this.readMetadata(fileId), this.rootId);
+        }
+        catch (error) {
+            throw preserveSafeError(error, "Google Drive read failed.");
+        }
+        assertActiveNonShortcut(before);
+        assertSingleParent(before, "Google Drive Trash verification failed.");
+        let response;
+        try {
+            response = await this.client.files.update({
                 fileId,
                 requestBody: { trashed: true },
                 fields: "id"
@@ -192,8 +218,15 @@ export class GoogleDriveAdapter {
         catch {
             throw new DriveContractError("Google Drive write failed.");
         }
+        assertWriteResponseId(response.data, fileId, "Google Drive Trash verification failed.");
         const file = await this.readBackAfterWrite(fileId);
-        if (!file.trashed)
+        if (file.id !== before.id ||
+            file.name !== before.name ||
+            file.mimeType !== before.mimeType ||
+            !file.trashed ||
+            file.parentIds.length !== 1 ||
+            file.parentIds[0] !== before.parentIds[0] ||
+            !isNewerVersion(file.version, before.version))
             throw new DriveContractError("Google Drive Trash verification failed.");
         return file;
     }
@@ -260,7 +293,8 @@ export class GoogleDriveAdapter {
         const created = input.checksum === undefined
             ? await this.readBackAfterWrite(createdId)
             : await this.verifyUpload(createdId, input.checksum);
-        if (created.name !== input.name ||
+        if (created.id !== createdId ||
+            created.name !== input.name ||
             created.mimeType !== input.mimeType ||
             created.parentIds.length !== 1 ||
             created.parentIds[0] !== input.parentId ||
@@ -348,6 +382,16 @@ const assertReadableContent = (file) => {
 const assertWritableContent = (file) => {
     assertReadableContent(file);
 };
+const assertSingleParent = (file, message) => {
+    if (file.parentIds.length !== 1)
+        throw new DriveContractError(message);
+};
+const matchesActiveSnapshot = (after, before) => after.id === before.id &&
+    after.name === before.name &&
+    after.mimeType === before.mimeType &&
+    !after.trashed &&
+    after.parentIds.length === 1 &&
+    after.parentIds[0] === before.parentIds[0];
 const assertActiveNonShortcut = (file) => {
     if (file.trashed)
         throw new DriveContractError("Google Drive item is trashed.");
@@ -368,6 +412,17 @@ const requireFileIdFromWrite = (value) => {
     const id = requireNonEmptyString(requireRecord(value).id);
     assertFileId(id);
     return id;
+};
+const assertWriteResponseId = (value, expectedId, message) => {
+    let id;
+    try {
+        id = requireFileIdFromWrite(value);
+    }
+    catch {
+        throw new DriveContractError(message);
+    }
+    if (id !== expectedId)
+        throw new DriveContractError(message);
 };
 const requireRecord = (value) => {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {

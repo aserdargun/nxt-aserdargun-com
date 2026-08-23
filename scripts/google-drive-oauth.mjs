@@ -103,22 +103,30 @@ export const validateOAuthCallback = ({
   ) {
     throw new Error("OAuth callback host or path is invalid.");
   }
-  const receivedState = callback.searchParams.get("state");
+  const receivedStates = callback.searchParams.getAll("state");
   if (
-    receivedState === null ||
-    !constantTimeEqual(receivedState, expectedState)
+    receivedStates.length !== 1 ||
+    !constantTimeEqual(receivedStates[0], expectedState)
   ) {
     throw new Error("OAuth callback state is invalid.");
   }
-  const oauthError = callback.searchParams.get("error");
-  if (oauthError !== null) {
+  const oauthErrors = callback.searchParams.getAll("error");
+  if (oauthErrors.length !== 0) {
     throw new Error("OAuth authorization was not granted.");
   }
-  const code = callback.searchParams.get("code");
-  if (code === null || code.trim() === "") {
+  const codes = callback.searchParams.getAll("code");
+  if (codes.length !== 1 || codes[0].trim() === "") {
     throw new Error("OAuth callback did not contain an authorization code.");
   }
-  return code;
+  return codes[0];
+};
+
+export const readDriveOwner = async (drive) => {
+  const response = await drive.about.get(
+    { fields: "user(emailAddress,displayName)" },
+    { retry: false }
+  );
+  return response.data.user;
 };
 
 export const verifyOwnerEmail = ({ expectedEmail, actualEmail }) => {

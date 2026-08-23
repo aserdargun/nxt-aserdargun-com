@@ -76,6 +76,9 @@ export class RootBoundaryStorage implements StoragePort {
       } catch {
         throw new Error("missing parent in file ancestry");
       }
+      if (file.id !== currentId) {
+        throw new Error("file identity does not match ancestry request");
+      }
       if (file.trashed) {
         throw new Error("trashed file is outside configured root");
       }
@@ -147,7 +150,13 @@ export class RootBoundaryStorage implements StoragePort {
 
   public async updateText(input: { fileId: string; expectedVersion: string; mimeType: string; text: string }): Promise<StoredFile> {
     await this.assertInside(input.fileId);
-    return this.storage.updateText(input);
+    const file = await this.storage.updateText(input);
+    if (file.id !== input.fileId) {
+      throw new Error("updated file identity changed");
+    }
+    await this.assertReturnedInside(file);
+    await this.assertInside(file.id);
+    return file;
   }
 
   public async move(input: { fileId: string; fromParentId: string; toParentId: string; newName?: string }): Promise<StoredFile> {
@@ -167,6 +176,26 @@ export class RootBoundaryStorage implements StoragePort {
   public async listRevisions(fileId: string): Promise<Array<{ id: string; modifiedTime: string }>> {
     await this.assertInside(fileId);
     return this.storage.listRevisions(fileId);
+  }
+
+  private async assertReturnedInside(file: StoredFile): Promise<void> {
+    assertFileId(file.id);
+    if (file.trashed) {
+      throw new Error("trashed file is outside configured root");
+    }
+    if (file.mimeType === SHORTCUT_MIME_TYPE) {
+      throw new Error("shortcut is not allowed in configured root");
+    }
+    if (file.id === this.allowedRootId) {
+      if (file.parentIds.length !== 0) {
+        throw new Error("configured root has parent ancestry");
+      }
+      return;
+    }
+    if (file.parentIds.length !== 1) {
+      throw new Error("ambiguous ancestry");
+    }
+    await this.assertInside(file.parentIds[0] as string);
   }
 }
 

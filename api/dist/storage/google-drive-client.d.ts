@@ -1,3 +1,4 @@
+export declare const GOOGLE_DRIVE_INTEGRATION_FOLDER_FIELDS = "id,name,mimeType,parents,trashed,ownedByMe,permissions(id,type,role,emailAddress)";
 export interface GoogleDriveGetInput {
     fileId: string;
     fields?: string;
@@ -66,10 +67,43 @@ export interface GoogleDriveClient {
         }>;
     };
 }
+interface GoogleRequestOptions {
+    responseType?: "arraybuffer";
+    retry: false;
+}
+interface RawGoogleDriveClient {
+    files: {
+        get(input: GoogleDriveGetInput, options: GoogleRequestOptions): Promise<{
+            data: unknown;
+        }>;
+        list(input: GoogleDriveListInput, options: GoogleRequestOptions): Promise<{
+            data: unknown;
+        }>;
+        create(input: GoogleDriveCreateInput, options: GoogleRequestOptions): Promise<{
+            data: unknown;
+        }>;
+        update(input: GoogleDriveUpdateInput, options: GoogleRequestOptions): Promise<{
+            data: unknown;
+        }>;
+    };
+    revisions: {
+        list(input: GoogleDriveRevisionListInput, options: GoogleRequestOptions): Promise<{
+            data: unknown;
+        }>;
+    };
+}
 export interface GoogleDriveCredentials {
     clientId: string;
     clientSecret: string;
     refreshToken: string;
 }
+export interface GoogleDriveIntegrationSettings {
+    privateFolderId: string;
+    integrationFolderId: string;
+    notesFolderId: string;
+}
+export declare const assertPrivateIntegrationFolderMetadata: (value: unknown, settings: GoogleDriveIntegrationSettings) => void;
 export declare const createGoogleDriveClient: (credentials: GoogleDriveCredentials) => GoogleDriveClient;
+export declare const wrapGoogleDriveClient: (raw: RawGoogleDriveClient) => GoogleDriveClient;
+export {};
 //# sourceMappingURL=google-drive-client.d.ts.map

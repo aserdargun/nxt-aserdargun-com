@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RootBoundaryStorage } from "../src/storage/index.js";
+import type { StoragePort, StoredFile } from "../src/storage/index.js";
 
 describe("RootBoundaryStorage", () => {
   it("rejects cross-root and ambiguous ancestry", async () => {
@@ -60,4 +61,74 @@ describe("RootBoundaryStorage", () => {
     const storage = RootBoundaryStorage.forTest({ allowedRootId: "vault", graph });
     await expect(storage.assertInside("node-0")).rejects.toThrow("ancestry limit");
   });
+
+  it("post-validates update return identity and ancestry while allowing a Trash result", async () => {
+    const file = (input: Partial<StoredFile> = {}): StoredFile => ({
+      id: "note",
+      name: "note.md",
+      mimeType: "text/markdown",
+      parentIds: ["vault"],
+      version: "2",
+      modifiedTime: "2026-08-23T00:00:00.000Z",
+      size: 4,
+      trashed: false,
+      ...input
+    });
+    const unsupported = async (): Promise<never> =>
+      Promise.reject(new Error("unsupported"));
+    const makeStorage = (updated: StoredFile): StoragePort => ({
+      get: async (fileId) =>
+        fileId === "vault"
+          ? file({
+              id: "vault",
+              name: "vault",
+              mimeType: FOLDER_MIME_TYPE,
+              parentIds: [],
+              size: 0
+            })
+          : file(),
+      listChildren: unsupported,
+      readText: unsupported,
+      readBytes: unsupported,
+      createFolder: unsupported,
+      createText: unsupported,
+      createBytes: unsupported,
+      updateText: async () => updated,
+      move: unsupported,
+      trash: async () => file({ trashed: true }),
+      listRevisions: unsupported
+    });
+
+    for (const updated of [
+      file({ id: "other" }),
+      file({ parentIds: ["outside"] }),
+      file({ parentIds: ["vault", "outside"] })
+    ]) {
+      const bounded = new RootBoundaryStorage(makeStorage(updated), "vault");
+      await expect(
+        bounded.updateText({
+          fileId: "note",
+          expectedVersion: "1",
+          mimeType: "text/markdown",
+          text: "next"
+        })
+      ).rejects.toThrow();
+    }
+
+    const bounded = new RootBoundaryStorage(makeStorage(file()), "vault");
+    await expect(
+      bounded.updateText({
+        fileId: "note",
+        expectedVersion: "1",
+        mimeType: "text/markdown",
+        text: "next"
+      })
+    ).resolves.toMatchObject({ id: "note", parentIds: ["vault"] });
+    await expect(bounded.trash("note")).resolves.toMatchObject({
+      id: "note",
+      trashed: true
+    });
+  });
 });
+
+const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";

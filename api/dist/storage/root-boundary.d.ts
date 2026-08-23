@@ -63,6 +63,7 @@ export declare class RootBoundaryStorage implements StoragePort {
         id: string;
         modifiedTime: string;
     }>>;
+    private assertReturnedInside;
 }
 export {};
 //# sourceMappingURL=root-boundary.d.ts.map

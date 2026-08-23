@@ -2,6 +2,8 @@
 node_modules/
 .env.local
 google-oauth-client*.json
+Desktop-app-client*.json
+client_secret_*.json
 .nxt-local/
 web/dist/
 api-dist/

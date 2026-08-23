@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  assertPrivateIntegrationFolderMetadata,
   createGoogleDriveClient,
+  GOOGLE_DRIVE_INTEGRATION_FOLDER_FIELDS,
   GoogleDriveAdapter,
   RootBoundaryStorage
 } from "../src/storage/index.js";
@@ -15,13 +17,22 @@ liveDescribe("GoogleDriveAdapter live integration", () => {
     const integrationFolderId = requireSetting(
       env.NXT_INTEGRATION_TEST_DRIVE_FOLDER_ID
     );
+    const privateFolderId = requireSetting(env.NXT_PRIVATE_DRIVE_FOLDER_ID);
     const notesFolderId = requireSetting(env.NXT_NOTES_DRIVE_FOLDER_ID);
-    expect(integrationFolderId).not.toBe(notesFolderId);
 
     const client = createGoogleDriveClient({
       clientId: requireSetting(env.GOOGLE_CLIENT_ID),
       clientSecret: requireSetting(env.GOOGLE_CLIENT_SECRET),
       refreshToken: requireSetting(env.GOOGLE_REFRESH_TOKEN)
+    });
+    const rawIntegration = await client.files.get({
+      fileId: integrationFolderId,
+      fields: GOOGLE_DRIVE_INTEGRATION_FOLDER_FIELDS
+    });
+    assertPrivateIntegrationFolderMetadata(rawIntegration.data, {
+      privateFolderId,
+      integrationFolderId,
+      notesFolderId
     });
     const storage = new RootBoundaryStorage(
       new GoogleDriveAdapter(client, { rootId: integrationFolderId }),
@@ -37,21 +48,26 @@ liveDescribe("GoogleDriveAdapter live integration", () => {
         text: "one"
       });
       fileId = created.id;
+      expect(created.parentIds).toEqual([integrationFolderId]);
       const updated = await storage.updateText({
         fileId,
         expectedVersion: created.version,
         mimeType: "text/plain",
         text: "two"
       });
+      expect(updated.parentIds).toEqual([integrationFolderId]);
       expect(BigInt(updated.version)).toBeGreaterThan(BigInt(created.version));
-      await expect(storage.readText(fileId)).resolves.toMatchObject({
-        text: "two"
-      });
+      const readback = await storage.readText(fileId);
+      expect(readback).toMatchObject({ text: "two" });
+      expect(readback.file.parentIds).toEqual([integrationFolderId]);
       const firstPage = await storage.listChildren({
         parentId: integrationFolderId,
         pageSize: 1
       });
       expect(firstPage.files.length).toBeLessThanOrEqual(1);
+      for (const file of firstPage.files) {
+        expect(file.parentIds).toEqual([integrationFolderId]);
+      }
       if (firstPage.nextPageToken !== undefined) {
         await expect(
           storage.listChildren({
