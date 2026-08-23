@@ -348,3 +348,94 @@ All commands exited `0`:
 ### Fix round 2 concerns
 
 None beyond the documented JavaScript engine-level enumeration limitation.
+
+## Fix round 3 — canonical correlation IDs and admitted prototype chains
+
+### Status and commit
+
+DONE. Both remaining Important findings were reproduced, fixed, and validated
+locally without using an external service.
+
+- Fix implementation: `12017631ec3ee14a0ce283b322f59a61955c3d91` —
+  `fix: constrain error correlation IDs`.
+
+### Implementation
+
+1. A supplied request ID is now reflected only when it is an exact lowercase
+   canonical RFC 4122 UUID with a valid version 1–5 nibble and RFC variant.
+   Every other value is discarded and replaced with Node's generated lowercase
+   version-4 UUID. Token-like strings, Drive identifiers, mixed-case UUIDs,
+   overlong input, controls, and a UUID prefix followed by attacker data never
+   enter the error body.
+2. `errorResponse()` continues to build the exact shared `ApiError` body from
+   only the validated enum code, its static official message, and the admitted
+   or generated request ID. Caller error fields and caller messages are never
+   serialized.
+3. Before an admitted record can reach `for...in`, its complete prototype chain
+   is walked with a hard depth ceiling of 32. Each prototype is checked with
+   `util/types.isProxy` before any other operation on that prototype. Direct,
+   deep, and revoked prototype Proxies, cyclic or over-depth chains, and any
+   thrown inspection reject the record as `[Unserializable]`.
+4. Every inspected ordinary prototype consumes the existing monotonic global
+   node budget. The enumeration loop still consumes the entry budget before
+   own-descriptor filtering, so inherited yielded keys are bounded even though
+   they are not serialized.
+
+The previously documented limitation remains only for engine-internal
+enumeration metadata on already-admitted ordinary prototype chains. Proxy
+chains are rejected before enumeration, and application-level prototype,
+entry, key, node, and output work remains explicitly bounded.
+
+### RED evidence
+
+The regression file ran with the exported Node 22 path; both the shell and pnpm
+subprocess reported `v22.23.1`:
+
+```text
+pnpm --filter @nxt/api exec vitest run test/api-response.test.ts --reporter=dot
+```
+
+Exit `1`: 8 tests failed and 30 passed. Direct and deeper prototype Proxies
+reached their explosive `ownKeys` traps, an ordinary 33-level chain was
+serialized, and five unsafe supplied IDs (`refresh_token`, `Bearer`, a raw
+Drive ID, a mixed-case UUID, and a UUID-prefix-plus-secret) were reflected.
+The already-rejected overlong and control cases passed in RED and remained as
+explicit regressions.
+
+### GREEN and final validation
+
+Focused file-level GREEN:
+
+```text
+pnpm --filter @nxt/api exec vitest run test/api-response.test.ts --reporter=dot
+```
+
+The file passed 38/38 tests. Direct, deep, and revoked prototype Proxy traps
+were not invoked; a 33-level chain failed closed; inherited enumeration stopped
+at the entry budget; unsafe IDs were regenerated; and the exact canonical UUID
+fixture remained deterministic and contract-valid.
+
+The complete validation under Node `v22.23.1` was:
+
+```text
+pnpm --filter @nxt/api test -- auth api-response
+pnpm --filter @nxt/api typecheck
+pnpm --filter @nxt/api build
+pnpm lint
+pnpm test
+pnpm typecheck
+pnpm build
+git diff --check
+```
+
+All commands exited `0`:
+
+- focused API: 5 files, 164 tests passed;
+- root tests: contracts 6, domain 15, API 164 — 185 tests passed;
+- API and all-workspace typechecks/builds passed;
+- root ESLint passed; and
+- staged and unstaged diff checks reported no errors.
+
+### Fix round 3 concerns
+
+None beyond the documented engine-internal ordinary-enumeration limitation.
