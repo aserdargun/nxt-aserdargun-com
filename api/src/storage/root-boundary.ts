@@ -65,9 +65,6 @@ export class RootBoundaryStorage implements StoragePort {
 
     for (let nodes = 0; nodes < MAX_ANCESTRY_NODES; nodes += 1) {
       assertFileId(currentId);
-      if (currentId === this.allowedRootId) {
-        return;
-      }
       if (visited.has(currentId)) {
         throw new Error("cycle in file ancestry");
       }
@@ -84,6 +81,12 @@ export class RootBoundaryStorage implements StoragePort {
       }
       if (file.mimeType === SHORTCUT_MIME_TYPE) {
         throw new Error("shortcut is not allowed in configured root");
+      }
+      if (currentId === this.allowedRootId) {
+        if (file.parentIds.length !== 0) {
+          throw new Error("configured root has parent ancestry");
+        }
+        return;
       }
       if (file.parentIds.length === 0) {
         throw new Error("file is outside configured root");

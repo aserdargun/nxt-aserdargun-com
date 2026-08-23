@@ -1,9 +1,13 @@
 import type { StoragePort, StoredFile } from "./storage-port.js";
+export type LocalDriveAdapterOptions = {
+    beforeMetadataWrite?: () => void | Promise<void>;
+};
 export declare class LocalDriveAdapter implements StoragePort {
     private readonly root;
+    private readonly beforeMetadataWrite?;
     private operation;
     private constructor();
-    static create(root: string): Promise<LocalDriveAdapter>;
+    static create(root: string, options?: LocalDriveAdapterOptions): Promise<LocalDriveAdapter>;
     get(fileId: string): Promise<StoredFile>;
     listChildren(input: {
         parentId: string;
@@ -66,11 +70,12 @@ export declare class LocalDriveAdapter implements StoragePort {
     private getActiveFile;
     private getActiveFolder;
     private getActiveContentFile;
+    private getContentRevision;
     private assertMoveDoesNotCycle;
     private writeContent;
     private writeRevision;
     private moveContentToTrash;
-    private readContent;
+    private readRevision;
     private atomicWrite;
     private contentDirectory;
     private revisionsDirectory;

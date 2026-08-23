@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -93,5 +93,66 @@ describe("LocalDriveAdapter", () => {
     expect(moved.parentIds).toEqual([child.id]);
     expect(moved.name).toBe("moved.md");
     await expect(storage.readText(file.id)).resolves.toMatchObject({ text: "text" });
+  });
+
+  it("does not expose an update when metadata persistence rejects it and retries preserve its revision", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    let rejectNextMetadataSave = false;
+    const storage = await LocalDriveAdapter.create(root, {
+      beforeMetadataWrite: () => {
+        if (rejectNextMetadataSave) {
+          rejectNextMetadataSave = false;
+          throw new Error("injected metadata failure");
+        }
+      }
+    });
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
+
+    rejectNextMetadataSave = true;
+    await expect(
+      storage.updateText({ fileId: file.id, expectedVersion: file.version, mimeType: "text/markdown", text: "two" })
+    ).rejects.toThrow("injected metadata failure");
+    expect(await storage.get(file.id)).toMatchObject({ version: file.version });
+    await expect(storage.readText(file.id)).resolves.toMatchObject({ text: "one" });
+    expect(await storage.listRevisions(file.id)).toEqual([{ id: "1", modifiedTime: file.modifiedTime }]);
+
+    const retried = await storage.updateText({ fileId: file.id, expectedVersion: file.version, mimeType: "text/markdown", text: "two" });
+    expect(retried.version).toBe("2");
+    await expect(storage.readText(file.id)).resolves.toMatchObject({ text: "two" });
+    expect(await readFile(join(root, ".revisions", file.id, "2"), "utf8")).toBe("two");
+  });
+
+  it("never overwrites an existing immutable revision", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
+    await writeFile(join(root, ".revisions", file.id, "2"), "immutable other content", { flag: "wx" });
+
+    await expect(
+      storage.updateText({ fileId: file.id, expectedVersion: file.version, mimeType: "text/markdown", text: "two" })
+    ).rejects.toThrow("immutable revision");
+    expect((await storage.get(file.id)).version).toBe(file.version);
+    await expect(storage.readText(file.id)).resolves.toMatchObject({ text: "one" });
+    expect(await readFile(join(root, ".revisions", file.id, "2"), "utf8")).toBe("immutable other content");
+  });
+
+  it("rejects an intermediate symlink without creating metadata outside the requested root", async () => {
+    const base = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const container = join(base, "container");
+    const outside = join(base, "outside");
+    await mkdir(container);
+    await mkdir(outside);
+    await symlink(outside, join(container, "link"));
+
+    await expect(LocalDriveAdapter.create(join(container, "link", "nested"))).rejects.toThrow("unsafe storage directory");
+    await expect(access(join(outside, "nested", ".metadata.json"))).rejects.toThrow();
+  });
+
+  it("returns only the StoragePort file fields", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const file = await storage.createFolder({ parentId: "vault", name: "folder" });
+
+    expect(file).not.toHaveProperty("kind");
   });
 });

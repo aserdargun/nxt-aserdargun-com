@@ -19,6 +19,18 @@ describe("RootBoundaryStorage", () => {
     await expect(storage.assertInside("note")).resolves.toBeUndefined();
   });
 
+  it("validates the configured root before accepting it", async () => {
+    await expect(
+      RootBoundaryStorage.forTest({ allowedRootId: "vault", graph: {} }).assertInside("vault")
+    ).rejects.toThrow("missing parent");
+    await expect(
+      RootBoundaryStorage.forTest({ allowedRootId: "vault", graph: { vault: [] }, trashed: ["vault"] }).assertInside("vault")
+    ).rejects.toThrow("trashed");
+    await expect(
+      RootBoundaryStorage.forTest({ allowedRootId: "vault", graph: { vault: [] }, shortcuts: ["vault"] }).assertInside("vault")
+    ).rejects.toThrow("shortcut");
+  });
+
   it("rejects multiple parents, cycles, shortcuts, trash, missing parents, and long IDs", async () => {
     await expect(
       RootBoundaryStorage.forTest({ allowedRootId: "vault", graph: { vault: [], shared: ["vault", "other"] } }).assertInside("shared")

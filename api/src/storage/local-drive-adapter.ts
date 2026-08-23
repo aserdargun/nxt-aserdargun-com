@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile, lstat } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import type { StoragePort, StoredFile } from "./storage-port.js";
 
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
@@ -9,7 +10,7 @@ const MAX_NAME_LENGTH = 255;
 const MAX_PAGE_SIZE = 1000;
 const GENERATED_ID = /^file_[0-9a-z]+$/;
 
-type LocalFile = StoredFile & { kind: "root" | "folder" | "file" };
+type LocalFile = StoredFile & { kind: "root" | "folder" | "file"; contentRevision?: string };
 type LocalRevision = { id: string; modifiedTime: string };
 type LocalMetadata = {
   schemaVersion: 1;
@@ -20,14 +21,22 @@ type LocalMetadata = {
 };
 type PageCursor = { parentId: string; offset: number; generation: number };
 
+export type LocalDriveAdapterOptions = {
+  beforeMetadataWrite?: () => void | Promise<void>;
+};
+
 export class LocalDriveAdapter implements StoragePort {
   private operation = Promise.resolve();
 
-  private constructor(private readonly root: string) {}
+  private constructor(
+    private readonly root: string,
+    private readonly beforeMetadataWrite?: () => void | Promise<void>
+  ) {}
 
-  public static async create(root: string): Promise<LocalDriveAdapter> {
-    await mkdir(root, { recursive: true });
-    const adapter = new LocalDriveAdapter(resolve(root));
+  public static async create(root: string, options: LocalDriveAdapterOptions = {}): Promise<LocalDriveAdapter> {
+    const safeRoot = await canonicalizeTemporaryPath(root);
+    await ensureDirectory(safeRoot);
+    const adapter = new LocalDriveAdapter(await realpath(safeRoot), options.beforeMetadataWrite);
     await adapter.initialize();
     return adapter;
   }
@@ -66,7 +75,7 @@ export class LocalDriveAdapter implements StoragePort {
     return this.run(async () => {
       const metadata = await this.loadMetadata();
       const file = this.getActiveContentFile(metadata, fileId);
-      const bytes = await this.readContent(file.id);
+      const bytes = await this.readRevision(file.id, this.getContentRevision(file));
       return { file: this.toStoredFile(file), text: new TextDecoder("utf-8", { fatal: true }).decode(bytes), checksum: checksum(bytes) };
     });
   }
@@ -75,7 +84,7 @@ export class LocalDriveAdapter implements StoragePort {
     return this.run(async () => {
       const metadata = await this.loadMetadata();
       const file = this.getActiveContentFile(metadata, fileId);
-      const bytes = await this.readContent(file.id);
+      const bytes = await this.readRevision(file.id, this.getContentRevision(file));
       return { file: this.toStoredFile(file), bytes, checksum: checksum(bytes) };
     });
   }
@@ -102,9 +111,9 @@ export class LocalDriveAdapter implements StoragePort {
       const metadata = await this.loadMetadata();
       this.getActiveFolder(metadata, input.parentId);
       const file = this.newFile(metadata, input.parentId, input.name, input.mimeType, "file", input.bytes.byteLength);
-      await this.writeContent(file.id, input.bytes);
       await this.writeRevision(metadata, file.id, file.version, input.bytes);
       await this.saveMetadata(metadata);
+      await this.writeContent(file.id, input.bytes).catch(() => undefined);
       return this.toStoredFile(file);
     });
   }
@@ -119,9 +128,10 @@ export class LocalDriveAdapter implements StoragePort {
       }
       const bytes = new TextEncoder().encode(input.text);
       this.bumpFile(metadata, file, { mimeType: input.mimeType, size: bytes.byteLength });
-      await this.writeContent(file.id, bytes);
+      file.contentRevision = file.version;
       await this.writeRevision(metadata, file.id, file.version, bytes);
       await this.saveMetadata(metadata);
+      await this.writeContent(file.id, bytes).catch(() => undefined);
       return this.toStoredFile(file);
     });
   }
@@ -156,11 +166,11 @@ export class LocalDriveAdapter implements StoragePort {
       if (file.kind === "root") {
         throw new Error("cannot trash configured root");
       }
-      if (file.kind === "file") {
-        await this.moveContentToTrash(file.id);
-      }
       this.bumpFile(metadata, file, { trashed: true });
       await this.saveMetadata(metadata);
+      if (file.kind === "file") {
+        await this.moveContentToTrash(file.id).catch(() => undefined);
+      }
       return this.toStoredFile(file);
     });
   }
@@ -204,6 +214,7 @@ export class LocalDriveAdapter implements StoragePort {
   }
 
   private async loadMetadata(): Promise<LocalMetadata> {
+    await ensureDirectory(this.root);
     const metadataStat = await lstat(this.metadataPath());
     if (metadataStat.isSymbolicLink() || !metadataStat.isFile()) {
       throw new Error("unsafe metadata path");
@@ -213,6 +224,7 @@ export class LocalDriveAdapter implements StoragePort {
   }
 
   private async saveMetadata(metadata: LocalMetadata): Promise<void> {
+    await this.beforeMetadataWrite?.();
     await this.atomicWrite(this.metadataPath(), new TextEncoder().encode(`${JSON.stringify(metadata, null, 2)}\n`));
   }
 
@@ -222,7 +234,18 @@ export class LocalDriveAdapter implements StoragePort {
       throw new Error("duplicate deterministic file ID");
     }
     const modifiedTime = nextTime(metadata);
-    const file: LocalFile = { id, name, mimeType, parentIds: [parentId], version: "1", modifiedTime, size, trashed: false, kind };
+    const file: LocalFile = {
+      id,
+      name,
+      mimeType,
+      parentIds: [parentId],
+      version: "1",
+      modifiedTime,
+      size,
+      trashed: false,
+      kind,
+      ...(kind === "file" ? { contentRevision: "1" } : {})
+    };
     metadata.files[id] = file;
     metadata.revisions[id] = [];
     metadata.generation += 1;
@@ -269,6 +292,13 @@ export class LocalDriveAdapter implements StoragePort {
     return file;
   }
 
+  private getContentRevision(file: LocalFile): string {
+    if (file.contentRevision === undefined) {
+      throw new Error("content file is missing its revision");
+    }
+    return file.contentRevision;
+  }
+
   private assertMoveDoesNotCycle(metadata: LocalMetadata, fileId: string, destinationId: string): void {
     let currentId = destinationId;
     const visited = new Set<string>();
@@ -299,17 +329,31 @@ export class LocalDriveAdapter implements StoragePort {
   private async writeRevision(metadata: LocalMetadata, fileId: string, revisionId: string, bytes: Uint8Array): Promise<void> {
     const revisionDirectory = join(this.revisionsDirectory(), fileId);
     await ensureDirectory(revisionDirectory);
-    await this.atomicWrite(join(revisionDirectory, revisionId), bytes);
+    const revisionPath = join(revisionDirectory, revisionId);
+    try {
+      await writeFile(revisionPath, bytes, { flag: "wx" });
+    } catch (error) {
+      if (!isAlreadyExists(error)) {
+        throw error;
+      }
+      const existing = await this.readRevision(fileId, revisionId);
+      if (!equalBytes(existing, bytes)) {
+        throw new Error("immutable revision already exists", { cause: error });
+      }
+    }
     const revisions = metadata.revisions[fileId];
     const file = metadata.files[fileId];
     if (revisions === undefined || file === undefined) {
       throw new Error("file metadata changed during revision write");
     }
-    revisions.push({ id: revisionId, modifiedTime: file.modifiedTime });
+    if (!revisions.some((revision) => revision.id === revisionId)) {
+      revisions.push({ id: revisionId, modifiedTime: file.modifiedTime });
+    }
   }
 
   private async moveContentToTrash(fileId: string): Promise<void> {
     const source = this.contentPath(fileId);
+    await ensureDirectory(dirname(source));
     const sourceStat = await lstat(source);
     if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
       throw new Error("unsafe content path");
@@ -327,13 +371,15 @@ export class LocalDriveAdapter implements StoragePort {
     await rename(source, destination);
   }
 
-  private async readContent(fileId: string): Promise<Uint8Array> {
-    const path = this.contentPath(fileId);
-    const contentStat = await lstat(path);
-    if (contentStat.isSymbolicLink() || !contentStat.isFile()) {
-      throw new Error("unsafe content path");
+  private async readRevision(fileId: string, revisionId: string): Promise<Uint8Array> {
+    const revisionDirectory = join(this.revisionsDirectory(), fileId);
+    await ensureDirectory(revisionDirectory);
+    const revisionPath = join(revisionDirectory, revisionId);
+    const revisionStat = await lstat(revisionPath);
+    if (revisionStat.isSymbolicLink() || !revisionStat.isFile()) {
+      throw new Error("unsafe revision path");
     }
-    return readFile(path);
+    return readFile(revisionPath);
   }
 
   private async atomicWrite(path: string, bytes: Uint8Array): Promise<void> {
@@ -365,7 +411,16 @@ export class LocalDriveAdapter implements StoragePort {
   }
 
   private toStoredFile(file: LocalFile): StoredFile {
-    return { ...file, parentIds: [...file.parentIds] };
+    return {
+      id: file.id,
+      name: file.name,
+      mimeType: file.mimeType,
+      parentIds: [...file.parentIds],
+      version: file.version,
+      modifiedTime: file.modifiedTime,
+      size: file.size,
+      trashed: file.trashed
+    };
   }
 }
 
@@ -465,7 +520,41 @@ const decodeCursor = (token: string): PageCursor => {
 };
 
 const ensureDirectory = async (path: string): Promise<void> => {
-  await mkdir(path, { recursive: true });
+  const absolutePath = resolve(path);
+  const root = parse(absolutePath).root;
+  let currentPath = root;
+  await assertDirectory(currentPath);
+  for (const component of relative(root, absolutePath).split(sep).filter(Boolean)) {
+    currentPath = join(currentPath, component);
+    try {
+      await assertDirectory(currentPath);
+    } catch (error) {
+      if (!isNotFound(error)) {
+        throw error;
+      }
+      try {
+        await mkdir(currentPath);
+      } catch (mkdirError) {
+        if (!isAlreadyExists(mkdirError)) {
+          throw mkdirError;
+        }
+      }
+      await assertDirectory(currentPath);
+    }
+  }
+};
+
+const canonicalizeTemporaryPath = async (path: string): Promise<string> => {
+  const absolutePath = resolve(path);
+  const logicalTemporaryRoot = resolve(tmpdir());
+  const relativePath = relative(logicalTemporaryRoot, absolutePath);
+  if (relativePath === "" || (!relativePath.startsWith(`..${sep}`) && relativePath !== ".." && !isAbsolute(relativePath))) {
+    return join(await realpath(logicalTemporaryRoot), relativePath);
+  }
+  return absolutePath;
+};
+
+const assertDirectory = async (path: string): Promise<void> => {
   const directoryStat = await lstat(path);
   if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
     throw new Error("unsafe storage directory");
@@ -473,3 +562,7 @@ const ensureDirectory = async (path: string): Promise<void> => {
 };
 
 const isNotFound = (error: unknown): error is NodeJS.ErrnoException => typeof error === "object" && error !== null && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT";
+
+const isAlreadyExists = (error: unknown): error is NodeJS.ErrnoException => typeof error === "object" && error !== null && "code" in error && (error as NodeJS.ErrnoException).code === "EEXIST";
+
+const equalBytes = (left: Uint8Array, right: Uint8Array): boolean => left.byteLength === right.byteLength && left.every((value, index) => value === right[index]);

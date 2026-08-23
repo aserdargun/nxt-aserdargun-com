@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile, lstat } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const MAX_FILE_ID_LENGTH = 512;
 const MAX_NAME_LENGTH = 255;
@@ -8,13 +9,16 @@ const MAX_PAGE_SIZE = 1000;
 const GENERATED_ID = /^file_[0-9a-z]+$/;
 export class LocalDriveAdapter {
     root;
+    beforeMetadataWrite;
     operation = Promise.resolve();
-    constructor(root) {
+    constructor(root, beforeMetadataWrite) {
         this.root = root;
+        this.beforeMetadataWrite = beforeMetadataWrite;
     }
-    static async create(root) {
-        await mkdir(root, { recursive: true });
-        const adapter = new LocalDriveAdapter(resolve(root));
+    static async create(root, options = {}) {
+        const safeRoot = await canonicalizeTemporaryPath(root);
+        await ensureDirectory(safeRoot);
+        const adapter = new LocalDriveAdapter(await realpath(safeRoot), options.beforeMetadataWrite);
         await adapter.initialize();
         return adapter;
     }
@@ -48,7 +52,7 @@ export class LocalDriveAdapter {
         return this.run(async () => {
             const metadata = await this.loadMetadata();
             const file = this.getActiveContentFile(metadata, fileId);
-            const bytes = await this.readContent(file.id);
+            const bytes = await this.readRevision(file.id, this.getContentRevision(file));
             return { file: this.toStoredFile(file), text: new TextDecoder("utf-8", { fatal: true }).decode(bytes), checksum: checksum(bytes) };
         });
     }
@@ -56,7 +60,7 @@ export class LocalDriveAdapter {
         return this.run(async () => {
             const metadata = await this.loadMetadata();
             const file = this.getActiveContentFile(metadata, fileId);
-            const bytes = await this.readContent(file.id);
+            const bytes = await this.readRevision(file.id, this.getContentRevision(file));
             return { file: this.toStoredFile(file), bytes, checksum: checksum(bytes) };
         });
     }
@@ -80,9 +84,9 @@ export class LocalDriveAdapter {
             const metadata = await this.loadMetadata();
             this.getActiveFolder(metadata, input.parentId);
             const file = this.newFile(metadata, input.parentId, input.name, input.mimeType, "file", input.bytes.byteLength);
-            await this.writeContent(file.id, input.bytes);
             await this.writeRevision(metadata, file.id, file.version, input.bytes);
             await this.saveMetadata(metadata);
+            await this.writeContent(file.id, input.bytes).catch(() => undefined);
             return this.toStoredFile(file);
         });
     }
@@ -96,9 +100,10 @@ export class LocalDriveAdapter {
             }
             const bytes = new TextEncoder().encode(input.text);
             this.bumpFile(metadata, file, { mimeType: input.mimeType, size: bytes.byteLength });
-            await this.writeContent(file.id, bytes);
+            file.contentRevision = file.version;
             await this.writeRevision(metadata, file.id, file.version, bytes);
             await this.saveMetadata(metadata);
+            await this.writeContent(file.id, bytes).catch(() => undefined);
             return this.toStoredFile(file);
         });
     }
@@ -131,11 +136,11 @@ export class LocalDriveAdapter {
             if (file.kind === "root") {
                 throw new Error("cannot trash configured root");
             }
-            if (file.kind === "file") {
-                await this.moveContentToTrash(file.id);
-            }
             this.bumpFile(metadata, file, { trashed: true });
             await this.saveMetadata(metadata);
+            if (file.kind === "file") {
+                await this.moveContentToTrash(file.id).catch(() => undefined);
+            }
             return this.toStoredFile(file);
         });
     }
@@ -173,6 +178,7 @@ export class LocalDriveAdapter {
         return result;
     }
     async loadMetadata() {
+        await ensureDirectory(this.root);
         const metadataStat = await lstat(this.metadataPath());
         if (metadataStat.isSymbolicLink() || !metadataStat.isFile()) {
             throw new Error("unsafe metadata path");
@@ -181,6 +187,7 @@ export class LocalDriveAdapter {
         return assertMetadata(parsed);
     }
     async saveMetadata(metadata) {
+        await this.beforeMetadataWrite?.();
         await this.atomicWrite(this.metadataPath(), new TextEncoder().encode(`${JSON.stringify(metadata, null, 2)}\n`));
     }
     newFile(metadata, parentId, name, mimeType, kind, size) {
@@ -189,7 +196,18 @@ export class LocalDriveAdapter {
             throw new Error("duplicate deterministic file ID");
         }
         const modifiedTime = nextTime(metadata);
-        const file = { id, name, mimeType, parentIds: [parentId], version: "1", modifiedTime, size, trashed: false, kind };
+        const file = {
+            id,
+            name,
+            mimeType,
+            parentIds: [parentId],
+            version: "1",
+            modifiedTime,
+            size,
+            trashed: false,
+            kind,
+            ...(kind === "file" ? { contentRevision: "1" } : {})
+        };
         metadata.files[id] = file;
         metadata.revisions[id] = [];
         metadata.generation += 1;
@@ -230,6 +248,12 @@ export class LocalDriveAdapter {
         }
         return file;
     }
+    getContentRevision(file) {
+        if (file.contentRevision === undefined) {
+            throw new Error("content file is missing its revision");
+        }
+        return file.contentRevision;
+    }
     assertMoveDoesNotCycle(metadata, fileId, destinationId) {
         let currentId = destinationId;
         const visited = new Set();
@@ -258,16 +282,31 @@ export class LocalDriveAdapter {
     async writeRevision(metadata, fileId, revisionId, bytes) {
         const revisionDirectory = join(this.revisionsDirectory(), fileId);
         await ensureDirectory(revisionDirectory);
-        await this.atomicWrite(join(revisionDirectory, revisionId), bytes);
+        const revisionPath = join(revisionDirectory, revisionId);
+        try {
+            await writeFile(revisionPath, bytes, { flag: "wx" });
+        }
+        catch (error) {
+            if (!isAlreadyExists(error)) {
+                throw error;
+            }
+            const existing = await this.readRevision(fileId, revisionId);
+            if (!equalBytes(existing, bytes)) {
+                throw new Error("immutable revision already exists", { cause: error });
+            }
+        }
         const revisions = metadata.revisions[fileId];
         const file = metadata.files[fileId];
         if (revisions === undefined || file === undefined) {
             throw new Error("file metadata changed during revision write");
         }
-        revisions.push({ id: revisionId, modifiedTime: file.modifiedTime });
+        if (!revisions.some((revision) => revision.id === revisionId)) {
+            revisions.push({ id: revisionId, modifiedTime: file.modifiedTime });
+        }
     }
     async moveContentToTrash(fileId) {
         const source = this.contentPath(fileId);
+        await ensureDirectory(dirname(source));
         const sourceStat = await lstat(source);
         if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
             throw new Error("unsafe content path");
@@ -285,13 +324,15 @@ export class LocalDriveAdapter {
         }
         await rename(source, destination);
     }
-    async readContent(fileId) {
-        const path = this.contentPath(fileId);
-        const contentStat = await lstat(path);
-        if (contentStat.isSymbolicLink() || !contentStat.isFile()) {
-            throw new Error("unsafe content path");
+    async readRevision(fileId, revisionId) {
+        const revisionDirectory = join(this.revisionsDirectory(), fileId);
+        await ensureDirectory(revisionDirectory);
+        const revisionPath = join(revisionDirectory, revisionId);
+        const revisionStat = await lstat(revisionPath);
+        if (revisionStat.isSymbolicLink() || !revisionStat.isFile()) {
+            throw new Error("unsafe revision path");
         }
-        return readFile(path);
+        return readFile(revisionPath);
     }
     async atomicWrite(path, bytes) {
         await ensureDirectory(dirname(path));
@@ -316,7 +357,16 @@ export class LocalDriveAdapter {
         return join(this.contentDirectory(), fileId);
     }
     toStoredFile(file) {
-        return { ...file, parentIds: [...file.parentIds] };
+        return {
+            id: file.id,
+            name: file.name,
+            mimeType: file.mimeType,
+            parentIds: [...file.parentIds],
+            version: file.version,
+            modifiedTime: file.modifiedTime,
+            size: file.size,
+            trashed: file.trashed
+        };
     }
 }
 const initialMetadata = () => ({
@@ -404,11 +454,47 @@ const decodeCursor = (token) => {
     }
 };
 const ensureDirectory = async (path) => {
-    await mkdir(path, { recursive: true });
+    const absolutePath = resolve(path);
+    const root = parse(absolutePath).root;
+    let currentPath = root;
+    await assertDirectory(currentPath);
+    for (const component of relative(root, absolutePath).split(sep).filter(Boolean)) {
+        currentPath = join(currentPath, component);
+        try {
+            await assertDirectory(currentPath);
+        }
+        catch (error) {
+            if (!isNotFound(error)) {
+                throw error;
+            }
+            try {
+                await mkdir(currentPath);
+            }
+            catch (mkdirError) {
+                if (!isAlreadyExists(mkdirError)) {
+                    throw mkdirError;
+                }
+            }
+            await assertDirectory(currentPath);
+        }
+    }
+};
+const canonicalizeTemporaryPath = async (path) => {
+    const absolutePath = resolve(path);
+    const logicalTemporaryRoot = resolve(tmpdir());
+    const relativePath = relative(logicalTemporaryRoot, absolutePath);
+    if (relativePath === "" || (!relativePath.startsWith(`..${sep}`) && relativePath !== ".." && !isAbsolute(relativePath))) {
+        return join(await realpath(logicalTemporaryRoot), relativePath);
+    }
+    return absolutePath;
+};
+const assertDirectory = async (path) => {
     const directoryStat = await lstat(path);
     if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
         throw new Error("unsafe storage directory");
     }
 };
 const isNotFound = (error) => typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+const isAlreadyExists = (error) => typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
+const equalBytes = (left, right) => left.byteLength === right.byteLength && left.every((value, index) => value === right[index]);
 //# sourceMappingURL=local-drive-adapter.js.map
