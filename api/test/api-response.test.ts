@@ -1,4 +1,5 @@
 import { ApiErrorSchema } from "@nxt/contracts";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { ApiResponseError, errorResponse, json } from "../src/http/api-response.js";
 
@@ -95,6 +96,95 @@ describe("json", () => {
 
     expect(response.jsonBody).toBe("[Error]");
     expect(JSON.stringify(response.jsonBody)).not.toMatch(/Bearer|drive-file-id|refresh_token/u);
+  });
+
+  it("detects cross-realm native errors without reading their secret message", () => {
+    const context = { messageReads: 0 };
+    const crossRealmError = runInNewContext(
+      `(() => {
+        const error = new Error();
+        Object.defineProperty(error, "message", {
+          enumerable: true,
+          get() {
+            messageReads += 1;
+            return "Bearer drive-file-id refresh_token";
+          }
+        });
+        return error;
+      })()`,
+      context
+    ) as unknown;
+
+    const response = json(crossRealmError);
+
+    expect(response.jsonBody).toBe("[Error]");
+    expect(context.messageReads).toBe(0);
+    expect(JSON.stringify(response.jsonBody)).not.toMatch(/Bearer|drive-file-id|refresh_token/u);
+  });
+
+  it("does not invoke Error-spoofing accessors", () => {
+    let getterCalls = 0;
+    const spoofed = Object.create(null) as Record<PropertyKey, unknown>;
+    Object.defineProperty(spoofed, Symbol.toStringTag, {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error("Bearer tag-secret");
+      }
+    });
+    Object.defineProperty(spoofed, "message", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        throw new Error("Bearer message-secret");
+      }
+    });
+
+    const response = json(spoofed);
+
+    expect(getterCalls).toBe(0);
+    expect(() => JSON.stringify(response.jsonBody)).not.toThrow();
+    expect(JSON.stringify(response.jsonBody)).not.toContain("Bearer");
+  });
+
+  it("returns a static marker for revoked array and object proxies", () => {
+    const revokedValues = [Proxy.revocable([], {}), Proxy.revocable({}, {})];
+    for (const value of revokedValues) {
+      value.revoke();
+
+      expect(() => json({ value: value.proxy })).not.toThrow();
+      expect(json({ value: value.proxy }).jsonBody).toEqual({ value: "[Unserializable]" });
+      expect(() => errorResponse(value.proxy)).not.toThrow();
+      expect(errorResponse(value.proxy).status).toBe(503);
+    }
+  });
+
+  it("uses global deterministic budgets for a shared DAG", () => {
+    let leafVisits = 0;
+    const sharedLeaf = new Proxy(
+      { value: "x".repeat(256) },
+      {
+        ownKeys(target) {
+          leafVisits += 1;
+          return Reflect.ownKeys(target);
+        }
+      }
+    );
+    let dag: unknown = sharedLeaf;
+    for (let depth = 0; depth < 12; depth += 1) {
+      dag = { left: dag, right: dag };
+    }
+
+    const first = JSON.stringify(json(dag).jsonBody);
+    const firstVisits = leafVisits;
+    leafVisits = 0;
+    const second = JSON.stringify(json(dag).jsonBody);
+
+    expect(first).toBe(second);
+    expect(first.includes("[Truncated]")).toBe(true);
+    expect(Buffer.byteLength(first, "utf8")).toBeLessThanOrEqual(262_144);
+    expect(firstVisits).toBeLessThan(2_048);
+    expect(leafVisits).toBe(firstVisits);
   });
 });
 

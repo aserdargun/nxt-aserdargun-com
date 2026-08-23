@@ -1,6 +1,7 @@
 import type { HttpResponseInit } from "@azure/functions";
 import type { ApiError } from "@nxt/contracts";
 import { randomUUID } from "node:crypto";
+import { isNativeError as nodeIsNativeError } from "node:util/types";
 
 type ApiErrorCode = ApiError["error"]["code"];
 
@@ -17,9 +18,25 @@ const ERROR_DEFINITIONS = {
 
 const ERROR_CODES = new Set<ApiErrorCode>(Object.keys(ERROR_DEFINITIONS) as ApiErrorCode[]);
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" } as const;
-const MAX_SERIALIZATION_DEPTH = 32;
-const MAX_CONTAINER_ENTRIES = 1_000;
+const MAX_SANITIZATION_DEPTH = 32;
+const MAX_SANITIZATION_NODES = 8_192;
+const MAX_SANITIZATION_ENTRIES = 16_384;
+const MAX_SANITIZATION_OUTPUT_BYTES = 262_144;
+const TRUNCATION_RESERVE_BYTES = 64;
+const MAX_STRING_CODE_UNITS = MAX_SANITIZATION_OUTPUT_BYTES;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u;
+const TRUNCATED = "[Truncated]";
+const UNSERIALIZABLE = "[Unserializable]";
+const ERROR_MARKER = "[Error]";
+const CIRCULAR = "[Circular]";
+
+interface SanitizationState {
+  readonly path: WeakSet<object>;
+  visitedNodes: number;
+  visitedEntries: number;
+  outputBytes: number;
+  exhausted: boolean;
+}
 
 export class ApiResponseError extends Error {
   public readonly code: ApiErrorCode;
@@ -37,7 +54,7 @@ export class ApiResponseError extends Error {
 export const json = (value: unknown, status = 200): HttpResponseInit => ({
   status,
   headers: JSON_HEADERS,
-  jsonBody: sanitize(value, new WeakSet<object>(), 0)
+  jsonBody: safelySanitize(value)
 });
 
 export const errorResponse = (error: unknown, suppliedRequestId?: string): HttpResponseInit => {
@@ -75,72 +92,134 @@ const isErrorCode = (value: unknown): value is ApiErrorCode =>
 const isRequestId = (value: string | undefined): value is string =>
   typeof value === "string" && REQUEST_ID_PATTERN.test(value);
 
-const sanitize = (value: unknown, seen: WeakSet<object>, depth: number): unknown => {
-  if (depth > MAX_SERIALIZATION_DEPTH) {
-    return "[Truncated]";
+const safelySanitize = (value: unknown): unknown => {
+  const state: SanitizationState = {
+    path: new WeakSet<object>(),
+    visitedNodes: 0,
+    visitedEntries: 0,
+    outputBytes: 0,
+    exhausted: false
+  };
+  try {
+    return sanitize(value, state, 0);
+  } catch {
+    return UNSERIALIZABLE;
+  }
+};
+
+const sanitize = (value: unknown, state: SanitizationState, depth: number): unknown => {
+  if (state.exhausted || depth > MAX_SANITIZATION_DEPTH || !visitNode(state)) {
+    return truncate(state);
   }
   if (value === null || typeof value === "string" || typeof value === "boolean") {
-    return value;
+    return emitPrimitive(value, state);
   }
   if (typeof value === "number") {
-    return Number.isFinite(value) ? value : null;
+    return emitPrimitive(Number.isFinite(value) ? value : null, state);
   }
   if (typeof value === "bigint") {
-    return value.toString();
+    let converted: string;
+    try {
+      converted = String(value);
+    } catch {
+      return emitMarker(UNSERIALIZABLE, state);
+    }
+    return emitPrimitive(converted, state);
   }
   if (typeof value !== "object") {
-    return null;
+    return emitPrimitive(null, state);
   }
   if (isNativeError(value)) {
-    return "[Error]";
+    return emitMarker(ERROR_MARKER, state);
   }
-  if (seen.has(value)) {
-    return "[Circular]";
+  if (state.path.has(value)) {
+    return emitMarker(CIRCULAR, state);
   }
-  seen.add(value);
 
-  if (Array.isArray(value)) {
-    let lengthDescriptor: PropertyDescriptor | undefined;
+  const arrayKind = inspectArray(value);
+  if (arrayKind === null) {
+    return emitMarker(UNSERIALIZABLE, state);
+  }
+
+  state.path.add(value);
+  try {
+    return arrayKind ? sanitizeArray(value, state, depth) : sanitizeObject(value, state, depth);
+  } finally {
+    state.path.delete(value);
+  }
+};
+
+const sanitizeArray = (value: object, state: SanitizationState, depth: number): unknown => {
+  if (!reserveOutput(state, 2)) {
+    return truncate(state);
+  }
+  let lengthDescriptor: PropertyDescriptor | undefined;
+  try {
+    lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  } catch {
+    return emitMarker(UNSERIALIZABLE, state);
+  }
+  if (
+    lengthDescriptor === undefined ||
+    !("value" in lengthDescriptor) ||
+    typeof lengthDescriptor.value !== "number" ||
+    !Number.isSafeInteger(lengthDescriptor.value) ||
+    lengthDescriptor.value < 0
+  ) {
+    return emitMarker(UNSERIALIZABLE, state);
+  }
+
+  const result: unknown[] = [];
+  for (let index = 0; index < lengthDescriptor.value; index += 1) {
+    if (!visitEntry(state) || (index > 0 && !reserveOutput(state, 1))) {
+      result.push(truncate(state));
+      break;
+    }
+    let descriptor: PropertyDescriptor | undefined;
     try {
-      lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+      descriptor = Object.getOwnPropertyDescriptor(value, String(index));
     } catch {
-      seen.delete(value);
-      return "[Unserializable]";
+      result.push(emitMarker(UNSERIALIZABLE, state));
+      continue;
     }
-    const length =
-      lengthDescriptor !== undefined &&
-      "value" in lengthDescriptor &&
-      typeof lengthDescriptor.value === "number" &&
-      Number.isSafeInteger(lengthDescriptor.value) &&
-      lengthDescriptor.value >= 0
-        ? Math.min(lengthDescriptor.value, MAX_CONTAINER_ENTRIES)
-        : 0;
-    const result: unknown[] = [];
-    for (let index = 0; index < length; index += 1) {
-      let descriptor: PropertyDescriptor | undefined;
-      try {
-        descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-      } catch {
-        result.push(null);
-        continue;
-      }
-      result.push(descriptor !== undefined && "value" in descriptor ? sanitize(descriptor.value, seen, depth + 1) : null);
+    const sanitized =
+      descriptor !== undefined && "value" in descriptor
+        ? sanitize(descriptor.value, state, depth + 1)
+        : emitPrimitive(null, state);
+    result.push(sanitized);
+    if (state.exhausted) {
+      break;
     }
-    seen.delete(value);
-    return result;
   }
+  return result;
+};
 
+const sanitizeObject = (value: object, state: SanitizationState, depth: number): unknown => {
+  if (!reserveOutput(state, 2)) {
+    return truncate(state);
+  }
   let keys: readonly PropertyKey[];
   try {
-    keys = Reflect.ownKeys(value).slice(0, MAX_CONTAINER_ENTRIES);
+    keys = Reflect.ownKeys(value);
   } catch {
-    seen.delete(value);
-    return "[Unserializable]";
+    return emitMarker(UNSERIALIZABLE, state);
   }
 
   const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   for (const key of keys) {
-    if (typeof key !== "string" || isSensitiveKey(key)) {
+    if (!visitEntry(state)) {
+      return truncate(state);
+    }
+    if (typeof key !== "string") {
+      continue;
+    }
+    let sensitive: boolean;
+    try {
+      sensitive = isSensitiveKey(key);
+    } catch {
+      return emitMarker(UNSERIALIZABLE, state);
+    }
+    if (sensitive) {
       continue;
     }
     let descriptor: PropertyDescriptor | undefined;
@@ -152,10 +231,97 @@ const sanitize = (value: unknown, seen: WeakSet<object>, depth: number): unknown
     if (descriptor === undefined || !("value" in descriptor)) {
       continue;
     }
-    result[key] = sanitize(descriptor.value, seen, depth + 1);
+    const keyBytes = serializedStringBytes(key);
+    if (keyBytes === null || !reserveOutput(state, keyBytes + 2)) {
+      return truncate(state);
+    }
+    result[key] = sanitize(descriptor.value, state, depth + 1);
+    if (state.exhausted) {
+      break;
+    }
   }
-  seen.delete(value);
   return result;
+};
+
+const visitNode = (state: SanitizationState): boolean => {
+  state.visitedNodes += 1;
+  return state.visitedNodes <= MAX_SANITIZATION_NODES;
+};
+
+const visitEntry = (state: SanitizationState): boolean => {
+  state.visitedEntries += 1;
+  return state.visitedEntries <= MAX_SANITIZATION_ENTRIES;
+};
+
+const reserveOutput = (state: SanitizationState, bytes: number): boolean => {
+  if (!Number.isSafeInteger(bytes) || bytes < 0) {
+    return false;
+  }
+  if (state.outputBytes + bytes > MAX_SANITIZATION_OUTPUT_BYTES - TRUNCATION_RESERVE_BYTES) {
+    return false;
+  }
+  state.outputBytes += bytes;
+  return true;
+};
+
+const emitPrimitive = (value: null | string | number | boolean, state: SanitizationState): unknown => {
+  const bytes = primitiveBytes(value);
+  if (bytes === null || !reserveOutput(state, bytes)) {
+    return truncate(state);
+  }
+  return value;
+};
+
+const emitMarker = (marker: string, state: SanitizationState): string => {
+  const bytes = serializedStringBytes(marker);
+  if (bytes === null || !reserveOutput(state, bytes)) {
+    return truncate(state);
+  }
+  return marker;
+};
+
+const truncate = (state: SanitizationState): string => {
+  if (!state.exhausted) {
+    state.exhausted = true;
+    state.outputBytes = Math.min(
+      MAX_SANITIZATION_OUTPUT_BYTES,
+      state.outputBytes + (serializedStringBytes(TRUNCATED) ?? TRUNCATION_RESERVE_BYTES)
+    );
+  }
+  return TRUNCATED;
+};
+
+const primitiveBytes = (value: null | string | number | boolean): number | null => {
+  if (typeof value === "string") {
+    return serializedStringBytes(value);
+  }
+  if (value === null) {
+    return 4;
+  }
+  if (typeof value === "boolean") {
+    return value ? 4 : 5;
+  }
+  return 32;
+};
+
+const serializedStringBytes = (value: string): number | null => {
+  if (value.length > MAX_STRING_CODE_UNITS) {
+    return null;
+  }
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string" ? Buffer.byteLength(serialized, "utf8") : null;
+  } catch {
+    return null;
+  }
+};
+
+const inspectArray = (value: object): boolean | null => {
+  try {
+    return Array.isArray(value);
+  } catch {
+    return null;
+  }
 };
 
 const isSensitiveKey = (key: string): boolean => {
@@ -181,7 +347,7 @@ const isSensitiveKey = (key: string): boolean => {
 
 const isNativeError = (value: object): boolean => {
   try {
-    return value instanceof Error;
+    return nodeIsNativeError(value);
   } catch {
     return false;
   }
