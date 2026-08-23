@@ -12,7 +12,8 @@
   "dependencies": {
     "@azure/functions": "4.16.2",
     "@nxt/contracts": "workspace:*",
-    "@nxt/domain": "workspace:*"
+    "@nxt/domain": "workspace:*",
+    "googleapis": "176.0.0"
   },
   "devDependencies": {
     "typescript": "5.9.3",
