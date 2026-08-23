@@ -38,6 +38,13 @@ describe("wiki links", () => {
     ]);
   });
 
+  it("ignores multi-backtick spans and only closes an exact bare fence", () => {
+    expect(extractWikiLinks("``[[Inline]]`` [[Visible]]\n\n````md\n[[FourFence]]\n```\n[[StillFenced]]\n```` trailing\n[[AlsoFenced]]\n````\n[[Open]]")).toEqual([
+      { target: "Visible", label: null },
+      { target: "Open", label: null }
+    ]);
+  });
+
   it("does not guess ambiguous aliases", () => {
     expect(resolveWikiTarget("Plan", [
       { id: "a", title: "A", aliases: ["Plan"] },

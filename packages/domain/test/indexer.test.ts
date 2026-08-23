@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createPublicId, deriveIndex } from "../src/index.js";
+import { createPublicId, deriveIndex, renderMarkdown } from "../src/index.js";
 
 const first = {
   source: `---
@@ -46,5 +46,29 @@ describe("index derivation", () => {
 
   it("creates base64url identifiers with 128 bits", () => {
     expect(Buffer.from(createPublicId(), "base64url")).toHaveLength(16);
+  });
+
+  it("does not index wiki links inside multi-backtick code", () => {
+    const coded = {
+      ...first,
+      source: first.source.replace("[[Next]] hedefi", "``[[Next]]``\n\n````md\n[[Next]]\n```\n[[Next]]\n````")
+    };
+    const index = deriveIndex([coded, second]);
+    expect(index.entries[0]?.outboundNoteIds).toEqual([]);
+    expect(index.entries[0]?.unresolvedWikiTargets).toEqual([]);
+    expect(index.entries[1]?.backlinks).toEqual([]);
+  });
+
+  it("uses rendered plain text for excerpts and search text", async () => {
+    const body = "Visible `inline code`\n\n```ts\nconst kept = true;\n```\n\n<script>discarded()</script>";
+    const record = {
+      ...first,
+      source: first.source.replace("[[Next]] hedefi", body)
+    };
+    const rendered = await renderMarkdown(body);
+    const index = deriveIndex([record]);
+    expect(index.entries[0]?.excerpt).toBe(rendered.plainText);
+    expect(index.entries[0]?.searchText).toMatch(/const kept = true\s*;/u);
+    expect(index.entries[0]?.searchText).not.toContain("discarded");
   });
 });

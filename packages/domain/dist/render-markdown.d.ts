@@ -9,6 +9,8 @@ export interface RenderedMarkdown {
     wikiLinks: WikiLink[];
     plainText: string;
 }
+/** Derives visible text using the same Markdown and HAST pipeline as rendering. */
+export declare function deriveMarkdownPlainText(source: string): string;
 /** Renders GFM and strips every raw HTML node before serializing sanitized HTML. */
 export declare function renderMarkdown(source: string): Promise<RenderedMarkdown>;
 //# sourceMappingURL=render-markdown.d.ts.map

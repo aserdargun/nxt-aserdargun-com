@@ -23,15 +23,27 @@ const fold = (value: string): string => value.normalize("NFKC").toLocaleLowerCas
 function tokenizeLine(line: string): WikiLink[] {
   const links: WikiLink[] = [];
   let cursor = 0;
-  let inlineCode = false;
 
   while (cursor < line.length) {
     if (line[cursor] === "`") {
-      inlineCode = !inlineCode;
-      cursor += 1;
+      const openingLength = line.slice(cursor).match(/^`+/u)?.[0].length ?? 0;
+      let closing = cursor + openingLength;
+      while (closing < line.length) {
+        if (line[closing] !== "`") {
+          closing += 1;
+          continue;
+        }
+        const closingLength = line.slice(closing).match(/^`+/u)?.[0].length ?? 0;
+        if (closingLength === openingLength) {
+          cursor = closing + closingLength;
+          break;
+        }
+        closing += closingLength;
+      }
+      if (closing >= line.length) cursor += openingLength;
       continue;
     }
-    if (!inlineCode && line.startsWith("[[", cursor)) {
+    if (line.startsWith("[[", cursor)) {
       const close = line.indexOf("]]", cursor + 2);
       if (close !== -1) {
         const raw = line.slice(cursor + 2, close);
@@ -51,26 +63,37 @@ function tokenizeLine(line: string): WikiLink[] {
   return links;
 }
 
+interface Fence {
+  marker: "`" | "~";
+  length: number;
+}
+
+function openingFence(line: string): Fence | null {
+  const match = /^ {0,3}(?<marker>`{3,}|~{3,})/u.exec(line);
+  if (match === null) return null;
+  const marker = match.groups?.marker ?? "";
+  const first = marker[0];
+  if (first !== "`" && first !== "~") return null;
+  return { marker: first, length: marker.length };
+}
+
+function closesFence(line: string, fence: Fence): boolean {
+  const marker = fence.marker.repeat(fence.length);
+  return new RegExp(`^ {0,3}${marker}[\\t ]*$`, "u").test(line);
+}
+
 /** Extracts only unambiguous wiki syntax outside fenced and inline code. */
 export function extractWikiLinks(source: string): WikiLink[] {
   const links: WikiLink[] = [];
-  let fenced = false;
-  let fenceMarker = "";
+  let fence: Fence | null = null;
 
   for (const line of source.split(/\r?\n/u)) {
-    const fence = /^(?<indent>[ \t]*)(?<marker>`{3,}|~{3,})/u.exec(line);
     if (fence !== null) {
-      const marker = fence.groups?.marker ?? "";
-      if (!fenced) {
-        fenced = true;
-        fenceMarker = marker[0] ?? "";
-      } else if (marker[0] === fenceMarker) {
-        fenced = false;
-        fenceMarker = "";
-      }
+      if (closesFence(line, fence)) fence = null;
       continue;
     }
-    if (!fenced) links.push(...tokenizeLine(line));
+    fence = openingFence(line);
+    if (fence === null) links.push(...tokenizeLine(line));
   }
 
   return links;

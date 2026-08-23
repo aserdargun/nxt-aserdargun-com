@@ -1,5 +1,6 @@
 import { VaultIndexSchema, type VaultAttachment, type VaultIndex } from "@nxt/contracts";
 import { parseNote } from "./note-codec.js";
+import { deriveMarkdownPlainText } from "./render-markdown.js";
 import { extractWikiLinks, resolveWikiTarget } from "./wiki-links.js";
 
 export interface IndexedSourceNote {
@@ -8,16 +9,6 @@ export interface IndexedSourceNote {
   path: string;
   driveVersion: string;
   attachments: readonly VaultAttachment[];
-}
-
-function plainText(source: string): string {
-  return source
-    .replace(/```[\s\S]*?```/gu, " ")
-    .replace(/`([^`]*)`/gu, "$1")
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/gu, "$1")
-    .replace(/[#>*_~|[\]]/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim();
 }
 
 const unique = <T>(values: readonly T[]): T[] => [...new Set(values)];
@@ -52,7 +43,7 @@ export function deriveIndex(records: readonly IndexedSourceNote[]): VaultIndex {
       linkedFrom.push(note.frontmatter.id);
       backlinks.set(targetId, linkedFrom);
     }
-    const bodyText = plainText(note.body);
+    const bodyText = deriveMarkdownPlainText(note.body);
     const searchText = fold([note.frontmatter.title, ...note.frontmatter.aliases, ...note.frontmatter.tags, bodyText].join(" ")).slice(0, 100_000);
 
     return {

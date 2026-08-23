@@ -1,15 +1,7 @@
 import { VaultIndexSchema } from "@nxt/contracts";
 import { parseNote } from "./note-codec.js";
+import { deriveMarkdownPlainText } from "./render-markdown.js";
 import { extractWikiLinks, resolveWikiTarget } from "./wiki-links.js";
-function plainText(source) {
-    return source
-        .replace(/```[\s\S]*?```/gu, " ")
-        .replace(/`([^`]*)`/gu, "$1")
-        .replace(/!?\[([^\]]*)\]\([^)]*\)/gu, "$1")
-        .replace(/[#>*_~|[\]]/gu, " ")
-        .replace(/\s+/gu, " ")
-        .trim();
-}
 const unique = (values) => [...new Set(values)];
 const fold = (value) => value.normalize("NFKC").toLocaleLowerCase("en-US");
 /** Derives the stored index from source notes; backlinks are always recomputed. */
@@ -41,7 +33,7 @@ export function deriveIndex(records) {
             linkedFrom.push(note.frontmatter.id);
             backlinks.set(targetId, linkedFrom);
         }
-        const bodyText = plainText(note.body);
+        const bodyText = deriveMarkdownPlainText(note.body);
         const searchText = fold([note.frontmatter.title, ...note.frontmatter.aliases, ...note.frontmatter.tags, bodyText].join(" ")).slice(0, 100_000);
         return {
             id: note.frontmatter.id,
