@@ -192,4 +192,75 @@ describe("LocalDriveAdapter", () => {
     await expect(storage.readText(file.id)).resolves.toMatchObject({ text: "one" });
     await expect(access(join(root, ".content", file.id))).resolves.toBeUndefined();
   });
+
+  it("serializes mutations across adapters before either adapter loads metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const first = await LocalDriveAdapter.create(root);
+    let markSecondReady!: () => void;
+    let releaseSecond!: () => void;
+    const secondReady = new Promise<void>((resolve) => {
+      markSecondReady = resolve;
+    });
+    const secondRelease = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const second = await LocalDriveAdapter.create(root, {
+      beforeMutationLoad: async () => {
+        markSecondReady();
+        await secondRelease;
+      },
+      beforeMetadataWrite: () => {
+        throw new Error("second adapter intentionally fails");
+      }
+    });
+
+    const secondMutation = second.createText({ parentId: "vault", name: "second.md", mimeType: "text/markdown", text: "second" });
+    void secondMutation.catch(() => undefined);
+    const reachedLock = await Promise.race([
+      secondReady.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100))
+    ]);
+    expect(reachedLock).toBe(true);
+
+    let firstSettled = false;
+    const firstMutation = first.createText({ parentId: "vault", name: "first.md", mimeType: "text/markdown", text: "first" });
+    void firstMutation.then(
+      () => {
+        firstSettled = true;
+      },
+      () => {
+        firstSettled = true;
+      }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(firstSettled).toBe(false);
+
+    releaseSecond();
+    await expect(secondMutation).rejects.toThrow("second adapter intentionally fails");
+    const committed = await firstMutation;
+    expect(committed.id).toBe("file_1");
+    await expect(first.readText(committed.id)).resolves.toMatchObject({ text: "first" });
+    expect(await readFile(join(root, ".revisions", committed.id, "1"), "utf8")).toBe("first");
+  });
+
+  it("recovers an interrupted Trash rollback on the next adapter load", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    let rollbackAttempted = false;
+    const storage = await LocalDriveAdapter.create(root, {
+      beforeMetadataRollbackWrite: () => {
+        rollbackAttempted = true;
+        throw new Error("injected rollback metadata failure");
+      }
+    });
+    const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
+    await mkdir(join(root, ".trash", file.id));
+
+    await expect(storage.trash(file.id)).rejects.toThrow("injected rollback metadata failure");
+    expect(rollbackAttempted).toBe(true);
+
+    const recovered = await LocalDriveAdapter.create(root);
+    expect((await recovered.get(file.id)).trashed).toBe(false);
+    await expect(recovered.readText(file.id)).resolves.toMatchObject({ text: "one" });
+    await expect(access(join(root, ".content", file.id))).resolves.toBeUndefined();
+  });
 });

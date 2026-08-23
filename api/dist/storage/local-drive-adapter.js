@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
@@ -10,25 +10,28 @@ const GENERATED_ID = /^file_[0-9a-z]+$/;
 export class LocalDriveAdapter {
     root;
     beforeMetadataWrite;
+    beforeMetadataRollbackWrite;
+    beforeMutationLoad;
     operation = Promise.resolve();
-    constructor(root, beforeMetadataWrite) {
+    constructor(root, beforeMetadataWrite, beforeMetadataRollbackWrite, beforeMutationLoad) {
         this.root = root;
         this.beforeMetadataWrite = beforeMetadataWrite;
+        this.beforeMetadataRollbackWrite = beforeMetadataRollbackWrite;
+        this.beforeMutationLoad = beforeMutationLoad;
     }
     static async create(root, options = {}) {
         const safeRoot = await canonicalizeTemporaryPath(root);
         await ensureDirectory(safeRoot);
-        const adapter = new LocalDriveAdapter(await realpath(safeRoot), options.beforeMetadataWrite);
+        const adapter = new LocalDriveAdapter(await realpath(safeRoot), options.beforeMetadataWrite, options.beforeMetadataRollbackWrite, options.beforeMutationLoad);
         await adapter.initialize();
         return adapter;
     }
     get(fileId) {
-        return this.run(async () => this.toStoredFile(this.getFile(await this.loadMetadata(), fileId)));
+        return this.read((metadata) => this.toStoredFile(this.getFile(metadata, fileId)));
     }
     listChildren(input) {
-        return this.run(async () => {
+        return this.read((metadata) => {
             assertPageSize(input.pageSize);
-            const metadata = await this.loadMetadata();
             const parent = this.getActiveFolder(metadata, input.parentId);
             const cursor = input.pageToken === undefined ? undefined : decodeCursor(input.pageToken);
             if (cursor !== undefined && (cursor.parentId !== parent.id || cursor.generation !== metadata.generation)) {
@@ -49,25 +52,22 @@ export class LocalDriveAdapter {
         });
     }
     readText(fileId) {
-        return this.run(async () => {
-            const metadata = await this.loadMetadata();
+        return this.read(async (metadata) => {
             const file = this.getActiveContentFile(metadata, fileId);
             const bytes = await this.readRevision(file.id, this.getContentRevision(file));
             return { file: this.toStoredFile(file), text: new TextDecoder("utf-8", { fatal: true }).decode(bytes), checksum: checksum(bytes) };
         });
     }
     readBytes(fileId) {
-        return this.run(async () => {
-            const metadata = await this.loadMetadata();
+        return this.read(async (metadata) => {
             const file = this.getActiveContentFile(metadata, fileId);
             const bytes = await this.readRevision(file.id, this.getContentRevision(file));
             return { file: this.toStoredFile(file), bytes, checksum: checksum(bytes) };
         });
     }
     createFolder(input) {
-        return this.run(async () => {
+        return this.mutate(async (metadata) => {
             assertName(input.name);
-            const metadata = await this.loadMetadata();
             this.getActiveFolder(metadata, input.parentId);
             const file = this.newFile(metadata, input.parentId, input.name, FOLDER_MIME_TYPE, "folder", 0);
             await this.saveMetadata(metadata);
@@ -78,10 +78,9 @@ export class LocalDriveAdapter {
         return this.createBytes({ ...input, bytes: new TextEncoder().encode(input.text) });
     }
     createBytes(input) {
-        return this.run(async () => {
+        return this.mutate(async (metadata) => {
             assertName(input.name);
             assertMimeType(input.mimeType);
-            const metadata = await this.loadMetadata();
             this.getActiveFolder(metadata, input.parentId);
             await this.reconcileUncommittedCreate(metadata, this.nextFileId(metadata));
             const file = this.newFile(metadata, input.parentId, input.name, input.mimeType, "file", input.bytes.byteLength);
@@ -92,9 +91,8 @@ export class LocalDriveAdapter {
         });
     }
     updateText(input) {
-        return this.run(async () => {
+        return this.mutate(async (metadata) => {
             assertMimeType(input.mimeType);
-            const metadata = await this.loadMetadata();
             const file = this.getActiveContentFile(metadata, input.fileId);
             if (file.version !== input.expectedVersion) {
                 throw new Error("version conflict");
@@ -109,11 +107,10 @@ export class LocalDriveAdapter {
         });
     }
     move(input) {
-        return this.run(async () => {
+        return this.mutate(async (metadata) => {
             if (input.newName !== undefined) {
                 assertName(input.newName);
             }
-            const metadata = await this.loadMetadata();
             const file = this.getActiveFile(metadata, input.fileId);
             if (file.kind === "root") {
                 throw new Error("cannot move configured root");
@@ -131,59 +128,84 @@ export class LocalDriveAdapter {
         });
     }
     trash(fileId) {
-        return this.run(async () => {
-            const metadata = await this.loadMetadata();
+        return this.mutate(async (metadata) => {
             const file = this.getActiveFile(metadata, fileId);
             if (file.kind === "root") {
                 throw new Error("cannot trash configured root");
             }
             const originalMetadata = cloneMetadata(metadata);
+            await this.saveTrashRollbackJournal({ schemaVersion: 1, fileId: file.id, originalMetadata });
             this.bumpFile(metadata, file, { trashed: true });
-            await this.saveMetadata(metadata);
+            await this.saveMetadata(metadata, "normal");
             try {
                 if (file.kind === "file") {
                     await this.moveContentToTrash(file.id);
                 }
             }
             catch (error) {
-                await this.saveMetadata(originalMetadata, false);
+                await this.saveMetadata(originalMetadata, "rollback");
+                await this.archiveTrashRollbackJournal();
                 throw error;
             }
+            await this.archiveTrashRollbackJournal();
             return this.toStoredFile(file);
         });
     }
     listRevisions(fileId) {
-        return this.run(async () => {
-            const metadata = await this.loadMetadata();
+        return this.read((metadata) => {
             this.getFile(metadata, fileId);
             return [...(metadata.revisions[fileId] ?? [])];
         });
     }
     async initialize() {
-        await ensureDirectory(this.root);
-        await ensureDirectory(this.contentDirectory());
-        await ensureDirectory(this.revisionsDirectory());
-        await ensureDirectory(this.trashDirectory());
-        try {
-            await lstat(this.metadataPath());
-        }
-        catch (error) {
-            if (isNotFound(error)) {
-                await this.saveMetadata(initialMetadata());
-                return;
+        await this.withRootLock(async () => {
+            await ensureDirectory(this.root);
+            await ensureDirectory(this.contentDirectory());
+            await ensureDirectory(this.revisionsDirectory());
+            await ensureDirectory(this.trashDirectory());
+            try {
+                await lstat(this.metadataPath());
             }
-            throw error;
-        }
-        const metadataStat = await lstat(this.metadataPath());
-        if (metadataStat.isSymbolicLink() || !metadataStat.isFile()) {
-            throw new Error("unsafe metadata path");
-        }
-        await this.loadMetadata();
+            catch (error) {
+                if (isNotFound(error)) {
+                    await this.saveMetadata(initialMetadata(), "normal");
+                    return;
+                }
+                throw error;
+            }
+            const metadataStat = await lstat(this.metadataPath());
+            if (metadataStat.isSymbolicLink() || !metadataStat.isFile()) {
+                throw new Error("unsafe metadata path");
+            }
+            await this.recoverTrashRollback();
+        });
     }
     run(operation) {
         const result = this.operation.then(operation, operation);
         this.operation = result.then(() => undefined, () => undefined);
         return result;
+    }
+    read(operation) {
+        return this.run(() => this.withRootLock(async () => {
+            await this.recoverTrashRollback();
+            return operation(await this.loadMetadata());
+        }));
+    }
+    mutate(operation) {
+        return this.run(() => this.withRootLock(async () => {
+            await this.beforeMutationLoad?.();
+            await this.recoverTrashRollback();
+            return operation(await this.loadMetadata());
+        }));
+    }
+    async withRootLock(operation) {
+        const lock = await acquireRootLock(this.root);
+        try {
+            return await operation();
+        }
+        finally {
+            await releaseRootLock(lock);
+        }
     }
     async loadMetadata() {
         await ensureDirectory(this.root);
@@ -194,9 +216,12 @@ export class LocalDriveAdapter {
         const parsed = JSON.parse(await readFile(this.metadataPath(), "utf8"));
         return assertMetadata(parsed);
     }
-    async saveMetadata(metadata, invokeHook = true) {
-        if (invokeHook) {
+    async saveMetadata(metadata, mode = "normal") {
+        if (mode === "normal") {
             await this.beforeMetadataWrite?.();
+        }
+        if (mode === "rollback") {
+            await this.beforeMetadataRollbackWrite?.();
         }
         await this.atomicWrite(this.metadataPath(), new TextEncoder().encode(`${JSON.stringify(metadata, null, 2)}\n`));
     }
@@ -327,6 +352,77 @@ export class LocalDriveAdapter {
             }
         }
     }
+    async recoverTrashRollback() {
+        const journal = await this.loadTrashRollbackJournal();
+        if (journal === undefined) {
+            return;
+        }
+        const currentMetadata = await this.loadMetadata();
+        const currentFile = currentMetadata.files[journal.fileId];
+        const finalTrashPath = this.trashContentPath(journal.fileId);
+        const committed = currentFile?.trashed === true && (await isRegularFile(finalTrashPath));
+        if (!committed) {
+            await this.saveMetadata(journal.originalMetadata, "recovery");
+        }
+        await this.archiveTrashRollbackJournal();
+    }
+    async saveTrashRollbackJournal(journal) {
+        await this.atomicWrite(this.trashRollbackJournalPath(), new TextEncoder().encode(`${JSON.stringify(journal, null, 2)}\n`));
+    }
+    async loadTrashRollbackJournal() {
+        const path = this.trashRollbackJournalPath();
+        try {
+            const journalStat = await lstat(path);
+            if (journalStat.isSymbolicLink() || !journalStat.isFile()) {
+                throw new Error("unsafe Trash rollback journal path");
+            }
+        }
+        catch (error) {
+            if (isNotFound(error)) {
+                return undefined;
+            }
+            throw error;
+        }
+        const value = JSON.parse(await readFile(path, "utf8"));
+        if (typeof value !== "object" || value === null || Array.isArray(value)) {
+            throw new Error("invalid Trash rollback journal");
+        }
+        const journal = value;
+        if (journal.schemaVersion !== 1 || typeof journal.fileId !== "string" || journal.originalMetadata === undefined) {
+            throw new Error("invalid Trash rollback journal");
+        }
+        assertOpaqueFileId(journal.fileId);
+        return { schemaVersion: 1, fileId: journal.fileId, originalMetadata: assertMetadata(journal.originalMetadata) };
+    }
+    async archiveTrashRollbackJournal() {
+        const journalPath = this.trashRollbackJournalPath();
+        try {
+            await lstat(journalPath);
+        }
+        catch (error) {
+            if (isNotFound(error)) {
+                return;
+            }
+            throw error;
+        }
+        const archiveDirectory = join(this.root, ".transaction-history");
+        await ensureDirectory(archiveDirectory);
+        let archiveIndex = 1;
+        for (;;) {
+            const archivePath = join(archiveDirectory, `trash-rollback-${archiveIndex}.json`);
+            try {
+                await lstat(archivePath);
+                archiveIndex += 1;
+            }
+            catch (error) {
+                if (!isNotFound(error)) {
+                    throw error;
+                }
+                await rename(journalPath, archivePath);
+                return;
+            }
+        }
+    }
     async writeRevision(metadata, fileId, revisionId, bytes) {
         const revisionDirectory = join(this.revisionsDirectory(), fileId);
         await ensureDirectory(revisionDirectory);
@@ -359,7 +455,7 @@ export class LocalDriveAdapter {
         if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
             throw new Error("unsafe content path");
         }
-        const destination = join(this.trashDirectory(), fileId);
+        const destination = this.trashContentPath(fileId);
         await ensureDirectory(dirname(destination));
         try {
             await lstat(destination);
@@ -396,6 +492,13 @@ export class LocalDriveAdapter {
     }
     trashDirectory() {
         return join(this.root, ".trash");
+    }
+    trashContentPath(fileId) {
+        assertOpaqueFileId(fileId);
+        return join(this.trashDirectory(), fileId);
+    }
+    trashRollbackJournalPath() {
+        return join(this.root, ".trash-rollback.json");
     }
     metadataPath() {
         return join(this.root, ".metadata.json");
@@ -543,7 +646,86 @@ const assertDirectory = async (path) => {
         throw new Error("unsafe storage directory");
     }
 };
+const isRegularFile = async (path) => {
+    try {
+        const fileStat = await lstat(path);
+        return !fileStat.isSymbolicLink() && fileStat.isFile();
+    }
+    catch (error) {
+        if (isNotFound(error)) {
+            return false;
+        }
+        throw error;
+    }
+};
 const isNotFound = (error) => typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 const isAlreadyExists = (error) => typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
 const equalBytes = (left, right) => left.byteLength === right.byteLength && left.every((value, index) => value === right[index]);
+const LOCK_WAIT_MS = 10;
+const LOCK_TIMEOUT_MS = 2_000;
+const STALE_LOCK_MS = 30_000;
+const acquireRootLock = async (root) => {
+    const path = join(root, ".mutation.lock");
+    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    for (;;) {
+        const token = randomUUID();
+        try {
+            const handle = await open(path, "wx", 0o600);
+            try {
+                await handle.writeFile(JSON.stringify({ token, createdAt: Date.now() }));
+            }
+            finally {
+                await handle.close();
+            }
+            return { path, token };
+        }
+        catch (error) {
+            if (!isAlreadyExists(error)) {
+                throw error;
+            }
+            await archiveStaleLock(root, path);
+            if (Date.now() >= deadline) {
+                throw new Error("timed out waiting for storage mutation lock", { cause: error });
+            }
+            await delay(LOCK_WAIT_MS);
+        }
+    }
+};
+const releaseRootLock = async (lock) => {
+    try {
+        const lockStat = await lstat(lock.path);
+        if (lockStat.isSymbolicLink() || !lockStat.isFile()) {
+            throw new Error("unsafe storage mutation lock");
+        }
+        const value = JSON.parse(await readFile(lock.path, "utf8"));
+        if (typeof value === "object" && value !== null && "token" in value && value.token === lock.token) {
+            await unlink(lock.path);
+        }
+    }
+    catch (error) {
+        if (!isNotFound(error)) {
+            throw error;
+        }
+    }
+};
+const archiveStaleLock = async (root, lockPath) => {
+    const lockStat = await lstat(lockPath);
+    if (lockStat.isSymbolicLink() || !lockStat.isFile()) {
+        throw new Error("unsafe storage mutation lock");
+    }
+    if (Date.now() - lockStat.mtimeMs < STALE_LOCK_MS) {
+        return;
+    }
+    const staleDirectory = join(root, ".stale-locks");
+    await ensureDirectory(staleDirectory);
+    try {
+        await rename(lockPath, join(staleDirectory, `${Date.now()}-${randomUUID()}.lock`));
+    }
+    catch (error) {
+        if (!isNotFound(error)) {
+            throw error;
+        }
+    }
+};
+const delay = async (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 //# sourceMappingURL=local-drive-adapter.js.map

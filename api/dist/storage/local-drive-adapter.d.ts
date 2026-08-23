@@ -1,10 +1,14 @@
 import type { StoragePort, StoredFile } from "./storage-port.js";
 export type LocalDriveAdapterOptions = {
     beforeMetadataWrite?: () => void | Promise<void>;
+    beforeMetadataRollbackWrite?: () => void | Promise<void>;
+    beforeMutationLoad?: () => void | Promise<void>;
 };
 export declare class LocalDriveAdapter implements StoragePort {
     private readonly root;
     private readonly beforeMetadataWrite?;
+    private readonly beforeMetadataRollbackWrite?;
+    private readonly beforeMutationLoad?;
     private operation;
     private constructor();
     static create(root: string, options?: LocalDriveAdapterOptions): Promise<LocalDriveAdapter>;
@@ -62,6 +66,9 @@ export declare class LocalDriveAdapter implements StoragePort {
     }>>;
     private initialize;
     private run;
+    private read;
+    private mutate;
+    private withRootLock;
     private loadMetadata;
     private saveMetadata;
     private newFile;
@@ -75,6 +82,10 @@ export declare class LocalDriveAdapter implements StoragePort {
     private assertMoveDoesNotCycle;
     private writeContent;
     private reconcileUncommittedCreate;
+    private recoverTrashRollback;
+    private saveTrashRollbackJournal;
+    private loadTrashRollbackJournal;
+    private archiveTrashRollbackJournal;
     private writeRevision;
     private moveContentToTrash;
     private readRevision;
@@ -82,6 +93,8 @@ export declare class LocalDriveAdapter implements StoragePort {
     private contentDirectory;
     private revisionsDirectory;
     private trashDirectory;
+    private trashContentPath;
+    private trashRollbackJournalPath;
     private metadataPath;
     private contentPath;
     private toStoredFile;
