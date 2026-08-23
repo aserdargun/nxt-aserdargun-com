@@ -150,3 +150,124 @@ All commands exited `0`:
 
 None. The intentionally skipped live integration remains reserved for the
 separately authorized live Drive task; this task created no external state.
+
+## Fix round 1
+
+### Status and commit
+
+DONE. Review findings 1 through 7 were reproduced with focused failing tests,
+fixed, and committed as
+`0f2129b8c1fa8720f8eda994dcd294f126762427` —
+`fix: harden bounded google drive integration`.
+
+This round did not run a live OAuth flow, open a browser, bind a callback
+listener, make a Google/Drive/network request, read credentials, access
+`.env.local`, or create a Drive folder/file. `NXT_DRIVE_INTEGRATION` remained
+unset for every API test invocation.
+
+### Fixes
+
+- Both root CLI production loaders now use `createRequire` anchored at
+  `api/package.json`, so they resolve the API-owned `googleapis@176.0.0` in a
+  clean pnpm workspace. A local regression imports both exact production loader
+  functions and loads the real installed package without invoking either CLI.
+- Every Drive request path disables googleapis/gaxios retries with the second
+  options argument `{ retry: false }`, including metadata, media, list,
+  revision, about, create, update, provisioning, and root readback calls. The
+  adapter remains the sole retry owner: allowlisted idempotent reads make at
+  most three attempts; `408` and `501` make one; writes make one.
+- Create, text update, move, and Trash readbacks now verify write-response ID,
+  readback ID, exact expected name/MIME/state/single ancestry, and version
+  behavior, plus MD5 where content was uploaded. Text updates reject MIME
+  changes and post-write identity/name/MIME/parent/Trash drift. Moves preserve
+  the old name unless an exact new name was supplied. Trash now preflights an
+  active, non-shortcut, single-parent item and verifies the same identity and
+  metadata after the version advances.
+- `RootBoundaryStorage.updateText` now verifies returned identity and ancestry
+  and rechecks the stored item, while `trash` still permits the expected
+  trashed return value. An ancestry lookup whose returned ID differs from the
+  requested ID also fails closed.
+- The opt-in live test now requires private, integration, and Notes IDs. Before
+  constructing the normalized boundary or writing, it performs a raw metadata
+  read and requires the exact owned `integration-tests` folder, folder MIME,
+  active state, owner permission, and exactly one parent equal to the private
+  root. All fixture readbacks are verified as direct integration-root
+  descendants; the executable body makes no Drive request for Notes.
+- OAuth callbacks use `URLSearchParams.getAll` and require exactly one matching
+  state and exactly one nonempty code. Missing/duplicate state or code and any
+  error/code ambiguity fail with redacted static messages before exchange.
+- Environment parsing rejects noncanonical leading spaces/tabs and duplicate
+  keys before writing; update values still reject CR/LF/NUL injection. No real
+  environment file was written. `.gitignore` and behavioral regressions now
+  cover `Desktop-app-client*.json` and `client_secret_*.json` without hiding an
+  unrelated JSON file.
+
+### Fix-round RED evidence
+
+Every Node/pnpm command used Node `v22.23.1` through the required PATH prefix.
+
+```text
+node --test tools/google-drive-provision.test.mjs tools/google-drive-runtime.test.mjs
+```
+
+Exit `1`: 13 passed and 4 failed. Failures proved the production loaders were
+missing, callback ambiguity was accepted, leading-whitespace environment keys
+were accepted, and downloaded credential filenames were not ignored.
+
+```text
+env -u NXT_DRIVE_INTEGRATION pnpm --filter @nxt/api test -- google-drive-client google-drive-adapter
+```
+
+Exit `1`: 177 passed, 1 failed, and 1 live test skipped because the real-client
+retry-suppression wrapper did not exist.
+
+```text
+env -u NXT_DRIVE_INTEGRATION pnpm --filter @nxt/api test -- google-drive-adapter root-boundary
+```
+
+Exit `1`: 177 passed, 6 failed, and 1 live test skipped. The failures reproduced
+incomplete create/update/move/Trash readback validation and the missing
+`RootBoundaryStorage.updateText` postcheck.
+
+```text
+env -u NXT_DRIVE_INTEGRATION pnpm --filter @nxt/api test -- google-drive-client
+```
+
+Exit `1`: 183 passed, 1 failed, and 1 live test skipped because the pure private
+integration-root preflight guard did not exist.
+
+### Fix-round GREEN evidence
+
+```text
+node --test tools/google-drive-provision.test.mjs tools/google-drive-runtime.test.mjs
+```
+
+Exit `0`: all 18 tool tests passed.
+
+```text
+env -u NXT_DRIVE_INTEGRATION pnpm --filter @nxt/api test -- google-drive-client google-drive-adapter root-boundary
+```
+
+Exit `0`: 184 API tests passed and exactly 1 live test skipped.
+
+Final repository validation:
+
+```text
+pnpm lint
+pnpm typecheck
+pnpm build
+env -u NXT_DRIVE_INTEGRATION pnpm test
+node --input-type=module -e '<load both production CLI googleapis loaders>'
+git diff --check
+```
+
+All exited `0`. Root tests passed contracts 6, domain 15, and API 184, for 205
+passing tests plus the one expected live skip. The loader probe printed
+`api-owned googleapis loaders: ok`; the production dependency remains exactly
+`googleapis@176.0.0`. Tracked API build artifacts were regenerated under Node
+`v22.23.1`.
+
+### Fix-round concerns
+
+None. The live integration test remains intentionally skipped pending separate,
+explicit authorization and credentials.
