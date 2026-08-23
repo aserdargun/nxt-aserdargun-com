@@ -87,3 +87,62 @@ All of the following exited 0 under Node 22:
 
 None. The adapter intentionally models only the bounded local simulator
 contract; the Google Drive adapter remains a later task.
+
+## Fix round 1 — root validation and transactional local content
+
+### RED evidence
+
+Under Node 22, added focused regressions and ran:
+
+```text
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH \
+  pnpm --filter @nxt/api test -- local-drive-adapter root-boundary
+```
+
+The command failed as intended with five failures:
+
+- a configured root with missing metadata, Trash state, or shortcut MIME was
+  accepted before it was read;
+- an injected metadata persistence failure still exposed the new text and
+  version;
+- a pre-existing revision destination was overwritten;
+- `<temporary>/container/link/nested` followed an intermediate symbolic link
+  and initialized metadata outside the requested root; and
+- `StoredFile` responses leaked the local-only `kind` field.
+
+### Implementation
+
+- `RootBoundaryStorage.assertInside()` now fetches and validates every node,
+  including the configured root. The root must have no parents; descendants
+  retain the exact-one-parent rule.
+- Immutable revision files are now the authoritative local content. They are
+  created with exclusive `wx` writes; an existing matching revision is an
+  idempotent retry, while differing bytes fail without replacement. Metadata
+  is written only after the immutable content revision exists, and active
+  `.content` files are a post-commit cache. Thus a rejected metadata write has
+  no StoragePort-visible new content, version, or listed revision.
+- Creates use the same revision-before-metadata protocol. Trash commits its
+  metadata before moving the non-authoritative active cache, so a rejected
+  metadata save leaves the active content accessible and untrashed.
+- Temporary-root paths are canonicalized before component-by-component
+  validation; every later internal directory operation repeats that validation
+  and rejects symlinked components. This prevents writes through a created
+  intermediate link.
+- `toStoredFile()` now builds only the public `StoredFile` fields explicitly.
+
+### GREEN validation
+
+All commands exited 0 under Node 22:
+
+- `pnpm --filter @nxt/api test -- local-drive-adapter root-boundary` — 2 files,
+  14 tests.
+- `pnpm --filter @nxt/api typecheck`
+- `pnpm --filter @nxt/api build`
+- `pnpm lint`
+- `pnpm test` — contracts 6, domain 15, API 14 tests.
+- `pnpm typecheck`
+- `pnpm build`
+- `git diff --check`
+
+Fix commit: `0185420909d4bd8bbc918b4819c965672a65060e` —
+`fix: harden local storage transactions`.
