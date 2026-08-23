@@ -1,0 +1,5 @@
+packages:
+  - "web"
+  - "api"
+  - "packages/*"
+injectWorkspacePackages: true
