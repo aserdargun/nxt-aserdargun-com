@@ -604,3 +604,142 @@ an in-memory offline Drive client.
 
 No live Google Drive, OAuth, network, credentials, `.env.local`, DNS, cloud,
 deployment, repository remote, or other external state was accessed or changed.
+
+# Fix round 5/5
+
+Status: **DONE**
+
+Round 4 report baseline: `f064cd863352a04f903097fbf9134eb5012d7df4`
+
+Implementation commit: `8264cf358165ca138971e79dcfe673ccbca9b96e`
+
+Implementation tree: `513d1d017c9dd23871ba86bcf99e3483777d65d6`
+
+The 12-route set, provisioned private system filenames, dependency pins,
+`pnpm-lock.yaml`, exact-owner authorization order, response bounds, and live
+integration boundary are unchanged.
+
+## Round 5 RED evidence
+
+Every command used Node `v22.23.1` through the explicit
+`PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH` path. The live
+Drive integration was not enabled and was explicitly removed for the root gate.
+
+1. Prior-cursor expiry, final outcome-unknown, bounded expiry, exact-cursor
+   binding, advancement, and replay immutability
+
+   Test file: `api/test/rescan-persistence.test.ts`.
+
+   Command, from `api`:
+
+   `PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm exec vitest run test/rescan-persistence.test.ts`
+
+   RED output: **1 test file failed; 5 tests failed, 9 passed**. The failures
+   showed that progress and completion receipts had no explicit recovery
+   expiry, that an old cursor could not recover an accepted write after its
+   embedded expiry, and that a differently encoded but validly signed cursor
+   with the same payload could replay the transition.
+
+2. Self-review receipt-integrity probe
+
+   Command, from `api`:
+
+   `PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm exec vitest run test/rescan-persistence.test.ts`
+
+   RED output after adding the narrow probe: **1 test file failed; 1 test
+   failed, 14 passed**. Altering the stored processed count and successor nonce
+   still produced a replay, proving that the first receipt MAC did not yet bind
+   the exact persisted response and successor cursor.
+
+## Round 5 implementation
+
+- The existing `vault-index.json` transition and completion schemas now carry
+  a paired `recoveryExpiresAt` and 256-bit `receiptMac`. Nullable defaults keep
+  pre-round-5 index documents readable, but legacy receipts never gain expired
+  cursor recovery.
+- Each new receipt uses a domain-separated HMAC over the exact supplied signed
+  prior cursor string, scan ID, base generation, prior position, nonce and
+  expiry, recovery expiry, complete flag, bounded records/recoveries response,
+  and exact successor cursor. Re-encoded, cross-scan, cross-generation,
+  wrong-position, wrong-nonce, altered-response, and altered-successor variants
+  therefore fail closed.
+- `resumeScan` verifies a matching live receipt before applying the ordinary
+  prior-cursor expiry rejection. Progress receipt recovery expires exactly with
+  the live successor state; completion recovery is bounded to ten minutes from
+  finalization receipt creation. The deadline is MAC-bound and replay performs
+  no write, so retry cannot renew or extend it.
+- Only the immediately prior persisted transition can replay. Advancing the
+  successor replaces that receipt, and receipt expiry is exclusive. A legacy
+  non-expired receipt remains replayable only through the canonical cursor that
+  the prior service version emitted.
+- Accepted progress and accepted final index writes whose readback response is
+  lost are recovered on a fresh service instance from the exact client-held
+  prior cursor. Replay returns the stored successor response with zero vault
+  traversal and no duplicate work; the successor continues normally.
+- The recovery path adds no Drive mutation or traversal operation. Existing
+  traversal and index work continues to share the 100-operation request budget,
+  and existing 100-item and byte-size response bounds are unchanged. No route,
+  system file, raw Drive ID, or public response field was added.
+
+## Files
+
+- `api/src/services/rescan-service.ts`
+- `api/test/rescan-persistence.test.ts`
+- `packages/contracts/src/vault.ts`
+- `api/dist/services/rescan-service.d.ts`
+- `api/dist/services/rescan-service.d.ts.map`
+- `api/dist/services/rescan-service.js`
+- `api/dist/services/rescan-service.js.map`
+- `packages/contracts/dist/vault.d.ts`
+- `packages/contracts/dist/vault.d.ts.map`
+- `packages/contracts/dist/vault.js`
+- `packages/contracts/dist/vault.js.map`
+
+## GREEN and focused evidence
+
+Final regression command, from `api`:
+
+`PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm exec vitest run test/rescan-persistence.test.ts`
+
+Output: **1 test file passed; 15 tests passed**.
+
+Focused command, from the repository root:
+
+`PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/contracts test && cd api && PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm exec vitest run test/rescan-service.test.ts test/rescan-persistence.test.ts`
+
+Output: contracts **8 passed**; focused API **2 test files passed, 18 tests
+passed**.
+
+## Root verification
+
+Root command, with live integration explicitly removed for each stage:
+
+`env -u NXT_DRIVE_INTEGRATION PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm lint && env -u NXT_DRIVE_INTEGRATION PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm typecheck && env -u NXT_DRIVE_INTEGRATION PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm test && env -u NXT_DRIVE_INTEGRATION PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm build && git diff --check`
+
+Fresh build and diff confirmation after the first combined command yielded its
+final build output:
+
+`env -u NXT_DRIVE_INTEGRATION PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm build && git diff --check`
+
+Output:
+
+```text
+lint:       PASS
+typecheck:  PASS (contracts, domain, API)
+test:       PASS
+  contracts:   8 passed
+  domain:     15 passed
+  API:       282 passed, 1 live integration test skipped
+build:      PASS (contracts, domain, API)
+diff check: PASS
+```
+
+## Concerns and external-state statement
+
+Concerns: none within the authorized offline scope. Live Google behavior remains
+intentionally unverified; accepted-write/readback-loss behavior is covered
+through production service and system-store paths over controlled offline
+storage adapters.
+
+No live Google Drive, OAuth, network, credentials, `.env.local`, DNS, cloud,
+deployment, repository remote, or other external state was accessed or changed.
