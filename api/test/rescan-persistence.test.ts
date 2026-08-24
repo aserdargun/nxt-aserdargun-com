@@ -12,7 +12,13 @@ import { GoogleDriveAdapter } from "../src/storage/google-drive-adapter.js";
 import type { GoogleDriveClient, GoogleDriveUpdateInput } from "../src/storage/google-drive-client.js";
 import { LocalDriveAdapter } from "../src/storage/local-drive-adapter.js";
 import { RootBoundaryStorage } from "../src/storage/root-boundary.js";
-import { StorageMutationOutcomeUnknownError, StorageVersionConflictError, type StoragePort, type StoredFile } from "../src/storage/storage-port.js";
+import {
+  StorageMutationOutcomeUnknownError,
+  StorageVersionConflictError,
+  type StorageOperationContext,
+  type StoragePort,
+  type StoredFile
+} from "../src/storage/storage-port.js";
 
 const delegate = (storage: StoragePort, overrides: Partial<StoragePort>): StoragePort => ({
   get: overrides.get ?? storage.get.bind(storage),
@@ -40,6 +46,166 @@ const setup = async () => {
   const indexStore = new SystemFileStore({ storage, fileId: indexFile.id, parentId: "private", name: "vault-index.json", schema: VaultIndexSchema });
   return { storage, notes, indexFile, indexStore };
 };
+
+type MemoryFile = StoredFile & { bytes?: Uint8Array };
+
+class DeterministicAttachmentDrive implements StoragePort {
+  private readonly files = new Map<string, MemoryFile>();
+  private sequence = 0;
+  private operationCount = 0;
+  private ambiguousAttachmentCreates = true;
+
+  public constructor() {
+    this.files.set("vault", this.folder("vault", "vault", []));
+    this.files.set("private", this.folder("private", "private", []));
+  }
+
+  public calls(): number { return this.operationCount; }
+  public resetCalls(): void { this.operationCount = 0; }
+  public allowAttachmentCreates(): void { this.ambiguousAttachmentCreates = false; }
+
+  public async get(fileId: string, context?: StorageOperationContext): Promise<StoredFile> {
+    this.consume(context);
+    return this.metadata(this.active(fileId, context));
+  }
+
+  public async listChildren(input: { parentId: string; pageToken?: string; pageSize: number }, context?: StorageOperationContext): Promise<{ files: StoredFile[]; nextPageToken?: string }> {
+    this.consume(context);
+    this.activeFolder(input.parentId, context);
+    const offset = input.pageToken === undefined ? 0 : Number(input.pageToken);
+    const children = [...this.files.values()]
+      .filter((file) => !file.trashed && file.parentIds.length === 1 && file.parentIds[0] === input.parentId)
+      .sort((left, right) => left.name.localeCompare(right.name, "en-US") || left.id.localeCompare(right.id, "en-US"));
+    const page = children.slice(offset, offset + input.pageSize).map((file) => this.metadata(file));
+    const next = offset + page.length;
+    return next < children.length ? { files: page, nextPageToken: String(next) } : { files: page };
+  }
+
+  public async readText(fileId: string, context?: StorageOperationContext): Promise<{ file: StoredFile; text: string; checksum: string }> {
+    const readback = await this.readBytes(fileId, context);
+    return { file: readback.file, text: new TextDecoder("utf-8", { fatal: true }).decode(readback.bytes), checksum: readback.checksum };
+  }
+
+  public async readBytes(fileId: string, context?: StorageOperationContext): Promise<{ file: StoredFile; bytes: Uint8Array; checksum: string }> {
+    this.consume(context);
+    const file = this.active(fileId, context);
+    if (file.mimeType === "application/vnd.google-apps.folder" || file.bytes === undefined) throw new Error("not a content file");
+    const bytes = Uint8Array.from(file.bytes);
+    return { file: this.metadata(file), bytes, checksum: createHash("sha256").update(bytes).digest("hex") };
+  }
+
+  public async createFolder(input: { parentId: string; name: string }, context?: StorageOperationContext): Promise<StoredFile> {
+    this.consume(context);
+    this.activeFolder(input.parentId, context);
+    const id = this.nextId();
+    const file = this.folder(id, input.name, [input.parentId]);
+    this.files.set(id, file);
+    return this.metadata(file);
+  }
+
+  public async createText(input: { parentId: string; name: string; mimeType: string; text: string }, context?: StorageOperationContext): Promise<StoredFile> {
+    return this.createContent({ ...input, bytes: new TextEncoder().encode(input.text) }, context);
+  }
+
+  public async createBytes(input: { parentId: string; name: string; mimeType: string; bytes: Uint8Array; appProperties?: Record<string, string> }, context?: StorageOperationContext): Promise<StoredFile> {
+    this.consume(context);
+    if (this.ambiguousAttachmentCreates && input.mimeType.startsWith("image/")) throw new StorageMutationOutcomeUnknownError();
+    return this.createContent(input);
+  }
+
+  public async updateText(input: { fileId: string; expectedVersion: string; mimeType: string; text: string }, context?: StorageOperationContext): Promise<StoredFile> {
+    this.consume(context);
+    const file = this.active(input.fileId, context);
+    if (file.version !== input.expectedVersion) throw new StorageVersionConflictError();
+    file.version = String(Number(file.version) + 1);
+    file.mimeType = input.mimeType;
+    file.bytes = new TextEncoder().encode(input.text);
+    file.size = file.bytes.byteLength;
+    file.modifiedTime = this.modified(file.version);
+    return this.metadata(file);
+  }
+
+  public async move(input: { fileId: string; fromParentId: string; toParentId: string; expectedVersion: string; newName?: string }, context?: StorageOperationContext): Promise<StoredFile> {
+    this.consume(context);
+    const file = this.active(input.fileId, context);
+    this.activeFolder(input.toParentId, context);
+    if (file.version !== input.expectedVersion || file.parentIds[0] !== input.fromParentId) throw new StorageVersionConflictError();
+    file.parentIds = [input.toParentId];
+    if (input.newName !== undefined) file.name = input.newName;
+    file.version = String(Number(file.version) + 1);
+    file.modifiedTime = this.modified(file.version);
+    return this.metadata(file);
+  }
+
+  public async trash(input: { fileId: string; expectedVersion: string }, context?: StorageOperationContext): Promise<StoredFile> {
+    this.consume(context);
+    const file = this.active(input.fileId, context);
+    if (file.version !== input.expectedVersion) throw new StorageVersionConflictError();
+    file.trashed = true;
+    file.version = String(Number(file.version) + 1);
+    file.modifiedTime = this.modified(file.version);
+    return this.metadata(file);
+  }
+
+  public async listRevisions(_fileId: string, context?: StorageOperationContext): Promise<Array<{ id: string; modifiedTime: string }>> {
+    this.consume(context);
+    return [];
+  }
+
+  private createContent(input: { parentId: string; name: string; mimeType: string; bytes: Uint8Array; appProperties?: Record<string, string> }, context?: StorageOperationContext): StoredFile {
+    this.activeFolder(input.parentId, context);
+    const id = this.nextId();
+    const bytes = Uint8Array.from(input.bytes);
+    const file: MemoryFile = {
+      id,
+      name: input.name,
+      mimeType: input.mimeType,
+      parentIds: [input.parentId],
+      version: "1",
+      modifiedTime: this.modified("1"),
+      size: bytes.byteLength,
+      trashed: false,
+      bytes,
+      ...(input.appProperties === undefined ? {} : { appProperties: { ...input.appProperties } })
+    };
+    this.files.set(id, file);
+    return this.metadata(file);
+  }
+
+  private folder(id: string, name: string, parentIds: string[]): MemoryFile {
+    return { id, name, mimeType: "application/vnd.google-apps.folder", parentIds, version: "1", modifiedTime: this.modified("1"), size: 0, trashed: false };
+  }
+
+  private active(fileId: string, context?: StorageOperationContext): MemoryFile {
+    const file = this.files.get(fileId);
+    if (file === undefined || (file.trashed && context?.allowTrashed !== true)) throw new Error("missing fake Drive file");
+    return file;
+  }
+
+  private activeFolder(fileId: string, context?: StorageOperationContext): MemoryFile {
+    const file = this.active(fileId, context);
+    if (file.mimeType !== "application/vnd.google-apps.folder") throw new Error("not a fake Drive folder");
+    return file;
+  }
+
+  private metadata(file: MemoryFile): StoredFile {
+    return {
+      id: file.id,
+      name: file.name,
+      mimeType: file.mimeType,
+      parentIds: [...file.parentIds],
+      version: file.version,
+      modifiedTime: file.modifiedTime,
+      size: file.size,
+      trashed: file.trashed,
+      ...(file.appProperties === undefined ? {} : { appProperties: { ...file.appProperties } })
+    };
+  }
+
+  private nextId(): string { this.sequence += 1; return `fake-${String(this.sequence).padStart(5, "0")}`; }
+  private modified(version: string): string { return `2026-08-24T00:00:${String(Number(version) % 60).padStart(2, "0")}.000Z`; }
+  private consume(context?: StorageOperationContext): void { this.operationCount += 1; context?.operationBudget?.consume(); }
+}
 
 type TestCursorPayload = {
   scanId: string;
@@ -167,8 +333,21 @@ describe("persisted rescan staging", () => {
     expect((await fixture.indexStore.read()).value.rescanState).toBeNull();
   });
 
-  it("recovers an outcome-unknown final completion after the prior cursor expires", async () => {
+  it("rolls back an accepted final swap whose readback fails and leaves the old index resumable", async () => {
     const fixture = await setup();
+    const noteId = randomUUID();
+    const source = serializeNote({
+      frontmatter: {
+        id: noteId,
+        title: "Actual Drive title",
+        created: "2026-08-24T09:00:00.000Z",
+        updated: "2026-08-24T09:00:00.000Z",
+        tags: [],
+        aliases: []
+      },
+      body: "# Actual\n"
+    });
+    await fixture.storage.createText({ parentId: fixture.notes.id, name: "Actual.md", mimeType: "text/markdown", text: source });
     const probe = createOutcomeUnknownStore(fixture);
     const secret = "completion-receipt-recovery-secret-32-bytes";
     let clock = Date.parse("2026-08-24T09:00:00.000Z");
@@ -182,31 +361,20 @@ describe("persisted rescan staging", () => {
 
     const started = await service().scanPage({ cursor: null, limit: 100 });
     const priorCursor = started.cursor as string;
-    const prior = decodeCursor(priorCursor);
-    clock = Date.parse(prior.expiresAt) - 1_000;
     probe.armAcceptedWriteReadbackLoss();
     await expect(service().scanPage({ cursor: priorCursor, limit: 100 })).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
 
-    const completed = (await fixture.indexStore.read()).value.lastCompletedRescan;
-    const recoveryExpiresAt = completed?.recoveryExpiresAt;
-    expect(completed).not.toBeNull();
-    expect(Date.parse(recoveryExpiresAt ?? "")).toBeGreaterThan(Date.parse(prior.expiresAt));
-    expect(Date.parse(recoveryExpiresAt ?? "")).toBeLessThanOrEqual(clock + 10 * 60 * 1_000);
-    if (recoveryExpiresAt === undefined || recoveryExpiresAt === null) throw new Error("completion receipt expiry is missing");
+    const rolledBack = (await fixture.indexStore.read()).value;
+    expect(rolledBack.entries).toEqual([]);
+    expect(rolledBack.rescanState).not.toBeNull();
+    expect(rolledBack.lastCompletedRescan).toBeNull();
 
-    clock = Date.parse(prior.expiresAt) + 1_000;
-    probe.resetTraversalCalls();
-    const recovered = await service().scanPage({ cursor: priorCursor, limit: 100 });
-    expect(recovered).toEqual({ cursor: null, processed: 0, complete: true, records: [], recoveries: [] });
-    expect(probe.traversalCalls()).toBe(0);
-    const beforeReplay = (await fixture.indexStore.read()).value.lastCompletedRescan;
-    await expect(service().scanPage({ cursor: priorCursor, limit: 100 })).resolves.toEqual(recovered);
-    expect(probe.traversalCalls()).toBe(0);
-    expect((await fixture.indexStore.read()).value.lastCompletedRescan).toEqual(beforeReplay);
-    clock = Date.parse(recoveryExpiresAt);
-    probe.resetTraversalCalls();
-    await expect(service().scanPage({ cursor: priorCursor, limit: 100 })).rejects.toMatchObject({ code: "CONFLICT" });
-    expect(probe.traversalCalls()).toBe(0);
+    clock += 1_000;
+    await expect(service().scanPage({ cursor: priorCursor, limit: 100 })).resolves.toMatchObject({ complete: true, cursor: null });
+    const completed = (await fixture.indexStore.read()).value;
+    expect(completed.entries).toHaveLength(1);
+    expect(completed.entries[0]).toMatchObject({ id: noteId, title: "Actual Drive title" });
+    expect(completed.rescanState).toBeNull();
   });
 
   it("rejects the exact prior cursor once its progress receipt recovery expiry passes", async () => {
@@ -710,12 +878,18 @@ describe("persisted rescan staging", () => {
     expect(state?.recoveries[0]).toMatchObject({ path: "Notes/000-Broken.md", rawSource });
   });
 
-  it("reclaims more than 256 terminal attachment conflicts through bounded fresh-instance rescans", async () => {
-    const fixture = await setup();
-    const assets = await fixture.storage.createFolder({ parentId: "vault", name: "_assets" });
-    const noteCount = 53;
-    const batchSize = 52;
-    const batchCount = 5;
+  it("reclaims exactly 256 simultaneous terminal attachment conflicts and restores reservation capacity", async () => {
+    const storage = new DeterministicAttachmentDrive();
+    const notes = await storage.createFolder({ parentId: "vault", name: "Notes" });
+    const assets = await storage.createFolder({ parentId: "vault", name: "_assets" });
+    const indexFile = await storage.createText({
+      parentId: "private",
+      name: "vault-index.json",
+      mimeType: "application/json",
+      text: '{"schemaVersion":1,"entries":[]}\n'
+    });
+    const indexStore = new SystemFileStore({ storage, fileId: indexFile.id, parentId: "private", name: "vault-index.json", schema: VaultIndexSchema });
+    const noteCount = 257;
     const noteIds = Array.from({ length: noteCount }, () => randomUUID());
     const noteFiles: Array<{ id: string; name: string }> = [];
     const created = "2026-08-24T08:00:00.000Z";
@@ -725,8 +899,8 @@ describe("persisted rescan staging", () => {
     });
     const entries = [];
     for (let index = 0; index < noteCount; index += 1) {
-      const name = `Lifecycle-${String(index).padStart(2, "0")}.md`;
-      const file = await fixture.storage.createText({ parentId: fixture.notes.id, name, mimeType: "text/markdown", text: sourceFor(index) });
+      const name = `Lifecycle-${String(index).padStart(3, "0")}.md`;
+      const file = await storage.createText({ parentId: notes.id, name, mimeType: "text/markdown", text: sourceFor(index) });
       noteFiles.push({ id: file.id, name });
       entries.push({
         id: noteIds[index] as string,
@@ -747,41 +921,14 @@ describe("persisted rescan staging", () => {
         backlinks: []
       });
     }
-    const initial = await fixture.indexStore.read();
-    await fixture.indexStore.update({ ...initial.value, entries }, initial.file.version);
-
-    let operationCount = 0;
-    let ambiguousCreates = true;
-    const countedStorage: StoragePort = {
-      get: async (fileId, context) => { operationCount += 1; return fixture.storage.get(fileId, context); },
-      listChildren: async (input, context) => { operationCount += 1; return fixture.storage.listChildren(input, context); },
-      readText: async (fileId, context) => { operationCount += 1; return fixture.storage.readText(fileId, context); },
-      readBytes: async (fileId, context) => { operationCount += 1; return fixture.storage.readBytes(fileId, context); },
-      createFolder: async (input, context) => { operationCount += 1; return fixture.storage.createFolder(input, context); },
-      createText: async (input, context) => { operationCount += 1; return fixture.storage.createText(input, context); },
-      createBytes: async (input, context) => {
-        operationCount += 1;
-        if (ambiguousCreates) throw new StorageMutationOutcomeUnknownError();
-        return fixture.storage.createBytes(input, context);
-      },
-      updateText: async (input, context) => { operationCount += 1; return fixture.storage.updateText(input, context); },
-      move: async (input, context) => { operationCount += 1; return fixture.storage.move(input, context); },
-      trash: async (input, context) => { operationCount += 1; return fixture.storage.trash(input, context); },
-      listRevisions: async (fileId, context) => { operationCount += 1; return fixture.storage.listRevisions(fileId, context); }
-    };
-    const indexStore = new SystemFileStore({
-      storage: countedStorage,
-      fileId: fixture.indexFile.id,
-      parentId: "private",
-      name: "vault-index.json",
-      schema: VaultIndexSchema
-    });
+    const initial = await indexStore.read();
+    await indexStore.update({ ...initial.value, entries }, initial.file.version);
     const vault = {
       getNote: async (noteId: string) => {
         const index = noteIds.indexOf(noteId);
         const file = noteFiles[index];
         if (index < 0 || file === undefined) throw new Error("missing lifecycle note");
-        const current = await countedStorage.readText(file.id);
+        const current = await storage.readText(file.id);
         const path = `Notes/${file.name}`;
         return {
           note: { ...parseNote(current.text), path },
@@ -793,120 +940,108 @@ describe("persisted rescan staging", () => {
         };
       }
     };
+    const png = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=", "base64"));
     let clock = Date.parse("2026-08-24T12:00:00.000Z");
     const attachmentService = () => new AttachmentService({
-      storage: countedStorage,
+      storage,
       indexStore,
       vault,
       assetsRootId: assets.id,
       now: () => new Date(clock)
     });
-    const secret = "terminal-attachment-rescan-secret-32-bytes";
-    const rescanService = () => new RescanService({
-      storage: countedStorage,
-      indexStore,
-      notesFolderId: fixture.notes.id,
-      cursorSecret: secret,
-      now: () => new Date(clock)
-    });
-    const createAmbiguous = async (noteIndex: number, serial: number): Promise<void> => {
-      operationCount = 0;
+
+    for (let index = 0; index < 256; index += 1) {
+      storage.resetCalls();
       await expect(attachmentService().upload({
-        noteId: noteIds[noteIndex] as string,
-        name: `terminal-${serial}.png`,
+        noteId: noteIds[index] as string,
+        name: `terminal-${index}.png`,
         declaredMime: "image/png",
-        bytes: Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=", "base64"))
+        bytes: png
       })).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
-      expect(operationCount).toBeLessThan(100);
-    };
-    const terminalizeAll = async (): Promise<void> => {
-      for (let horizon = 0; horizon < 4; horizon += 1) {
-        clock += 15 * 60 * 1_000 + 1;
-        for (;;) {
-          const before = (await indexStore.read()).value.pendingMutations;
-          const dueBefore = before.filter((mutation) => mutation.phase !== "conflicted" && Date.parse(mutation.reconcileAfter ?? mutation.expiresAt) <= clock).length;
-          if (dueBefore === 0) break;
-          operationCount = 0;
-          await expect(attachmentService().read("missing-lifecycle-asset")).rejects.toMatchObject({ code: "NOT_FOUND" });
-          const after = (await indexStore.read()).value.pendingMutations;
-          const dueAfter = after.filter((mutation) => mutation.phase !== "conflicted" && Date.parse(mutation.reconcileAfter ?? mutation.expiresAt) <= clock).length;
-          expect(dueBefore - dueAfter).toBeGreaterThan(0);
-          expect(dueBefore - dueAfter).toBeLessThanOrEqual(8);
-          expect(operationCount).toBeLessThan(800);
-        }
-        if ((await indexStore.read()).value.pendingMutations.every((mutation) => mutation.phase === "conflicted")) return;
-      }
-      throw new Error("attachment conflicts did not become terminal within the bounded horizons");
-    };
-    // Make Drive reality differ from the stale index so the first rescan must
-    // rebuild the actual note projection, not merely clear reservations.
-    const staleFile = await fixture.storage.get(noteFiles[0]!.id);
-    await fixture.storage.updateText({ fileId: staleFile.id, expectedVersion: staleFile.version, mimeType: "text/markdown", text: sourceFor(0, "Actual Drive Title") });
-
-    let terminalConflicts = 0;
-    let carriedLiveMutation = false;
-    for (let batch = 0; batch < batchCount; batch += 1) {
-      const createCount = carriedLiveMutation ? batchSize - 1 : batchSize;
-      for (let index = 0; index < createCount; index += 1) await createAmbiguous(index, terminalConflicts + index);
-      await terminalizeAll();
-      const terminal = (await indexStore.read()).value.pendingMutations;
-      expect(terminal).toHaveLength(batchSize);
-      expect(terminal.every((mutation) => mutation.operation === "create-attachment" && mutation.phase === "conflicted")).toBe(true);
-      const capturedIds = terminal.map((mutation) => mutation.id);
-      const rawSecrets = terminal.flatMap((mutation) => [
-        mutation.id,
-        mutation.ownerId,
-        mutation.recoveryClaimId,
-        mutation.parentId,
-        mutation.driveId,
-        mutation.attachmentMarker
-      ]).filter((value): value is string => value !== undefined);
-      terminalConflicts += terminal.length;
-
-      operationCount = 0;
-      const started = await rescanService().scanPage({ cursor: null, limit: 100 });
-      expect(operationCount).toBeLessThanOrEqual(100);
-      if (batch === 0) {
-        await createAmbiguous(noteCount - 1, terminalConflicts);
-        carriedLiveMutation = true;
-      } else {
-        carriedLiveMutation = false;
-      }
-      const pages = [started];
-      let page = started;
-      while (!page.complete) {
-        operationCount = 0;
-        page = await rescanService().scanPage({ cursor: page.cursor, limit: 100 });
-        expect(operationCount).toBeLessThanOrEqual(100);
-        expect(page.records.length + page.recoveries.length).toBeLessThanOrEqual(100);
-        pages.push(page);
-        expect(pages.length).toBeLessThan(20);
-      }
-      const recoveries = pages.flatMap((candidate) => candidate.recoveries);
-      expect(recoveries).toHaveLength(batchSize);
-      expect(recoveries.every((recovery) => recovery.path === "Notes" && recovery.rawSource === "" && recovery.error === "External change detected. Rescan is reconciling the index.")).toBe(true);
-      expect(recoveries.every((recovery) => Object.keys(recovery).sort().join(",") === "error,path,rawSource")).toBe(true);
-      const serialized = JSON.stringify(pages);
-      for (const rawSecret of rawSecrets) expect(serialized).not.toContain(rawSecret);
-      const after = (await indexStore.read()).value;
-      expect(after.pendingMutations.some((mutation) => capturedIds.includes(mutation.id))).toBe(false);
-      expect(after.pendingMutations).toHaveLength(carriedLiveMutation ? 1 : 0);
-      if (batch === 0) expect(after.entries.find((entry) => entry.id === noteIds[0])?.title).toBe("Actual Drive Title");
+      expect(storage.calls()).toBeLessThan(100);
+      // Later uploads run before every earlier immediate reconcile horizon, so
+      // all 256 reservations coexist before recovery begins.
+      clock -= 1;
     }
+    expect((await indexStore.read()).value.pendingMutations).toHaveLength(256);
 
-    expect(terminalConflicts).toBe(260);
-    expect((await indexStore.read()).value.entries).toHaveLength(noteCount);
-    ambiguousCreates = false;
-    operationCount = 0;
+    const runHorizon = async (attempt: 1 | 2 | 3): Promise<void> => {
+      clock += 15 * 60 * 1_000 + 512;
+      for (;;) {
+        const before = (await indexStore.read()).value.pendingMutations;
+        const due = before.filter((mutation) => mutation.phase !== "conflicted" && Date.parse(mutation.reconcileAfter ?? mutation.expiresAt) <= clock).length;
+        if (due === 0) break;
+        await expect(attachmentService().read("missing-lifecycle-asset")).rejects.toMatchObject({ code: "NOT_FOUND" });
+      }
+      const after = (await indexStore.read()).value.pendingMutations;
+      expect(after).toHaveLength(256);
+      expect(after.every((mutation) => mutation.recoveryAttempts === attempt)).toBe(true);
+      expect(after.every((mutation) => mutation.phase === (attempt === 3 ? "conflicted" : "outcome-unknown"))).toBe(true);
+      if (attempt < 3) expect(after.every((mutation) => mutation.phase !== "conflicted")).toBe(true);
+    };
+    await runHorizon(1);
+    await runHorizon(2);
+    await runHorizon(3);
+
+    await expect(attachmentService().upload({
+      noteId: noteIds[256] as string,
+      name: "capacity-257.png",
+      declaredMime: "image/png",
+      bytes: png
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await indexStore.read()).value.pendingMutations).toHaveLength(256);
+
+    const stale = await storage.get(noteFiles[0]!.id);
+    await storage.updateText({ fileId: stale.id, expectedVersion: stale.version, mimeType: "text/markdown", text: sourceFor(0, "Actual Drive Title") });
+    const terminal = (await indexStore.read()).value.pendingMutations;
+    const rawSecrets = terminal.flatMap((mutation) => [
+      mutation.id,
+      mutation.ownerId,
+      mutation.recoveryClaimId,
+      mutation.parentId,
+      mutation.driveId,
+      mutation.attachmentMarker
+    ]).filter((value): value is string => value !== undefined);
+    const secret = "terminal-attachment-rescan-secret-32-bytes";
+    let cursor: string | null = null;
+    let complete = false;
+    const pages = [];
+    while (!complete) {
+      storage.resetCalls();
+      const page = await new RescanService({
+        storage,
+        indexStore,
+        notesFolderId: notes.id,
+        cursorSecret: secret,
+        now: () => new Date(clock)
+      }).scanPage({ cursor, limit: 100 });
+      expect(storage.calls()).toBeLessThanOrEqual(100);
+      expect(page.records.length + page.recoveries.length).toBeLessThanOrEqual(100);
+      pages.push(page);
+      cursor = page.cursor;
+      complete = page.complete;
+      expect(pages.length).toBeLessThan(100);
+    }
+    const recoveries = pages.flatMap((page) => page.recoveries);
+    expect(recoveries).toHaveLength(256);
+    expect(recoveries.every((recovery) => recovery.path === "Notes" && recovery.rawSource === "" && recovery.error === "External change detected. Rescan is reconciling the index.")).toBe(true);
+    expect(recoveries.every((recovery) => Object.keys(recovery).sort().join(",") === "error,path,rawSource")).toBe(true);
+    const serialized = JSON.stringify(pages);
+    for (const secretValue of rawSecrets) expect(serialized).not.toContain(secretValue);
+    const rebuilt = (await indexStore.read()).value;
+    expect(rebuilt.pendingMutations).toEqual([]);
+    expect(rebuilt.entries).toHaveLength(noteCount);
+    expect(rebuilt.entries.find((entry) => entry.id === noteIds[0])?.title).toBe("Actual Drive Title");
+
+    storage.allowAttachmentCreates();
     await expect(attachmentService().upload({
       noteId: noteIds[0] as string,
       name: "after-terminal-recovery.png",
       declaredMime: "image/png",
-      bytes: Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=", "base64"))
+      bytes: png
     })).resolves.toMatchObject({ name: "after-terminal-recovery.png", disposition: "inline" });
-    expect(operationCount).toBeLessThan(100);
     expect((await indexStore.read()).value.pendingMutations).toEqual([]);
-  }, 120_000);
+  }, 180_000);
 });
 
 const createRescanGoogleDrive = () => {

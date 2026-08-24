@@ -169,6 +169,11 @@ export const RescanResponseRecordStateSchema = z.object({
   version: z.string().min(1).max(512)
 }).strict();
 
+export const VaultRescanConflictMutationSchema = z.object({
+  id: NoteIdSchema,
+  fingerprint: z.string().regex(/^[a-f0-9]{64}$/u)
+}).strict();
+
 export const VaultRescanTransitionSchema = z.object({
   fromPosition: z.number().int().nonnegative(),
   fromNonce: z.string().regex(/^[A-Za-z0-9_-]{22}$/u),
@@ -200,6 +205,7 @@ export const VaultRescanStateSchema = z.object({
   recoveries: z.array(RescanRecoveryStateSchema).max(1_000),
   deliveredRecoveryCount: z.number().int().nonnegative(),
   conflictMutationIds: z.array(NoteIdSchema).max(256).default([]),
+  conflictMutationFingerprints: z.array(VaultRescanConflictMutationSchema).max(256).default([]),
   lastTransition: VaultRescanTransitionSchema.nullable().default(null)
 }).strict();
 

@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   MAX_NOTE_SOURCE_BYTES,
   type VaultAttachment,
@@ -212,11 +212,15 @@ export class RescanService {
     const now = this.now();
     let created!: VaultRescanState;
     await this.options.indexStore.compareAndSet((index) => {
-      if (index.rescanState !== null && Date.parse(index.rescanState.expiresAt) > now.getTime()) throw new ApiResponseError("CONFLICT");
+      if (
+        index.rescanState !== null && Date.parse(index.rescanState.expiresAt) > now.getTime() &&
+        index.rescanState.baseGeneration === index.generation
+      ) throw new ApiResponseError("CONFLICT");
       if (index.pendingMutations.some((mutation) => mutation.phase !== "conflicted")) throw new ApiResponseError("CONFLICT");
       const conflicts = index.pendingMutations.map((mutation) => ({
         id: mutation.id,
-        path: mutation.oldPath ?? mutation.newPath ?? "Notes"
+        path: mutation.oldPath ?? mutation.newPath ?? "Notes",
+        fingerprint: mutationFingerprint(mutation)
       }));
       created = {
         scanId: randomUUID(),
@@ -236,6 +240,7 @@ export class RescanService {
         })),
         deliveredRecoveryCount: 0,
         conflictMutationIds: conflicts.map((conflict) => conflict.id),
+        conflictMutationFingerprints: conflicts.map((conflict) => ({ id: conflict.id, fingerprint: conflict.fingerprint })),
         lastTransition: null
       };
       return { ...index, rescanState: created };
@@ -343,35 +348,58 @@ export class RescanService {
       null,
       true
     );
-    await this.options.indexStore.compareAndSet((index) => {
-      const current = index.rescanState;
-      if (
-        current === null || current.scanId !== state.scanId || current.position !== receipt.fromPosition ||
-        current.nonce !== receipt.fromNonce || current.expiresAt !== receipt.fromExpiresAt
-      ) throw new ApiResponseError("CONFLICT");
-      const captured = new Set(state.conflictMutationIds);
-      const capturedMutations = index.pendingMutations.filter((mutation) => captured.has(mutation.id));
-      if (
-        captured.size !== state.conflictMutationIds.length || capturedMutations.length !== captured.size ||
-        capturedMutations.some((mutation) => mutation.phase !== "conflicted")
-      ) throw new ApiResponseError("CONFLICT");
-      // A rescan owns only the exact terminal IDs captured when it started.
-      // Attachment work that begins later remains fenced and its current
-      // projection is rebased onto the rebuilt note index rather than erased.
-      const currentAttachments = new Map(index.entries.map((entry) => [entry.id, entry.attachments] as const));
-      const rebasedEntries = entries.map((entry) => ({
-        ...entry,
-        attachments: currentAttachments.get(entry.id) ?? entry.attachments
-      }));
-      return {
-        ...index,
-        generation: index.generation + 1,
-        entries: rebasedEntries,
-        pendingMutations: index.pendingMutations.filter((mutation) => !captured.has(mutation.id)),
-        rescanState: null,
-        lastCompletedRescan: { scanId: state.scanId, baseGeneration: state.baseGeneration, ...receipt }
-      };
-    }, { attempts: MAX_INDEX_CAS_ATTEMPTS, context });
+    let priorIndex: VaultIndex | undefined;
+    let completedIndex: VaultIndex | undefined;
+    try {
+      await this.options.indexStore.compareAndSet((index) => {
+        const current = index.rescanState;
+        if (
+          current === null || current.scanId !== state.scanId || current.position !== receipt.fromPosition ||
+          current.nonce !== receipt.fromNonce || current.expiresAt !== receipt.fromExpiresAt
+        ) throw new ApiResponseError("CONFLICT");
+        const captured = new Set(state.conflictMutationIds);
+        const fingerprints = new Map(state.conflictMutationFingerprints.map((conflict) => [conflict.id, conflict.fingerprint] as const));
+        if (
+          index.generation !== state.baseGeneration ||
+          captured.size !== state.conflictMutationIds.length || fingerprints.size !== state.conflictMutationFingerprints.length ||
+          fingerprints.size !== captured.size || index.pendingMutations.length !== captured.size ||
+          state.conflictMutationIds.some((id) => !fingerprints.has(id)) ||
+          index.pendingMutations.some((mutation) =>
+            mutation.phase !== "conflicted" || fingerprints.get(mutation.id) !== mutationFingerprint(mutation)
+          )
+        ) throw new ApiResponseError("CONFLICT");
+        priorIndex = structuredClone(index);
+        completedIndex = {
+          ...index,
+          generation: index.generation + 1,
+          entries,
+          pendingMutations: [],
+          rescanState: null,
+          lastCompletedRescan: { scanId: state.scanId, baseGeneration: state.baseGeneration, ...receipt }
+        };
+        return completedIndex;
+      }, { attempts: MAX_INDEX_CAS_ATTEMPTS, context });
+    } catch (error) {
+      // A conditional update can be accepted while its mandatory readback is
+      // lost. Restore only if Drive now contains the exact completion this
+      // caller proposed; never overwrite a later mutation or unknown state.
+      if (priorIndex !== undefined && completedIndex !== undefined) {
+        await this.rollbackAmbiguousCompletion(priorIndex, completedIndex, context).catch(() => undefined);
+      }
+      throw error;
+    }
+  }
+
+  private async rollbackAmbiguousCompletion(
+    priorIndex: VaultIndex,
+    completedIndex: VaultIndex,
+    context: StorageOperationContext
+  ): Promise<void> {
+    const snapshot = await this.options.indexStore.read(context);
+    if (indexFingerprint(snapshot.value) === indexFingerprint(priorIndex)) return;
+    if (indexFingerprint(snapshot.value) !== indexFingerprint(completedIndex)) throw new ApiResponseError("CONFLICT");
+    const restored = await this.options.indexStore.update(priorIndex, snapshot.file.version, context);
+    if (indexFingerprint(restored.value) !== indexFingerprint(priorIndex)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
   }
 
   private bindReceipt(
@@ -502,6 +530,23 @@ export class RescanService {
 
 const attachmentsFor = (index: VaultIndex, noteId: string): VaultAttachment[] =>
   index.entries.find((entry) => entry.id === noteId)?.attachments.map((attachment) => ({ ...attachment })) ?? [];
+
+const mutationFingerprint = (mutation: VaultIndex["pendingMutations"][number]): string =>
+  createHash("sha256").update(canonicalJson(mutation), "utf8").digest("hex");
+
+const indexFingerprint = (index: VaultIndex): string =>
+  createHash("sha256").update(canonicalJson(index), "utf8").digest("hex");
+
+const canonicalJson = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right, "en-US"))
+      .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+};
 
 const isCursorPayload = (value: unknown): value is CursorPayload => {
   if (typeof value !== "object" || value === null || Array.isArray(value) || Object.keys(value).length !== 5) return false;

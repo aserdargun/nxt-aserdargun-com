@@ -390,6 +390,7 @@ export class AttachmentService {
 
   private async reserve(mutation: VaultPendingMutation): Promise<void> {
     await this.options.indexStore.compareAndSet((index) => {
+      if (index.pendingMutations.length >= 256) throw new ApiResponseError("CONFLICT");
       if (!index.entries.some((entry) => entry.id === mutation.noteId)) throw new ApiResponseError("NOT_FOUND");
       if (mutation.operation === "trash-attachment") {
         if (

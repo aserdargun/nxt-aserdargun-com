@@ -152,28 +152,38 @@ const createClaimBarrierStore = (fixture: Awaited<ReturnType<typeof setup>>) => 
 };
 
 const createPausedClaimStore = (fixture: Awaited<ReturnType<typeof setup>>) => {
+  let release!: () => void;
+  let signal!: () => void;
+  let paused = true;
+  let transformCalls = 0;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const entered = new Promise<void>((resolve) => { signal = resolve; });
+  // Pause only after SystemFileStore has read the claimant snapshot, run the
+  // updater, and performed update()'s claimant read. The pending call is now
+  // immediately before its real low-level conditional update.
+  const storage = delegateStorage(fixture.raw, {
+    updateText: async (input, context) => {
+      if (paused && input.fileId === fixture.ids.indexFile.id) {
+        paused = false;
+        signal();
+        await gate;
+      }
+      return fixture.raw.updateText(input, context);
+    }
+  });
   const store = new SystemFileStore<VaultIndex>({
-    storage: fixture.raw,
+    storage,
     fileId: fixture.ids.indexFile.id,
     parentId: "private",
     name: "vault-index.json",
     schema: VaultIndexSchema
   });
-  let release!: () => void;
-  let signal!: () => void;
-  let paused = true;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  const entered = new Promise<void>((resolve) => { signal = resolve; });
   const compareAndSet = store.compareAndSet.bind(store);
-  store.compareAndSet = (async (transform, options) => {
-    if (paused) {
-      paused = false;
-      signal();
-      await gate;
-    }
-    return compareAndSet(transform, options);
-  }) as typeof store.compareAndSet;
-  return { store, entered, release };
+  store.compareAndSet = ((transform, options) => compareAndSet((index) => {
+    transformCalls += 1;
+    return transform(index);
+  }, options)) as typeof store.compareAndSet;
+  return { store, entered, release, transformCalls: () => transformCalls };
 };
 
 const seedAmbiguousUpload = async (fixture: Awaited<ReturnType<typeof setup>>, clock: { value: number }, apply: boolean) => {
@@ -474,6 +484,7 @@ describe("AttachmentService", () => {
     paused.release();
 
     await expect(losingClaim).resolves.toBeUndefined();
+    expect(paused.transformCalls()).toBeGreaterThanOrEqual(2);
     expect(renewed.fence).toBe(claimed.fence + 1);
     expect(recoveryClaimId(renewed)).toBe(recoveryClaimId(claimed));
     expect(Date.parse(renewed.expiresAt)).toBeGreaterThan(Date.parse(claimed.expiresAt));

@@ -37,6 +37,7 @@ export declare class RescanService {
     private resumeScan;
     private persistProgress;
     private completeScan;
+    private rollbackAmbiguousCompletion;
     private bindReceipt;
     private isLiveReceipt;
     private createReceiptMac;

@@ -18,6 +18,15 @@ const INLINE_MIME_TYPES = new Set([
   "image/gif",
   "application/pdf"
 ]);
+// The public allowlist is broader than the production structural-proof gate.
+// WebP requires a complete VP8-family decoder and PDF requires a complete
+// document parser before either can be delivered inline; the bounded partial
+// validators below are therefore deliberately bypassed for those MIME types.
+const STRUCTURALLY_PROVEN_INLINE_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif"
+]);
 const INLINE_EXTENSIONS: Record<string, ReadonlySet<string>> = {
   "image/png": new Set(["png"]),
   "image/jpeg": new Set(["jpg", "jpeg"]),
@@ -91,7 +100,9 @@ export const detectAttachment = async (input: {
   }
   const detectedMime = sniffed?.mime ?? detectSafeTextMime(input.bytes, extension) ?? "application/octet-stream";
   const extensionCoherent = extension !== undefined && INLINE_EXTENSIONS[detectedMime]?.has(extension) === true;
-  const disposition = classifyAttachment(detectedMime) === "inline" && extensionCoherent && declaredMime === detectedMime && structurallyValidInline(input.bytes, detectedMime)
+  const disposition = classifyAttachment(detectedMime) === "inline" &&
+    STRUCTURALLY_PROVEN_INLINE_MIME_TYPES.has(detectedMime) &&
+    extensionCoherent && declaredMime === detectedMime && structurallyValidInline(input.bytes, detectedMime)
     ? "inline"
     : "download";
   return { mimeType: detectedMime, disposition };

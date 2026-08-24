@@ -336,6 +336,8 @@ export class AttachmentService {
     }
     async reserve(mutation) {
         await this.options.indexStore.compareAndSet((index) => {
+            if (index.pendingMutations.length >= 256)
+                throw new ApiResponseError("CONFLICT");
             if (!index.entries.some((entry) => entry.id === mutation.noteId))
                 throw new ApiResponseError("NOT_FOUND");
             if (mutation.operation === "trash-attachment") {

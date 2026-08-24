@@ -173,6 +173,10 @@ export declare const RescanResponseRecordStateSchema: z.ZodObject<{
     path: z.ZodString;
     version: z.ZodString;
 }, z.core.$strict>;
+export declare const VaultRescanConflictMutationSchema: z.ZodObject<{
+    id: z.ZodUUID;
+    fingerprint: z.ZodString;
+}, z.core.$strict>;
 export declare const VaultRescanTransitionSchema: z.ZodObject<{
     fromPosition: z.ZodNumber;
     fromNonce: z.ZodString;
@@ -246,6 +250,10 @@ export declare const VaultRescanStateSchema: z.ZodObject<{
     }, z.core.$strict>>;
     deliveredRecoveryCount: z.ZodNumber;
     conflictMutationIds: z.ZodDefault<z.ZodArray<z.ZodUUID>>;
+    conflictMutationFingerprints: z.ZodDefault<z.ZodArray<z.ZodObject<{
+        id: z.ZodUUID;
+        fingerprint: z.ZodString;
+    }, z.core.$strict>>>;
     lastTransition: z.ZodDefault<z.ZodNullable<z.ZodObject<{
         fromPosition: z.ZodNumber;
         fromNonce: z.ZodString;
@@ -437,6 +445,10 @@ export declare const VaultIndexSchema: z.ZodObject<{
         }, z.core.$strict>>;
         deliveredRecoveryCount: z.ZodNumber;
         conflictMutationIds: z.ZodDefault<z.ZodArray<z.ZodUUID>>;
+        conflictMutationFingerprints: z.ZodDefault<z.ZodArray<z.ZodObject<{
+            id: z.ZodUUID;
+            fingerprint: z.ZodString;
+        }, z.core.$strict>>>;
         lastTransition: z.ZodDefault<z.ZodNullable<z.ZodObject<{
             fromPosition: z.ZodNumber;
             fromNonce: z.ZodString;

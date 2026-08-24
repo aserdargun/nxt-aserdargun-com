@@ -79,7 +79,7 @@ describe("attachment policy", () => {
       .resolves.toMatchObject({ mimeType: "image/png", disposition: "download" });
   });
 
-  it("requires a bounded VP8 key frame rather than a header shell or polyglot", async () => {
+  it("downgrades every WebP because no complete decoder proves an inline-safe image", async () => {
     const webp = (payload: readonly number[], declaredLength = payload.length, trailing: readonly number[] = []): Uint8Array => {
       const riffLength = 4 + 8 + declaredLength + (declaredLength % 2);
       return Uint8Array.from([
@@ -89,6 +89,9 @@ describe("attachment policy", () => {
       ]);
     };
     const shell = [0x10, 0, 0, 0x9d, 0x01, 0x2a, 1, 0, 1, 0, 0];
+    // This synthetic frame satisfies the former header/partition checks while
+    // carrying no decoder-proven VP8 image. It must never reach inline.
+    const positivePartitionSynthetic = webp([0x30, 0, 0, 0x9d, 0x01, 0x2a, 1, 0, 1, 0, 0xaa, 0xbb]);
     const zeroPartitionWithNoise = webp([...shell, 0, 0, 0, 0, 0xaa, 0x55]);
     const truncatedPartition = webp([0x50, 0x0d, 0, ...shell.slice(3), 1, 2, 3]);
     const invalidSync = Uint8Array.from(validWebp);
@@ -104,15 +107,16 @@ describe("attachment policy", () => {
     badChunkLength[16] = badChunkLength[16]! + 1;
     const trailingPolyglot = new Uint8Array([...validWebp, ...new TextEncoder().encode("<script>alert(1)</script>")]);
 
-    await expect(detectAttachment({ name: "image.webp", declaredMime: "image/webp", bytes: validWebp }))
-      .resolves.toMatchObject({ mimeType: "image/webp", disposition: "inline" });
-    for (const bytes of [webp(shell), zeroPartitionWithNoise, truncatedPartition, invalidSync, invalidDimensions, invalidVersion, hiddenFrame, badChunkLength, trailingPolyglot]) {
+    for (const bytes of [
+      validWebp, positivePartitionSynthetic, webp(shell), zeroPartitionWithNoise, truncatedPartition,
+      invalidSync, invalidDimensions, invalidVersion, hiddenFrame, badChunkLength, trailingPolyglot
+    ]) {
       await expect(detectAttachment({ name: "image.webp", declaredMime: "image/webp", bytes }))
         .resolves.toMatchObject({ mimeType: "image/webp", disposition: "download" });
     }
   });
 
-  it("accepts only a coherent bounded classic-xref PDF object graph", async () => {
+  it("downgrades every PDF because no complete parser proves an inline-safe document", async () => {
     const tokenPdf = new TextEncoder().encode("%PDF-1.4\nxref\ntrailer\n<< /Root 1 0 R >>\nstartxref\n0\n%%EOF\n");
     const injectedBeforeXref = classicPdf({ beforeXref: "<script>before-xref</script>\n" });
     const badCount = classicPdf({ mutateXref: (xref) => xref.replace("0 4", "0 5") });
@@ -127,6 +131,14 @@ describe("attachment policy", () => {
     const duplicateSubsection = classicPdf({ mutateXref: (xref, offsets) => `${xref}1 1\n${offsets[0]!.toString().padStart(10, "0")} 00000 n \n` });
     const impossibleActive = classicPdf({ mutateXref: (xref) => `${xref}4 1\n9999999999 00000 n \n`, trailer: "<< /Size 5 /Root 1 0 R >>" });
     const activeObjectZero = classicPdf({ mutateXref: (xref) => xref.replace("0000000000 65535 f ", "0000000000 00000 n ") });
+    const invalidFreeList = classicPdf({
+      mutateXref: (xref) => `${xref}4 1\n0000000004 00000 f \n`,
+      trailer: "<< /Size 5 /Root 1 0 R >>"
+    });
+    const missingPagesGraph = classicPdf({
+      extraObject: "4 0 obj\n<< /Type /Catalog >>\nendobj\n",
+      trailer: "<< /Size 5 /Root 4 0 R >>"
+    });
     const scriptBeforeStartxref = classicPdf({ betweenTrailerAndStartxref: "<script>polyglot</script>\n" });
     const streamPdf = classicPdf({
       extraObject: "4 0 obj\n<< /Length 1 >>\nstream\nx\nendstream\nendobj\n",
@@ -135,11 +147,10 @@ describe("attachment policy", () => {
     const truncated = classicPdf().slice(0, -8);
     const trailingPolyglot = classicPdf({ trailing: "<script>after-eof</script>" });
 
-    await expect(detectAttachment({ name: "file.pdf", declaredMime: "application/pdf", bytes: classicPdf() }))
-      .resolves.toMatchObject({ mimeType: "application/pdf", disposition: "inline" });
     for (const bytes of [
-      tokenPdf, injectedBeforeXref, badCount, badOffset, badGeneration, badRoot, badSize, wrongRootType,
-      duplicateSubsection, impossibleActive, activeObjectZero, scriptBeforeStartxref, streamPdf, truncated, trailingPolyglot
+      classicPdf(), tokenPdf, injectedBeforeXref, badCount, badOffset, badGeneration, badRoot, badSize,
+      wrongRootType, duplicateSubsection, impossibleActive, activeObjectZero, invalidFreeList,
+      missingPagesGraph, scriptBeforeStartxref, streamPdf, truncated, trailingPolyglot
     ]) {
       await expect(detectAttachment({ name: "file.pdf", declaredMime: "application/pdf", bytes }))
         .resolves.toMatchObject({ mimeType: "application/pdf", disposition: "download" });
