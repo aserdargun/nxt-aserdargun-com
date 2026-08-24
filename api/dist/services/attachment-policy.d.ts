@@ -6,10 +6,13 @@ export type DetectedAttachment = {
     disposition: AttachmentDisposition;
 };
 export declare const classifyAttachment: (mimeType: string) => AttachmentDisposition;
+/** Fresh content may only preserve or safely lower a persisted disposition. */
+export declare const safeAttachmentDisposition: (persisted: AttachmentDisposition, fresh: DetectedAttachment) => AttachmentDisposition;
 /** Reject Drive container declarations before any storage operation can occur. */
 export declare const assertAttachmentDeclaration: (declaredMime: string) => void;
 export declare const normalizeAttachmentName: (value: string) => string;
 export declare const resolveAttachmentName: (requestedName: string, existingNames: readonly string[]) => string;
+export declare const rfc5987AttachmentFilename: (value: string) => string;
 export declare const detectAttachment: (input: {
     name: string;
     declaredMime: string;

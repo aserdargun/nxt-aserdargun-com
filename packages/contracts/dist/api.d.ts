@@ -285,6 +285,16 @@ export declare const PublicNoteResponseSchema: z.ZodObject<{
     title: z.ZodString;
     html: z.ZodString;
     publishedAt: z.ZodISODateTime;
+    assets: z.ZodArray<z.ZodObject<{
+        assetId: z.ZodString;
+        url: z.ZodString;
+        name: z.ZodString;
+        mimeType: z.ZodString;
+        disposition: z.ZodEnum<{
+            inline: "inline";
+            download: "download";
+        }>;
+    }, z.core.$strict>>;
 }, z.core.$strict>;
 export type PublicNoteResponse = z.infer<typeof PublicNoteResponseSchema>;
 //# sourceMappingURL=api.d.ts.map

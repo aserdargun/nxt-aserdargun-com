@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { AttachmentNameSchema, FolderNameSchema } from "./attachment.js";
 import { NoteDocumentSchema, NoteIdSchema, NoteTitleSchema, TimestampSchema } from "./note.js";
-import { PublicIdSchema } from "./publication.js";
+import { MAX_PUBLICATION_ASSETS, PublicIdSchema, PublishedAssetNameSchema } from "./publication.js";
 import { PreferencesPanelStateSchema, PreferencesSchema, RescanRecoveryErrorSchema, VaultIndexEntrySchema } from "./vault.js";
 export const MAX_NOTE_SOURCE_BYTES = 100_000;
 const utf8Bytes = (value) => new TextEncoder().encode(value).byteLength;
@@ -185,8 +185,15 @@ export const PublicationResponseSchema = z
 export const PublicNoteResponseSchema = z
     .object({
     title: NoteTitleSchema,
-    html: z.string(),
-    publishedAt: TimestampSchema
+    html: z.string().refine((value) => utf8Bytes(value) <= 2 * 1024 * 1024),
+    publishedAt: TimestampSchema,
+    assets: z.array(z.object({
+        assetId: PublicIdSchema,
+        url: z.string().regex(/^\/api\/public\/assets\/[A-Za-z0-9_-]{22}\/[A-Za-z0-9_-]{22}$/u),
+        name: PublishedAssetNameSchema,
+        mimeType: z.string().trim().min(1).max(256),
+        disposition: z.enum(["inline", "download"])
+    }).strict()).max(MAX_PUBLICATION_ASSETS)
 })
     .strict();
 //# sourceMappingURL=api.js.map

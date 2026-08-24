@@ -1,6 +1,6 @@
 import { NoteIdSchema, OpaqueIdSchema, TrashResponseSchema, attachmentNameLength, isOpaqueId } from "@nxt/contracts";
 import { ApiResponseError, errorResponse, typedJson } from "../http/api-response.js";
-import { MAX_ATTACHMENT_BYTES, normalizeAttachmentName } from "../services/attachment-policy.js";
+import { MAX_ATTACHMENT_BYTES, rfc5987AttachmentFilename } from "../services/attachment-policy.js";
 import { assertNoQuery, defaultPrivateHandlerDependencies, handlePrivate, pathValue } from "./private-api.js";
 const MAX_ENCODED_BYTES = Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 + 4;
 const MAX_UPLOAD_REQUEST_BYTES = MAX_ENCODED_BYTES + 32 * 1024;
@@ -54,7 +54,7 @@ export const createAttachmentHandlers = (dependencies = defaultPrivateHandlerDep
             "cache-control": "private, no-store"
         };
         if (delivery.disposition === "download")
-            headers["content-disposition"] = `attachment; filename*=UTF-8''${rfc5987Filename(delivery.name)}`;
+            headers["content-disposition"] = `attachment; filename*=UTF-8''${rfc5987AttachmentFilename(delivery.name)}`;
         return { status: 200, headers, body: delivery.bytes };
     }),
     trash: (request) => handlePrivate(request, dependencies, async (services) => {
@@ -198,20 +198,4 @@ const toBytes = (value) => {
         return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
     throw new ApiResponseError("INVALID_INPUT");
 };
-const rfc5987Filename = (value) => {
-    let safe;
-    try {
-        safe = normalizeAttachmentName(stripC0C1(value.normalize("NFC")).replace(/[\\/]/gu, "").trim());
-    }
-    catch {
-        safe = "download";
-    }
-    if (safe.length === 0)
-        safe = "download";
-    return encodeURIComponent(safe).replace(/[!'()*]/gu, (character) => `%${character.codePointAt(0)?.toString(16).toUpperCase()}`);
-};
-const stripC0C1 = (value) => [...value].filter((character) => {
-    const code = character.codePointAt(0);
-    return code > 31 && (code < 127 || code > 159);
-}).join("");
 //# sourceMappingURL=attachments.js.map

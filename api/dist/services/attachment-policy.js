@@ -19,6 +19,7 @@ const STRUCTURALLY_PROVEN_INLINE_MIME_TYPES = new Set([
     "image/jpeg",
     "image/gif"
 ]);
+const PERMANENT_DOWNLOAD_MIME_TYPES = new Set(["image/webp", "application/pdf"]);
 const INLINE_EXTENSIONS = {
     "image/png": new Set(["png"]),
     "image/jpeg": new Set(["jpg", "jpeg"]),
@@ -38,6 +39,11 @@ const FORBIDDEN_DRIVE_MIME_TYPES = new Set([
     "application/vnd.google-apps.shortcut"
 ]);
 export const classifyAttachment = (mimeType) => INLINE_MIME_TYPES.has(mimeType.toLocaleLowerCase("en-US")) ? "inline" : "download";
+/** Fresh content may only preserve or safely lower a persisted disposition. */
+export const safeAttachmentDisposition = (persisted, fresh) => persisted === "download" || fresh.disposition === "download" ||
+    PERMANENT_DOWNLOAD_MIME_TYPES.has(fresh.mimeType.toLocaleLowerCase("en-US"))
+    ? "download"
+    : "inline";
 /** Reject Drive container declarations before any storage operation can occur. */
 export const assertAttachmentDeclaration = (declaredMime) => {
     if (FORBIDDEN_DRIVE_MIME_TYPES.has(normalizeMime(declaredMime)))
@@ -76,6 +82,16 @@ export const resolveAttachmentName = (requestedName, existingNames) => {
     }
     throw new ApiResponseError("CONFLICT");
 };
+export const rfc5987AttachmentFilename = (value) => {
+    let safe;
+    try {
+        safe = normalizeAttachmentName(removeC0C1(value.normalize("NFC")).replace(SEPARATOR, "").trim());
+    }
+    catch {
+        safe = "download";
+    }
+    return encodeURIComponent(safe || "download").replace(/[!'()*]/gu, (character) => `%${character.codePointAt(0)?.toString(16).toUpperCase()}`);
+};
 export const detectAttachment = async (input) => {
     if (input.bytes.byteLength > MAX_ATTACHMENT_BYTES)
         throw new ApiResponseError("TOO_LARGE");
@@ -92,12 +108,15 @@ export const detectAttachment = async (input) => {
     }
     const detectedMime = sniffed?.mime ?? detectSafeTextMime(input.bytes, extension) ?? "application/octet-stream";
     const extensionCoherent = extension !== undefined && INLINE_EXTENSIONS[detectedMime]?.has(extension) === true;
-    const disposition = classifyAttachment(detectedMime) === "inline" &&
+    const detectedDisposition = classifyAttachment(detectedMime) === "inline" &&
         STRUCTURALLY_PROVEN_INLINE_MIME_TYPES.has(detectedMime) &&
         extensionCoherent && declaredMime === detectedMime && structurallyValidInline(input.bytes, detectedMime)
         ? "inline"
         : "download";
-    return { mimeType: detectedMime, disposition };
+    return {
+        mimeType: detectedMime,
+        disposition: safeAttachmentDisposition("inline", { mimeType: detectedMime, disposition: detectedDisposition })
+    };
 };
 export const isInlineExtensionCoherent = (mimeType, name) => {
     const extension = finalExtension(normalizeAttachmentName(name));

@@ -104,18 +104,41 @@ it("strictly validates versioned private index, preferences, and publication sta
       entries: [
         {
           publicId: "a".repeat(22),
-          snapshotDriveId: "snapshot-drive-id",
           sourceNoteId: entry.id,
-          publishedAt: "2026-08-23T12:00:00.000Z",
-          revision: "1",
-          assets: [
-            {
+          epoch: 1,
+          publicFolderId: "public-folder-id",
+          publicFolderVersion: "1",
+          activeRevisionId: "v-source",
+          revisions: [{
+            revisionId: "v-source",
+            operationId: "c".repeat(22),
+            snapshotFolderId: "snapshot-folder-id",
+            snapshotFolderVersion: "1",
+            snapshotMarker: `pm1.${"c".repeat(22)}.revision`,
+            assetsFolderId: "assets-folder-id",
+            assetsFolderVersion: "1",
+            assetsMarker: `pm1.${"c".repeat(22)}.assets`,
+            noteSnapshotDriveId: "snapshot-drive-id",
+            noteVersion: "1",
+            noteChecksum: "d".repeat(64),
+            noteSize: 1,
+            noteMarker: `pm1.${"c".repeat(22)}.note`,
+            sourceVersion: "4",
+            sourceChecksum: "e".repeat(64),
+            sourcePath: entry.path,
+            publishedAt: "2026-08-23T12:00:00.000Z",
+            assets: [{
               assetId: "b".repeat(22),
               snapshotDriveId: "asset-drive-id",
               mimeType: "image/webp",
-              fileName: "plan.webp"
-            }
-          ]
+              fileName: "plan.webp",
+              size: 1,
+              checksum: "f".repeat(64),
+              disposition: "download",
+              marker: `pm1.${"c".repeat(22)}.${"b".repeat(22)}`,
+              version: "1"
+            }]
+          }]
         }
       ]
     }).entries[0]?.publicId

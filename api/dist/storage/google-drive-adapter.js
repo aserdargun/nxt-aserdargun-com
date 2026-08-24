@@ -97,7 +97,8 @@ export class GoogleDriveAdapter {
         return this.create({
             parentId: input.parentId,
             name: input.name,
-            mimeType: FOLDER_MIME_TYPE
+            mimeType: FOLDER_MIME_TYPE,
+            ...(input.appProperties === undefined ? {} : { appProperties: input.appProperties })
         }, context);
     }
     async createText(input, context) {

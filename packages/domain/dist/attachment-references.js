@@ -48,7 +48,7 @@ const markdownDestinations = (source) => {
     }
     return destinations;
 };
-const canonicalAttachmentReference = (raw, notePath) => {
+export const canonicalAttachmentReference = (raw, notePath) => {
     const value = raw.trim();
     // Reject actual URL query/fragment syntax before percent decoding. This
     // permits literal `%23`/`%3F` filename characters without accepting a URL

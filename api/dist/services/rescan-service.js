@@ -4,6 +4,7 @@ import { deriveIndex, parseNote } from "@nxt/domain";
 import { ApiResponseError } from "../http/api-response.js";
 import { StorageOperationBudget, StorageOperationBudgetExceededError } from "../storage/storage-port.js";
 import { preserveApiError } from "./system-file-store.js";
+import { safeAttachmentDisposition } from "./attachment-policy.js";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const MAX_ENTRIES_PER_PAGE = 100;
 const MAX_OPERATIONS_PER_PAGE = 20;
@@ -286,8 +287,9 @@ export class RescanService {
         catch {
             throw new ApiResponseError("CONFLICT");
         }
+        const finalizationAttemptId = randomBytes(16).toString("base64url");
         const recoveryExpiresAt = new Date(this.now().getTime() + SCAN_TTL_MS).toISOString();
-        const receipt = this.bindReceipt(transition, priorCursor, state.scanId, state.baseGeneration, recoveryExpiresAt, null, true);
+        const receipt = this.bindReceipt(transition, priorCursor, state.scanId, state.baseGeneration, recoveryExpiresAt, null, true, finalizationAttemptId);
         let priorIndex;
         let completedIndex;
         try {
@@ -311,7 +313,12 @@ export class RescanService {
                     entries,
                     pendingMutations: [],
                     rescanState: null,
-                    lastCompletedRescan: { scanId: state.scanId, baseGeneration: state.baseGeneration, ...receipt }
+                    lastCompletedRescan: {
+                        scanId: state.scanId,
+                        baseGeneration: state.baseGeneration,
+                        finalizationAttemptId,
+                        ...receipt
+                    }
                 };
                 return completedIndex;
             }, { attempts: MAX_INDEX_CAS_ATTEMPTS, context });
@@ -321,26 +328,30 @@ export class RescanService {
             // lost. Restore only if Drive now contains the exact completion this
             // caller proposed; never overwrite a later mutation or unknown state.
             if (priorIndex !== undefined && completedIndex !== undefined) {
-                await this.rollbackAmbiguousCompletion(priorIndex, completedIndex, context).catch(() => undefined);
+                await this.rollbackAmbiguousCompletion(priorIndex, completedIndex, finalizationAttemptId, context).catch(() => undefined);
             }
             throw error;
         }
     }
-    async rollbackAmbiguousCompletion(priorIndex, completedIndex, context) {
+    async rollbackAmbiguousCompletion(priorIndex, completedIndex, finalizationAttemptId, context) {
         const snapshot = await this.options.indexStore.read(context);
-        if (indexFingerprint(snapshot.value) === indexFingerprint(priorIndex))
+        const prior = this.options.indexStore.prepare(priorIndex);
+        const completed = this.options.indexStore.prepare(completedIndex);
+        if (snapshot.source === prior.source && snapshot.checksum === prior.checksum)
             return;
-        if (indexFingerprint(snapshot.value) !== indexFingerprint(completedIndex))
+        if (snapshot.source !== completed.source || snapshot.checksum !== completed.checksum ||
+            snapshot.value.lastCompletedRescan?.finalizationAttemptId !== finalizationAttemptId)
             throw new ApiResponseError("CONFLICT");
         const restored = await this.options.indexStore.update(priorIndex, snapshot.file.version, context);
-        if (indexFingerprint(restored.value) !== indexFingerprint(priorIndex))
+        if (restored.source !== prior.source || restored.checksum !== prior.checksum ||
+            indexFingerprint(restored.value) !== indexFingerprint(priorIndex))
             throw new ApiResponseError("DRIVE_UNAVAILABLE");
     }
-    bindReceipt(transition, cursor, scanId, generation, recoveryExpiresAt, successorCursor, complete) {
+    bindReceipt(transition, cursor, scanId, generation, recoveryExpiresAt, successorCursor, complete, finalizationAttemptId = null) {
         return {
             ...transition,
             recoveryExpiresAt,
-            receiptMac: this.createReceiptMac(cursor, scanId, generation, transition, recoveryExpiresAt, successorCursor, complete)
+            receiptMac: this.createReceiptMac(cursor, scanId, generation, transition, recoveryExpiresAt, successorCursor, complete, finalizationAttemptId)
         };
     }
     isLiveReceipt(receipt, cursor, payload, scanId, generation, successorCursor, complete, successorExpiresAt) {
@@ -352,10 +363,10 @@ export class RescanService {
         if (recoveryExpiry <= this.now().getTime() ||
             (successorExpiresAt !== undefined && recoveryExpiry > Date.parse(successorExpiresAt)))
             return false;
-        const expected = this.createReceiptMac(cursor, scanId, generation, receipt, receipt.recoveryExpiresAt, successorCursor, complete);
+        const expected = this.createReceiptMac(cursor, scanId, generation, receipt, receipt.recoveryExpiresAt, successorCursor, complete, completedAttemptId(receipt));
         return timingSafeEqual(Buffer.from(receipt.receiptMac), Buffer.from(expected));
     }
-    createReceiptMac(cursor, scanId, generation, transition, recoveryExpiresAt, successorCursor, complete) {
+    createReceiptMac(cursor, scanId, generation, transition, recoveryExpiresAt, successorCursor, complete, finalizationAttemptId = null) {
         const binding = JSON.stringify({
             cursor,
             scanId,
@@ -364,6 +375,7 @@ export class RescanService {
             nonce: transition.fromNonce,
             expiresAt: transition.fromExpiresAt,
             recoveryExpiresAt,
+            ...(finalizationAttemptId === null ? {} : { finalizationAttemptId }),
             successor: {
                 cursor: successorCursor,
                 processed: transition.processed,
@@ -373,7 +385,7 @@ export class RescanService {
             }
         });
         return createHmac("sha256", this.options.cursorSecret)
-            .update("nxt-rescan-receipt-v1\0", "utf8")
+            .update(finalizationAttemptId === null ? "nxt-rescan-receipt-v1\0" : "nxt-rescan-receipt-v2\0", "utf8")
             .update(binding, "utf8")
             .digest("base64url");
     }
@@ -420,9 +432,21 @@ export class RescanService {
     }
     now() { return this.options.now?.() ?? new Date(); }
 }
-const attachmentsFor = (index, noteId) => index.entries.find((entry) => entry.id === noteId)?.attachments.map((attachment) => ({ ...attachment })) ?? [];
+const attachmentsFor = (index, noteId) => index.entries.find((entry) => entry.id === noteId)?.attachments.map((attachment) => ({
+    ...attachment,
+    ...(attachment.disposition === undefined ? {} : {
+        disposition: safeAttachmentDisposition(attachment.disposition, {
+            mimeType: attachment.mimeType,
+            disposition: attachment.disposition
+        })
+    })
+})) ?? [];
 const mutationFingerprint = (mutation) => createHash("sha256").update(canonicalJson(mutation), "utf8").digest("hex");
 const indexFingerprint = (index) => createHash("sha256").update(canonicalJson(index), "utf8").digest("hex");
+const completedAttemptId = (receipt) => {
+    const value = receipt.finalizationAttemptId;
+    return typeof value === "string" ? value : null;
+};
 const canonicalJson = (value) => {
     if (Array.isArray(value))
         return `[${value.map(canonicalJson).join(",")}]`;

@@ -20,10 +20,12 @@ describe("renderMarkdown", () => {
 
   it("keeps only canonical app attachment image routes", async () => {
     const token = "v1.abcdefghijklmnop.asset_1.abcdefghijklmnopqrstuv";
-    const rendered = await renderMarkdown(`![external](https://attacker.example/track.png)\n![encoded](/api%2Fprivate%2Fattachments%2Fasset)\n![protocol-relative](//attacker.example/track.png)\n![private](/api/private/attachments/${token})\n![public](/api/public/assets/public-id/asset-id)`);
+    const publicId = "a".repeat(22);
+    const assetId = "b".repeat(22);
+    const rendered = await renderMarkdown(`![external](https://attacker.example/track.png)\n![encoded](/api%2Fprivate%2Fattachments%2Fasset)\n![protocol-relative](//attacker.example/track.png)\n![private](/api/private/attachments/${token})\n![public](/api/public/assets/${publicId}/${assetId})`);
     expect(rendered.html).not.toMatch(/attacker\.example|api%2Fprivate/iu);
     expect(rendered.html).toContain(`src="/api/private/attachments/${token}"`);
-    expect(rendered.html).toContain('src="/api/public/assets/public-id/asset-id"');
+    expect(rendered.html).toContain(`src="/api/public/assets/${publicId}/${assetId}"`);
   });
 
   it("keeps the exact opaque attachment token grammar emitted by the private codec", async () => {

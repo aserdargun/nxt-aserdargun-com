@@ -67,6 +67,7 @@ export interface StoragePort {
     createFolder(input: {
         parentId: string;
         name: string;
+        appProperties?: Record<string, string>;
     }, context?: StorageOperationContext): Promise<StoredFile>;
     createText(input: {
         parentId: string;

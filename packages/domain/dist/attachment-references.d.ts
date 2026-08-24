@@ -16,4 +16,5 @@ export declare const projectionReferencesAttachment: (projection: readonly strin
     name: string;
     opaqueId?: string;
 }) => boolean;
+export declare const canonicalAttachmentReference: (raw: string, notePath: string) => string | undefined;
 //# sourceMappingURL=attachment-references.d.ts.map

@@ -1,41 +1,216 @@
 import { z } from "zod";
+export declare const MAX_PUBLICATION_ASSETS = 40;
+export declare const MAX_PUBLICATION_TOTAL_ASSET_BYTES: number;
+export declare const PublishedAssetNameSchema: z.ZodString;
+/** Exactly 16 random bytes encoded without Base64 padding. */
 export declare const PublicIdSchema: z.ZodString;
 export declare const PublicationAssetSchema: z.ZodObject<{
     assetId: z.ZodString;
     snapshotDriveId: z.ZodString;
     mimeType: z.ZodString;
     fileName: z.ZodString;
+    size: z.ZodNumber;
+    checksum: z.ZodString;
+    disposition: z.ZodEnum<{
+        inline: "inline";
+        download: "download";
+    }>;
+    marker: z.ZodString;
+    version: z.ZodString;
 }, z.core.$strict>;
 export type PublicationAsset = z.infer<typeof PublicationAssetSchema>;
-export declare const PublicationEntrySchema: z.ZodObject<{
-    publicId: z.ZodString;
-    snapshotDriveId: z.ZodString;
-    sourceNoteId: z.ZodUUID;
+export declare const PublicationRevisionSchema: z.ZodObject<{
+    revisionId: z.ZodString;
+    operationId: z.ZodString;
+    snapshotFolderId: z.ZodString;
+    snapshotFolderVersion: z.ZodString;
+    snapshotMarker: z.ZodString;
+    assetsFolderId: z.ZodString;
+    assetsFolderVersion: z.ZodString;
+    assetsMarker: z.ZodString;
+    noteSnapshotDriveId: z.ZodString;
+    noteVersion: z.ZodString;
+    noteChecksum: z.ZodString;
+    noteSize: z.ZodNumber;
+    noteMarker: z.ZodString;
+    sourceVersion: z.ZodString;
+    sourceChecksum: z.ZodString;
+    sourcePath: z.ZodString;
     publishedAt: z.ZodISODateTime;
-    revision: z.ZodString;
     assets: z.ZodArray<z.ZodObject<{
         assetId: z.ZodString;
         snapshotDriveId: z.ZodString;
         mimeType: z.ZodString;
         fileName: z.ZodString;
+        size: z.ZodNumber;
+        checksum: z.ZodString;
+        disposition: z.ZodEnum<{
+            inline: "inline";
+            download: "download";
+        }>;
+        marker: z.ZodString;
+        version: z.ZodString;
     }, z.core.$strict>>;
 }, z.core.$strict>;
-export type PublicationEntry = z.infer<typeof PublicationEntrySchema>;
-export declare const PublicationManifestSchema: z.ZodObject<{
-    schemaVersion: z.ZodLiteral<1>;
-    entries: z.ZodArray<z.ZodObject<{
-        publicId: z.ZodString;
-        snapshotDriveId: z.ZodString;
-        sourceNoteId: z.ZodUUID;
+export type PublicationRevision = z.infer<typeof PublicationRevisionSchema>;
+export declare const PublicationEntrySchema: z.ZodObject<{
+    publicId: z.ZodString;
+    sourceNoteId: z.ZodUUID;
+    epoch: z.ZodNumber;
+    publicFolderId: z.ZodString;
+    publicFolderVersion: z.ZodString;
+    activeRevisionId: z.ZodString;
+    revisions: z.ZodArray<z.ZodObject<{
+        revisionId: z.ZodString;
+        operationId: z.ZodString;
+        snapshotFolderId: z.ZodString;
+        snapshotFolderVersion: z.ZodString;
+        snapshotMarker: z.ZodString;
+        assetsFolderId: z.ZodString;
+        assetsFolderVersion: z.ZodString;
+        assetsMarker: z.ZodString;
+        noteSnapshotDriveId: z.ZodString;
+        noteVersion: z.ZodString;
+        noteChecksum: z.ZodString;
+        noteSize: z.ZodNumber;
+        noteMarker: z.ZodString;
+        sourceVersion: z.ZodString;
+        sourceChecksum: z.ZodString;
+        sourcePath: z.ZodString;
         publishedAt: z.ZodISODateTime;
-        revision: z.ZodString;
         assets: z.ZodArray<z.ZodObject<{
             assetId: z.ZodString;
             snapshotDriveId: z.ZodString;
             mimeType: z.ZodString;
             fileName: z.ZodString;
+            size: z.ZodNumber;
+            checksum: z.ZodString;
+            disposition: z.ZodEnum<{
+                inline: "inline";
+                download: "download";
+            }>;
+            marker: z.ZodString;
+            version: z.ZodString;
         }, z.core.$strict>>;
     }, z.core.$strict>>;
+}, z.core.$strict>;
+export type PublicationEntry = z.infer<typeof PublicationEntrySchema>;
+export declare const PublicationTombstoneSchema: z.ZodObject<{
+    publicId: z.ZodString;
+    sourceNoteId: z.ZodUUID;
+    epoch: z.ZodNumber;
+    publicFolderId: z.ZodString;
+    publicFolderVersion: z.ZodString;
+    revokedAt: z.ZodISODateTime;
+}, z.core.$strict>;
+export declare const PublicationOperationSchema: z.ZodObject<{
+    operationId: z.ZodString;
+    publicId: z.ZodString;
+    sourceNoteId: z.ZodUUID;
+    epoch: z.ZodNumber;
+    startedAt: z.ZodISODateTime;
+    sourceVersion: z.ZodString;
+    sourceChecksum: z.ZodString;
+    sourcePath: z.ZodString;
+    publicFolderId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    publicFolderVersion: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    revisionFolderId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    revisionFolderVersion: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    revisionId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    revisionMarker: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+}, z.core.$strict>;
+export declare const PublicationCleanupSchema: z.ZodObject<{
+    cleanupId: z.ZodString;
+    publicId: z.ZodString;
+    folderId: z.ZodString;
+    expectedVersion: z.ZodString;
+    marker: z.ZodString;
+    kind: z.ZodEnum<{
+        "public-root": "public-root";
+        revision: "revision";
+    }>;
+    queuedAt: z.ZodISODateTime;
+}, z.core.$strict>;
+export declare const PublicationManifestSchema: z.ZodObject<{
+    schemaVersion: z.ZodLiteral<1>;
+    generation: z.ZodDefault<z.ZodNumber>;
+    entries: z.ZodArray<z.ZodObject<{
+        publicId: z.ZodString;
+        sourceNoteId: z.ZodUUID;
+        epoch: z.ZodNumber;
+        publicFolderId: z.ZodString;
+        publicFolderVersion: z.ZodString;
+        activeRevisionId: z.ZodString;
+        revisions: z.ZodArray<z.ZodObject<{
+            revisionId: z.ZodString;
+            operationId: z.ZodString;
+            snapshotFolderId: z.ZodString;
+            snapshotFolderVersion: z.ZodString;
+            snapshotMarker: z.ZodString;
+            assetsFolderId: z.ZodString;
+            assetsFolderVersion: z.ZodString;
+            assetsMarker: z.ZodString;
+            noteSnapshotDriveId: z.ZodString;
+            noteVersion: z.ZodString;
+            noteChecksum: z.ZodString;
+            noteSize: z.ZodNumber;
+            noteMarker: z.ZodString;
+            sourceVersion: z.ZodString;
+            sourceChecksum: z.ZodString;
+            sourcePath: z.ZodString;
+            publishedAt: z.ZodISODateTime;
+            assets: z.ZodArray<z.ZodObject<{
+                assetId: z.ZodString;
+                snapshotDriveId: z.ZodString;
+                mimeType: z.ZodString;
+                fileName: z.ZodString;
+                size: z.ZodNumber;
+                checksum: z.ZodString;
+                disposition: z.ZodEnum<{
+                    inline: "inline";
+                    download: "download";
+                }>;
+                marker: z.ZodString;
+                version: z.ZodString;
+            }, z.core.$strict>>;
+        }, z.core.$strict>>;
+    }, z.core.$strict>>;
+    tombstones: z.ZodDefault<z.ZodArray<z.ZodObject<{
+        publicId: z.ZodString;
+        sourceNoteId: z.ZodUUID;
+        epoch: z.ZodNumber;
+        publicFolderId: z.ZodString;
+        publicFolderVersion: z.ZodString;
+        revokedAt: z.ZodISODateTime;
+    }, z.core.$strict>>>;
+    operations: z.ZodDefault<z.ZodArray<z.ZodObject<{
+        operationId: z.ZodString;
+        publicId: z.ZodString;
+        sourceNoteId: z.ZodUUID;
+        epoch: z.ZodNumber;
+        startedAt: z.ZodISODateTime;
+        sourceVersion: z.ZodString;
+        sourceChecksum: z.ZodString;
+        sourcePath: z.ZodString;
+        publicFolderId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        publicFolderVersion: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        revisionFolderId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        revisionFolderVersion: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        revisionId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        revisionMarker: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    }, z.core.$strict>>>;
+    cleanup: z.ZodDefault<z.ZodArray<z.ZodObject<{
+        cleanupId: z.ZodString;
+        publicId: z.ZodString;
+        folderId: z.ZodString;
+        expectedVersion: z.ZodString;
+        marker: z.ZodString;
+        kind: z.ZodEnum<{
+            "public-root": "public-root";
+            revision: "revision";
+        }>;
+        queuedAt: z.ZodISODateTime;
+    }, z.core.$strict>>>;
 }, z.core.$strict>;
 export type PublicationManifest = z.infer<typeof PublicationManifestSchema>;
 //# sourceMappingURL=publication.d.ts.map

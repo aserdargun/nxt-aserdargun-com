@@ -128,7 +128,7 @@ export class RootBoundaryStorage implements StoragePort {
     return this.storage.readBytes(fileId, context);
   }
 
-  public async createFolder(input: { parentId: string; name: string }, context?: StorageOperationContext): Promise<StoredFile> {
+  public async createFolder(input: { parentId: string; name: string; appProperties?: Record<string, string> }, context?: StorageOperationContext): Promise<StoredFile> {
     await this.assertInside(input.parentId, context);
     const file = await this.storage.createFolder(input, context);
     await this.assertInside(file.id, context);

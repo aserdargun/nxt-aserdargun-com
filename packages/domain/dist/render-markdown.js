@@ -52,7 +52,7 @@ function textFromHast(tree) {
     visit(tree);
     return parts.join(" ").replace(/\s+/gu, " ").trim();
 }
-const PUBLIC_ATTACHMENT_PATH = /^\/api\/public\/assets\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/u;
+const PUBLIC_ATTACHMENT_PATH = /^\/api\/public\/assets\/[A-Za-z0-9_-]{22}\/[A-Za-z0-9_-]{22}$/u;
 const APPLICATION_ORIGIN = "https://nxt.invalid";
 function isApplicationAttachmentUrl(value) {
     if (typeof value !== "string" || !value.startsWith("/"))
@@ -67,6 +67,31 @@ function isApplicationAttachmentUrl(value) {
     catch {
         return false;
     }
+}
+function rewriteUrls(rewriteUrl) {
+    return (tree) => {
+        if (rewriteUrl === undefined)
+            return;
+        const visit = (node) => {
+            if (typeof node !== "object" || node === null)
+                return;
+            const html = node;
+            if (html.type === "element") {
+                for (const [tagName, property] of [["a", "href"], ["img", "src"]]) {
+                    const current = html.tagName === tagName ? html.properties?.[property] : undefined;
+                    if (typeof current !== "string")
+                        continue;
+                    const rewritten = rewriteUrl(current);
+                    if (rewritten === undefined)
+                        delete html.properties?.[property];
+                    else if (html.properties !== undefined)
+                        html.properties[property] = rewritten;
+                }
+            }
+            html.children?.forEach(visit);
+        };
+        visit(tree);
+    };
 }
 function restrictAttachmentUrls() {
     return (tree) => {
@@ -98,10 +123,11 @@ const sanitizerSchema = {
         h6: [...(defaultSchema.attributes?.h6 ?? []), "id"]
     }
 };
-function createMarkdownProcessor() {
+function createMarkdownProcessor(options = {}) {
     return createMarkdownParser()
         // Deliberately omit rehype-raw: raw HTML is discarded instead of interpreted.
         .use(remarkRehype)
+        .use(rewriteUrls, options.rewriteUrl)
         .use(restrictAttachmentUrls)
         .use(rehypeHighlight)
         .use(rehypeSanitize, sanitizerSchema)
@@ -117,8 +143,8 @@ function createMarkdownParser() {
         .use(remarkFrontmatter, ["yaml"])
         .use(remarkGfm);
 }
-function deriveMarkdown(source) {
-    const processor = createMarkdownProcessor();
+function deriveMarkdown(source, options = {}) {
+    const processor = createMarkdownProcessor(options);
     const markdownTree = processor.parse(source);
     const outline = collectOutline(markdownTree);
     return { processor, outline, hastTree: processor.runSync(markdownTree) };
@@ -128,8 +154,8 @@ export function deriveMarkdownPlainText(source) {
     return textFromHast(deriveMarkdown(source).hastTree);
 }
 /** Renders GFM and strips every raw HTML node before serializing sanitized HTML. */
-export function renderMarkdown(source) {
-    const { hastTree, outline, processor } = deriveMarkdown(source);
+export function renderMarkdown(source, options = {}) {
+    const { hastTree, outline, processor } = deriveMarkdown(source, options);
     const html = processor.stringify(hastTree);
     return Promise.resolve({
         html,

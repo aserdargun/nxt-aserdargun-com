@@ -9,6 +9,11 @@ export interface SystemFileSnapshot<T> {
     source: string;
     checksum: string;
 }
+export interface PreparedSystemFile<T> {
+    value: T;
+    source: string;
+    checksum: string;
+}
 export declare class SystemFileStore<T> {
     private readonly options;
     constructor(options: {
@@ -20,6 +25,7 @@ export declare class SystemFileStore<T> {
     });
     read(context?: StorageOperationContext): Promise<SystemFileSnapshot<T>>;
     update(value: T, expectedVersion?: string, context?: StorageOperationContext): Promise<SystemFileSnapshot<T>>;
+    prepare(value: T): PreparedSystemFile<T>;
     compareAndSet(transform: (current: T) => T, options?: {
         attempts?: number;
         context?: StorageOperationContext;

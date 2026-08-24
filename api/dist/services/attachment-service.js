@@ -4,7 +4,7 @@ import { attachmentIsReferenced, projectionReferencesAttachment } from "@nxt/dom
 import { ApiResponseError } from "../http/api-response.js";
 import { StorageMutationNotAppliedError, StorageMutationOutcomeUnknownError, StorageOperationBudget, StorageOperationBudgetExceededError, StorageVersionConflictError } from "../storage/storage-port.js";
 import { preserveApiError } from "./system-file-store.js";
-import { MAX_ATTACHMENT_BYTES, assertAttachmentDeclaration, detectAttachment, normalizeAttachmentName, resolveAttachmentName } from "./attachment-policy.js";
+import { MAX_ATTACHMENT_BYTES, assertAttachmentDeclaration, detectAttachment, normalizeAttachmentName, resolveAttachmentName, safeAttachmentDisposition } from "./attachment-policy.js";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const SHORTCUT_MIME_TYPE = "application/vnd.google-apps.shortcut";
 const MAX_LIST_PAGES = 20;
@@ -114,7 +114,7 @@ export class AttachmentService {
             bytes: verified.bytes,
             name: record.name,
             mimeType: verified.mimeType,
-            disposition: record.disposition
+            disposition: verified.disposition
         };
     }
     async trashUnserialized(input) {
@@ -311,9 +311,13 @@ export class AttachmentService {
         if (detected.mimeType !== input.attachment.mimeType || file.mimeType !== input.attachment.mimeType) {
             throw new ApiResponseError("DRIVE_UNAVAILABLE");
         }
-        if (input.attachment.disposition === "inline" && detected.disposition !== "inline")
-            throw new ApiResponseError("DRIVE_UNAVAILABLE");
-        return { file, bytes, checksum: readbackChecksum, mimeType: detected.mimeType };
+        return {
+            file,
+            bytes,
+            checksum: readbackChecksum,
+            mimeType: detected.mimeType,
+            disposition: safeAttachmentDisposition(input.attachment.disposition, detected)
+        };
     }
     toRecord(attachment) {
         if (attachment.checksum === undefined || attachment.disposition === undefined || attachment.version === undefined || attachment.marker === undefined)
@@ -615,9 +619,15 @@ export class AttachmentService {
                 throw new ApiResponseError("CONFLICT");
             const existing = entry.attachments.find((attachment) => attachment.driveId === record.driveId);
             if (existing !== undefined) {
-                if (!sameAttachment(existing, record))
+                const corrected = withSafeRecordDisposition(existing, record);
+                if (!sameAttachment(corrected, record))
                     throw new ApiResponseError("CONFLICT");
-                return bump(index, { pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutation.id) });
+                return bump(index, {
+                    entries: index.entries.map((candidate) => candidate.id === mutation.noteId
+                        ? { ...candidate, attachments: candidate.attachments.map((attachment) => attachment.driveId === record.driveId ? record : attachment) }
+                        : candidate),
+                    pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutation.id)
+                });
             }
             if (entry.attachments.some((attachment) => sameName(attachment.name, record.name)))
                 throw new ApiResponseError("CONFLICT");
@@ -644,8 +654,8 @@ export class AttachmentService {
         try {
             activeMutation = await this.assertOwnedMutation(activeMutation);
             const attachment = this.recordFromMutation(activeMutation);
-            const file = await this.verifyTrashReadback(activeMutation, attachment, context);
-            if (file.trashed) {
+            const verified = await this.verifyTrashReadback(activeMutation, attachment, context);
+            if (verified.file.trashed) {
                 const applied = await this.markDriveApplied(activeMutation, activeMutation.driveId);
                 activeMutation = applied;
                 const indexedMutation = await this.applyTrashProjection(activeMutation, activeMutation.noteId, activeMutation.driveId);
@@ -655,7 +665,7 @@ export class AttachmentService {
             }
             // The trash did not apply.  Preserve (or restore) the projection and
             // release the expired reservation so retries cannot exhaust capacity.
-            await this.restoreActiveProjection(activeMutation, attachment);
+            await this.restoreActiveProjection(activeMutation, { ...attachment, disposition: verified.disposition });
             await this.clearOwnedMutation(activeMutation);
         }
         catch {
@@ -683,7 +693,7 @@ export class AttachmentService {
         };
         try {
             const verified = await this.verifyReadback({ driveId, noteId: mutation.noteId, folderId, attachment: record, context });
-            return { ...record, version: verified.file.version };
+            return { ...record, disposition: verified.disposition, version: verified.file.version };
         }
         catch {
             return undefined;
@@ -699,8 +709,9 @@ export class AttachmentService {
         const entry = index.value.entries.find((candidate) => candidate.id === mutation.noteId);
         if (entry === undefined)
             return "name-conflict";
-        if (entry.attachments.some((attachment) => attachment.driveId === record.driveId))
-            return "already-applied";
+        const byId = entry.attachments.find((attachment) => attachment.driveId === record.driveId);
+        if (byId !== undefined)
+            return sameAttachment(byId, record) ? "already-applied" : "absent";
         return entry.attachments.some((attachment) => sameName(attachment.name, record.name)) ? "name-conflict" : "absent";
     }
     async restoreActiveProjection(mutation, attachment) {
@@ -714,9 +725,14 @@ export class AttachmentService {
             if (sameNameDifferentId)
                 throw new ApiResponseError("CONFLICT");
             if (byId !== undefined) {
-                if (!sameAttachment(byId, attachment))
+                const corrected = withSafeRecordDisposition(byId, attachment);
+                if (!sameAttachment(corrected, attachment))
                     throw new ApiResponseError("CONFLICT");
-                return index;
+                return bump(index, {
+                    entries: index.entries.map((candidate) => candidate.id === mutation.noteId
+                        ? { ...candidate, attachments: candidate.attachments.map((record) => record.driveId === attachment.driveId ? attachment : record) }
+                        : candidate)
+                });
             }
             return bump(index, { entries: index.entries.map((candidate) => candidate.id === mutation.noteId ? { ...candidate, attachments: [...candidate.attachments, attachment] } : candidate) });
         });
@@ -734,7 +750,7 @@ export class AttachmentService {
             // returned metadata is still the bounded authoritative readback; the
             // checksum was fenced by the active pre-Drive verification.
             if (metadata.trashed)
-                return metadata;
+                return { file: metadata, disposition: attachment.disposition };
             throw error;
         }
         const file = readback.file;
@@ -745,9 +761,9 @@ export class AttachmentService {
             file.appProperties?.nxtAttachmentMutation !== mutation.attachmentMarker || (!file.trashed && file.version !== mutation.expectedVersion))
             throw new ApiResponseError("DRIVE_UNAVAILABLE");
         const detected = await detectAttachment({ name: file.name, declaredMime: file.mimeType, bytes: readback.bytes });
-        if (detected.mimeType !== attachment.mimeType || (attachment.disposition === "inline" && detected.disposition !== "inline"))
+        if (detected.mimeType !== attachment.mimeType)
             throw new ApiResponseError("DRIVE_UNAVAILABLE");
-        return file;
+        return { file, disposition: safeAttachmentDisposition(attachment.disposition, detected) };
     }
     matchesTrashMetadata(mutation, metadata) {
         return metadata.id === mutation.driveId && metadata.parentIds.length === 1 && metadata.parentIds[0] === mutation.parentId && metadata.name === mutation.targetName && metadata.mimeType === mutation.attachmentMimeType && metadata.size === mutation.attachmentSize && metadata.appProperties?.nxtAttachmentMutation === mutation.attachmentMarker && (metadata.trashed || metadata.version === mutation.expectedVersion);
@@ -883,6 +899,13 @@ const sameName = (first, second) => first.normalize("NFC").toLocaleLowerCase("en
 const sameAttachment = (stored, expected) => stored.driveId === expected.driveId && stored.name === expected.name && stored.mimeType === expected.mimeType &&
     stored.size === expected.size && stored.checksum === expected.checksum && stored.disposition === expected.disposition &&
     stored.version === expected.version && stored.marker === expected.marker;
+const withSafeRecordDisposition = (stored, fresh) => ({
+    ...stored,
+    disposition: safeAttachmentDisposition(stored.disposition ?? fresh.disposition, {
+        mimeType: fresh.mimeType,
+        disposition: fresh.disposition
+    })
+});
 const isNoteOrFolderPathMutation = (mutation) => mutation.operation === "create-note" || mutation.operation === "update-note" || mutation.operation === "move-note" || mutation.operation === "trash-note" ||
     mutation.operation === "create-folder" || mutation.operation === "rename-folder" || mutation.operation === "move-folder" || mutation.operation === "update-folder" || mutation.operation === "trash-folder";
 const toApiError = (error) => {

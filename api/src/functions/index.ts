@@ -13,6 +13,9 @@ import {
 import { updatePreferencesHandler } from "./preferences.js";
 import { sessionHandler } from "./session.js";
 import { getVaultHandler, rescanVaultHandler } from "./vault.js";
+import { publicAssetHandler } from "./public-assets.js";
+import { publicNoteHandler } from "./public-notes.js";
+import { publishNoteHandler, revokePublicationHandler } from "./publications.js";
 
 app.http("private-session", {
   methods: ["GET"],
@@ -64,6 +67,28 @@ export const task8Routes: Array<{
 ];
 
 for (const route of task8Routes) {
+  app.http(route.name, {
+    methods: [route.method],
+    authLevel: route.authLevel,
+    route: route.route,
+    handler: route.handler
+  });
+}
+
+export const task9Routes: Array<{
+  name: string;
+  method: "GET" | "POST" | "DELETE";
+  route: string;
+  authLevel: "anonymous";
+  handler: HttpHandler;
+}> = [
+  { name: "private-notes-publish", method: "POST", route: "private/notes/{noteId}/publish", authLevel: "anonymous", handler: publishNoteHandler },
+  { name: "private-publications-revoke", method: "DELETE", route: "private/publications/{publicId}", authLevel: "anonymous", handler: revokePublicationHandler },
+  { name: "public-notes-get", method: "GET", route: "public/notes/{publicId}", authLevel: "anonymous", handler: publicNoteHandler },
+  { name: "public-assets-get", method: "GET", route: "public/assets/{publicId}/{assetId}", authLevel: "anonymous", handler: publicAssetHandler }
+];
+
+for (const route of task9Routes) {
   app.http(route.name, {
     methods: [route.method],
     authLevel: route.authLevel,

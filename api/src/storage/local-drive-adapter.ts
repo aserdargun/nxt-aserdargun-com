@@ -130,12 +130,14 @@ export class LocalDriveAdapter implements StoragePort {
     });
   }
 
-  public createFolder(input: { parentId: string; name: string }, context?: StorageOperationContext): Promise<StoredFile> {
+  public createFolder(input: { parentId: string; name: string; appProperties?: Record<string, string> }, context?: StorageOperationContext): Promise<StoredFile> {
     context?.operationBudget?.consume();
     return this.mutate(async (metadata) => {
       assertName(input.name);
+      assertAppProperties(input.appProperties);
       this.getActiveFolder(metadata, input.parentId);
       const file = this.newFile(metadata, input.parentId, input.name, FOLDER_MIME_TYPE, "folder", 0);
+      if (input.appProperties !== undefined) file.appProperties = { ...input.appProperties };
       await this.saveMetadata(metadata);
       return this.toStoredFile(file);
     });

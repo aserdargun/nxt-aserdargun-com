@@ -37,6 +37,11 @@ export interface RenderedMarkdown {
   plainText: string;
 }
 
+export interface RenderMarkdownOptions {
+  /** Rewrites already parsed link/image destinations before sanitization. */
+  rewriteUrl?: (value: string) => string | undefined;
+}
+
 function textFromNode(node: { value?: unknown; children?: unknown[] }): string {
   if (typeof node.value === "string") return node.value;
   if (!Array.isArray(node.children)) return "";
@@ -79,7 +84,7 @@ function textFromHast(tree: HtmlNode): string {
   return parts.join(" ").replace(/\s+/gu, " ").trim();
 }
 
-const PUBLIC_ATTACHMENT_PATH = /^\/api\/public\/assets\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/u;
+const PUBLIC_ATTACHMENT_PATH = /^\/api\/public\/assets\/[A-Za-z0-9_-]{22}\/[A-Za-z0-9_-]{22}$/u;
 const APPLICATION_ORIGIN = "https://nxt.invalid";
 
 function isApplicationAttachmentUrl(value: unknown): boolean {
@@ -92,6 +97,27 @@ function isApplicationAttachmentUrl(value: unknown): boolean {
   } catch {
     return false;
   }
+}
+
+function rewriteUrls(rewriteUrl: RenderMarkdownOptions["rewriteUrl"]) {
+  return (tree: unknown): void => {
+    if (rewriteUrl === undefined) return;
+    const visit = (node: unknown): void => {
+      if (typeof node !== "object" || node === null) return;
+      const html = node as HtmlNode;
+      if (html.type === "element") {
+        for (const [tagName, property] of [["a", "href"], ["img", "src"]] as const) {
+          const current = html.tagName === tagName ? html.properties?.[property] : undefined;
+          if (typeof current !== "string") continue;
+          const rewritten = rewriteUrl(current);
+          if (rewritten === undefined) delete html.properties?.[property];
+          else if (html.properties !== undefined) html.properties[property] = rewritten;
+        }
+      }
+      html.children?.forEach(visit);
+    };
+    visit(tree);
+  };
 }
 
 function restrictAttachmentUrls() {
@@ -125,10 +151,11 @@ const sanitizerSchema: Options = {
   }
 };
 
-function createMarkdownProcessor() {
+function createMarkdownProcessor(options: RenderMarkdownOptions = {}) {
   return createMarkdownParser()
     // Deliberately omit rehype-raw: raw HTML is discarded instead of interpreted.
     .use(remarkRehype)
+    .use(rewriteUrls, options.rewriteUrl)
     .use(restrictAttachmentUrls)
     .use(rehypeHighlight)
     .use(rehypeSanitize, sanitizerSchema)
@@ -147,8 +174,8 @@ function createMarkdownParser() {
     .use(remarkGfm);
 }
 
-function deriveMarkdown(source: string) {
-  const processor = createMarkdownProcessor();
+function deriveMarkdown(source: string, options: RenderMarkdownOptions = {}) {
+  const processor = createMarkdownProcessor(options);
   const markdownTree = processor.parse(source);
   const outline = collectOutline(markdownTree as unknown as MarkdownRoot);
   return { processor, outline, hastTree: processor.runSync(markdownTree) };
@@ -160,8 +187,8 @@ export function deriveMarkdownPlainText(source: string): string {
 }
 
 /** Renders GFM and strips every raw HTML node before serializing sanitized HTML. */
-export function renderMarkdown(source: string): Promise<RenderedMarkdown> {
-  const { hastTree, outline, processor } = deriveMarkdown(source);
+export function renderMarkdown(source: string, options: RenderMarkdownOptions = {}): Promise<RenderedMarkdown> {
+  const { hastTree, outline, processor } = deriveMarkdown(source, options);
   const html = processor.stringify(hastTree);
 
   return Promise.resolve({

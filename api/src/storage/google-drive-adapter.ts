@@ -145,11 +145,13 @@ export class GoogleDriveAdapter implements StoragePort {
   public async createFolder(input: {
     parentId: string;
     name: string;
+    appProperties?: Record<string, string>;
   }, context?: StorageOperationContext): Promise<StoredFile> {
     return this.create({
       parentId: input.parentId,
       name: input.name,
-      mimeType: FOLDER_MIME_TYPE
+      mimeType: FOLDER_MIME_TYPE,
+      ...(input.appProperties === undefined ? {} : { appProperties: input.appProperties })
     }, context);
   }
 

@@ -13,4 +13,11 @@ export declare const task8Routes: Array<{
     authLevel: "anonymous";
     handler: HttpHandler;
 }>;
+export declare const task9Routes: Array<{
+    name: string;
+    method: "GET" | "POST" | "DELETE";
+    route: string;
+    authLevel: "anonymous";
+    handler: HttpHandler;
+}>;
 //# sourceMappingURL=index.d.ts.map

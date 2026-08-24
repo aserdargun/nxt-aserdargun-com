@@ -95,7 +95,7 @@ export interface StoragePort {
   }, context?: StorageOperationContext): Promise<{ files: StoredFile[]; nextPageToken?: string }>;
   readText(fileId: string, context?: StorageOperationContext): Promise<{ file: StoredFile; text: string; checksum: string }>;
   readBytes(fileId: string, context?: StorageOperationContext): Promise<{ file: StoredFile; bytes: Uint8Array; checksum: string }>;
-  createFolder(input: { parentId: string; name: string }, context?: StorageOperationContext): Promise<StoredFile>;
+  createFolder(input: { parentId: string; name: string; appProperties?: Record<string, string> }, context?: StorageOperationContext): Promise<StoredFile>;
   createText(input: { parentId: string; name: string; mimeType: string; text: string }, context?: StorageOperationContext): Promise<StoredFile>;
   createBytes(input: { parentId: string; name: string; mimeType: string; bytes: Uint8Array; appProperties?: Record<string, string> }, context?: StorageOperationContext): Promise<StoredFile>;
   updateText(input: { fileId: string; expectedVersion: string; mimeType: string; text: string }, context?: StorageOperationContext): Promise<StoredFile>;

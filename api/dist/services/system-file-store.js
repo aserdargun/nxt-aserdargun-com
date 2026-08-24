@@ -29,14 +29,8 @@ export class SystemFileStore {
         if (expectedVersion !== undefined && before.file.version !== expectedVersion) {
             throw new ApiResponseError("CONFLICT");
         }
-        let parsed;
-        try {
-            parsed = this.options.schema.parse(value);
-        }
-        catch {
-            throw new ApiResponseError("DRIVE_UNAVAILABLE");
-        }
-        const source = `${JSON.stringify(parsed, null, 2)}\n`;
+        const prepared = this.prepare(value);
+        const source = prepared.source;
         let updated;
         try {
             updated = await this.options.storage.updateText({
@@ -62,6 +56,17 @@ export class SystemFileStore {
         catch (error) {
             throw preserveApiError(error, "DRIVE_UNAVAILABLE");
         }
+    }
+    prepare(value) {
+        let parsed;
+        try {
+            parsed = this.options.schema.parse(value);
+        }
+        catch {
+            throw new ApiResponseError("DRIVE_UNAVAILABLE");
+        }
+        const source = `${JSON.stringify(parsed, null, 2)}\n`;
+        return { value: parsed, source, checksum: createHash("sha256").update(source).digest("hex") };
     }
     async compareAndSet(transform, options = {}) {
         const attempts = options.attempts ?? 8;

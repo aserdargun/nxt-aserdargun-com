@@ -1,7 +1,7 @@
 import type { HttpRequest, HttpResponseInit } from "@azure/functions";
 import { NoteIdSchema, OpaqueIdSchema, TrashResponseSchema, attachmentNameLength, isOpaqueId } from "@nxt/contracts";
 import { ApiResponseError, errorResponse, typedJson } from "../http/api-response.js";
-import { MAX_ATTACHMENT_BYTES, normalizeAttachmentName } from "../services/attachment-policy.js";
+import { MAX_ATTACHMENT_BYTES, rfc5987AttachmentFilename } from "../services/attachment-policy.js";
 import {
   assertNoQuery,
   defaultPrivateHandlerDependencies,
@@ -61,7 +61,7 @@ export const createAttachmentHandlers = (dependencies: PrivateHandlerDependencie
       "x-content-type-options": "nosniff",
       "cache-control": "private, no-store"
     };
-    if (delivery.disposition === "download") headers["content-disposition"] = `attachment; filename*=UTF-8''${rfc5987Filename(delivery.name)}`;
+    if (delivery.disposition === "download") headers["content-disposition"] = `attachment; filename*=UTF-8''${rfc5987AttachmentFilename(delivery.name)}`;
     return { status: 200, headers, body: delivery.bytes };
   }),
   trash: (request: HttpRequest): Promise<HttpResponseInit> => handlePrivate(request, dependencies, async (services) => {
@@ -173,16 +173,3 @@ const toBytes = (value: unknown): Uint8Array => {
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   throw new ApiResponseError("INVALID_INPUT");
 };
-
-const rfc5987Filename = (value: string): string => {
-  let safe: string;
-  try { safe = normalizeAttachmentName(stripC0C1(value.normalize("NFC")).replace(/[\\/]/gu, "").trim()); }
-  catch { safe = "download"; }
-  if (safe.length === 0) safe = "download";
-  return encodeURIComponent(safe).replace(/[!'()*]/gu, (character) => `%${character.codePointAt(0)?.toString(16).toUpperCase()}`);
-};
-
-const stripC0C1 = (value: string): string => [...value].filter((character) => {
-  const code = character.codePointAt(0) as number;
-  return code > 31 && (code < 127 || code > 159);
-}).join("");

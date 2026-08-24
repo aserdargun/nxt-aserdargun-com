@@ -93,6 +93,13 @@ export const resolveAttachmentName = (requestedName: string, existingNames: read
   throw new ApiResponseError("CONFLICT");
 };
 
+export const rfc5987AttachmentFilename = (value: string): string => {
+  let safe: string;
+  try { safe = normalizeAttachmentName(removeC0C1(value.normalize("NFC")).replace(SEPARATOR, "").trim()); }
+  catch { safe = "download"; }
+  return encodeURIComponent(safe || "download").replace(/[!'()*]/gu, (character) => `%${character.codePointAt(0)?.toString(16).toUpperCase()}`);
+};
+
 export const detectAttachment = async (input: {
   name: string;
   declaredMime: string;
