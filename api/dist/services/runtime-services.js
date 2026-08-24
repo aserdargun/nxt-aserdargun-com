@@ -5,6 +5,7 @@ import { GoogleDriveAdapter } from "../storage/google-drive-adapter.js";
 import { RootBoundaryStorage } from "../storage/root-boundary.js";
 import { PreferencesService } from "./preferences-service.js";
 import { RescanService } from "./rescan-service.js";
+import { AttachmentService } from "./attachment-service.js";
 import { SystemFileStore } from "./system-file-store.js";
 import { VaultService } from "./vault-service.js";
 let cached;
@@ -63,7 +64,13 @@ export const resolveTask7Services = () => {
             notesFolderId: env("NXT_NOTES_DRIVE_FOLDER_ID"),
             cursorSecret: tokenSecret
         }),
-        preferences: new PreferencesService({ preferencesStore, indexStore })
+        preferences: new PreferencesService({ preferencesStore, indexStore }),
+        attachments: new AttachmentService({
+            storage: vaultStorage,
+            indexStore,
+            vault,
+            assetsRootId: env("NXT_ASSETS_DRIVE_FOLDER_ID")
+        })
     };
     return cached;
 };

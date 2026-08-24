@@ -691,6 +691,8 @@ export class VaultService {
         const snapshot = await this.options.indexStore.read();
         const now = this.now().getTime();
         const recoverable = snapshot.value.pendingMutations.filter((mutation) => {
+            if (mutation.operation === "create-attachment" || mutation.operation === "trash-attachment")
+                return false;
             if (mutation.phase === "conflicted")
                 return false;
             if (mutation.phase === "reserved")

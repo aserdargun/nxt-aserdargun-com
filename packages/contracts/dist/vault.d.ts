@@ -5,6 +5,11 @@ export declare const VaultAttachmentSchema: z.ZodObject<{
     name: z.ZodString;
     mimeType: z.ZodString;
     size: z.ZodNumber;
+    checksum: z.ZodOptional<z.ZodString>;
+    disposition: z.ZodOptional<z.ZodEnum<{
+        inline: "inline";
+        download: "download";
+    }>>;
 }, z.core.$strict>;
 export type VaultAttachment = z.infer<typeof VaultAttachmentSchema>;
 export declare const VaultIndexEntrySchema: z.ZodObject<{
@@ -26,6 +31,11 @@ export declare const VaultIndexEntrySchema: z.ZodObject<{
         name: z.ZodString;
         mimeType: z.ZodString;
         size: z.ZodNumber;
+        checksum: z.ZodOptional<z.ZodString>;
+        disposition: z.ZodOptional<z.ZodEnum<{
+            inline: "inline";
+            download: "download";
+        }>>;
     }, z.core.$strict>>;
     backlinks: z.ZodArray<z.ZodUUID>;
 }, z.core.$strict>;
@@ -40,6 +50,8 @@ export declare const VaultMutationOperationSchema: z.ZodEnum<{
     "move-folder": "move-folder";
     "update-folder": "update-folder";
     "trash-folder": "trash-folder";
+    "create-attachment": "create-attachment";
+    "trash-attachment": "trash-attachment";
 }>;
 export declare const VaultMutationPhaseSchema: z.ZodEnum<{
     reserved: "reserved";
@@ -67,6 +79,8 @@ export declare const VaultPendingMutationSchema: z.ZodObject<{
         "move-folder": "move-folder";
         "update-folder": "update-folder";
         "trash-folder": "trash-folder";
+        "create-attachment": "create-attachment";
+        "trash-attachment": "trash-attachment";
     }>;
     noteId: z.ZodOptional<z.ZodUUID>;
     driveId: z.ZodOptional<z.ZodString>;
@@ -113,6 +127,11 @@ export declare const RescanStagedRecordSchema: z.ZodObject<{
         name: z.ZodString;
         mimeType: z.ZodString;
         size: z.ZodNumber;
+        checksum: z.ZodOptional<z.ZodString>;
+        disposition: z.ZodOptional<z.ZodEnum<{
+            inline: "inline";
+            download: "download";
+        }>>;
     }, z.core.$strict>>;
 }, z.core.$strict>;
 export declare const RescanRecoveryErrorSchema: z.ZodEnum<{
@@ -185,6 +204,11 @@ export declare const VaultRescanStateSchema: z.ZodObject<{
             name: z.ZodString;
             mimeType: z.ZodString;
             size: z.ZodNumber;
+            checksum: z.ZodOptional<z.ZodString>;
+            disposition: z.ZodOptional<z.ZodEnum<{
+                inline: "inline";
+                download: "download";
+            }>>;
         }, z.core.$strict>>;
     }, z.core.$strict>>;
     seenDriveIds: z.ZodArray<z.ZodString>;
@@ -269,6 +293,11 @@ export declare const VaultIndexSchema: z.ZodObject<{
             name: z.ZodString;
             mimeType: z.ZodString;
             size: z.ZodNumber;
+            checksum: z.ZodOptional<z.ZodString>;
+            disposition: z.ZodOptional<z.ZodEnum<{
+                inline: "inline";
+                download: "download";
+            }>>;
         }, z.core.$strict>>;
         backlinks: z.ZodArray<z.ZodUUID>;
     }, z.core.$strict>>;
@@ -284,6 +313,8 @@ export declare const VaultIndexSchema: z.ZodObject<{
             "move-folder": "move-folder";
             "update-folder": "update-folder";
             "trash-folder": "trash-folder";
+            "create-attachment": "create-attachment";
+            "trash-attachment": "trash-attachment";
         }>;
         noteId: z.ZodOptional<z.ZodUUID>;
         driveId: z.ZodOptional<z.ZodString>;
@@ -349,6 +380,11 @@ export declare const VaultIndexSchema: z.ZodObject<{
                 name: z.ZodString;
                 mimeType: z.ZodString;
                 size: z.ZodNumber;
+                checksum: z.ZodOptional<z.ZodString>;
+                disposition: z.ZodOptional<z.ZodEnum<{
+                    inline: "inline";
+                    download: "download";
+                }>>;
             }, z.core.$strict>>;
         }, z.core.$strict>>;
         seenDriveIds: z.ZodArray<z.ZodString>;

@@ -7,6 +7,10 @@ export declare const SafeVaultAttachmentSchema: z.ZodObject<{
     name: z.ZodString;
     mimeType: z.ZodString;
     size: z.ZodNumber;
+    disposition: z.ZodOptional<z.ZodEnum<{
+        inline: "inline";
+        download: "download";
+    }>>;
 }, z.core.$strict>;
 export declare const SafeVaultIndexEntrySchema: z.ZodObject<{
     id: z.ZodUUID;
@@ -25,6 +29,10 @@ export declare const SafeVaultIndexEntrySchema: z.ZodObject<{
         name: z.ZodString;
         mimeType: z.ZodString;
         size: z.ZodNumber;
+        disposition: z.ZodOptional<z.ZodEnum<{
+            inline: "inline";
+            download: "download";
+        }>>;
     }, z.core.$strict>>;
     backlinks: z.ZodArray<z.ZodUUID>;
 }, z.core.$strict>;
@@ -116,6 +124,10 @@ export declare const VaultResponseSchema: z.ZodObject<{
             name: z.ZodString;
             mimeType: z.ZodString;
             size: z.ZodNumber;
+            disposition: z.ZodOptional<z.ZodEnum<{
+                inline: "inline";
+                download: "download";
+            }>>;
         }, z.core.$strict>>;
         backlinks: z.ZodArray<z.ZodUUID>;
     }, z.core.$strict>>;

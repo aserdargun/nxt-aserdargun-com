@@ -7,6 +7,7 @@ import { ApiResponseError, errorResponse } from "../http/api-response.js";
 import type { PreferencesService } from "../services/preferences-service.js";
 import type { RescanService } from "../services/rescan-service.js";
 import type { VaultService } from "../services/vault-service.js";
+import type { AttachmentService } from "../services/attachment-service.js";
 import { resolveTask7Services } from "../services/runtime-services.js";
 
 const OPAQUE_ID_PATTERN = /^v1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/u;
@@ -15,6 +16,7 @@ export interface Task7Services {
   vault: VaultService;
   rescan: RescanService;
   preferences: PreferencesService;
+  attachments: AttachmentService;
 }
 
 export interface IdCodec {

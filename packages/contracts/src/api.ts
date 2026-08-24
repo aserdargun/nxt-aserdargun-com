@@ -16,7 +16,8 @@ export const ScanCursorSchema = z.string().max(512).regex(/^s1\.[A-Za-z0-9_-]{16
 export const SafeVaultAttachmentSchema = z.object({
   name: z.string().trim().min(1).max(512),
   mimeType: z.string().trim().min(1).max(256),
-  size: z.number().int().nonnegative()
+  size: z.number().int().nonnegative(),
+  disposition: z.enum(["inline", "download"]).optional()
 }).strict();
 
 export const SafeVaultIndexEntrySchema = VaultIndexEntrySchema.omit({ driveId: true, attachments: true }).extend({

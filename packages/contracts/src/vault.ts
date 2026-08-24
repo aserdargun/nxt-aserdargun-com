@@ -8,7 +8,9 @@ export const VaultAttachmentSchema = z
     driveId: DriveIdSchema,
     name: z.string().trim().min(1).max(512),
     mimeType: z.string().trim().min(1).max(256),
-    size: z.number().int().nonnegative()
+    size: z.number().int().nonnegative(),
+    checksum: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+    disposition: z.enum(["inline", "download"]).optional()
   })
   .strict();
 
@@ -45,7 +47,9 @@ export const VaultMutationOperationSchema = z.enum([
   "rename-folder",
   "move-folder",
   "update-folder",
-  "trash-folder"
+  "trash-folder",
+  "create-attachment",
+  "trash-attachment"
 ]);
 
 export const VaultMutationPhaseSchema = z.enum([

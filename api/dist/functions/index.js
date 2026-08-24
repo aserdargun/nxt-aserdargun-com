@@ -1,5 +1,6 @@
 import { app } from "@azure/functions";
 import { createFolderHandler, deleteFolderHandler, updateFolderHandler } from "./folders.js";
+import { createAttachmentHandler, getAttachmentHandler, trashAttachmentHandler } from "./attachments.js";
 import { archiveNoteHandler, createNoteHandler, getNoteHandler, moveNoteHandler, trashNoteHandler, updateNoteHandler } from "./notes.js";
 import { updatePreferencesHandler } from "./preferences.js";
 import { sessionHandler } from "./session.js";
@@ -25,6 +26,19 @@ export const task7Routes = [
     { name: "private-preferences-update", method: "PUT", route: "private/preferences", authLevel: "anonymous", handler: updatePreferencesHandler }
 ];
 for (const route of task7Routes) {
+    app.http(route.name, {
+        methods: [route.method],
+        authLevel: route.authLevel,
+        route: route.route,
+        handler: route.handler
+    });
+}
+export const task8Routes = [
+    { name: "private-attachments-create", method: "POST", route: "private/attachments", authLevel: "anonymous", handler: createAttachmentHandler },
+    { name: "private-attachments-get", method: "GET", route: "private/attachments/{assetId}", authLevel: "anonymous", handler: getAttachmentHandler },
+    { name: "private-attachments-trash", method: "DELETE", route: "private/attachments/{assetId}", authLevel: "anonymous", handler: trashAttachmentHandler }
+];
+for (const route of task8Routes) {
     app.http(route.name, {
         methods: [route.method],
         authLevel: route.authLevel,

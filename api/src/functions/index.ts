@@ -1,6 +1,7 @@
 import { app } from "@azure/functions";
 import type { HttpHandler } from "@azure/functions";
 import { createFolderHandler, deleteFolderHandler, updateFolderHandler } from "./folders.js";
+import { createAttachmentHandler, getAttachmentHandler, trashAttachmentHandler } from "./attachments.js";
 import {
   archiveNoteHandler,
   createNoteHandler,
@@ -42,6 +43,27 @@ export const task7Routes: Array<{
 ];
 
 for (const route of task7Routes) {
+  app.http(route.name, {
+    methods: [route.method],
+    authLevel: route.authLevel,
+    route: route.route,
+    handler: route.handler
+  });
+}
+
+export const task8Routes: Array<{
+  name: string;
+  method: "GET" | "POST" | "DELETE";
+  route: string;
+  authLevel: "anonymous";
+  handler: HttpHandler;
+}> = [
+  { name: "private-attachments-create", method: "POST", route: "private/attachments", authLevel: "anonymous", handler: createAttachmentHandler },
+  { name: "private-attachments-get", method: "GET", route: "private/attachments/{assetId}", authLevel: "anonymous", handler: getAttachmentHandler },
+  { name: "private-attachments-trash", method: "DELETE", route: "private/attachments/{assetId}", authLevel: "anonymous", handler: trashAttachmentHandler }
+];
+
+for (const route of task8Routes) {
   app.http(route.name, {
     methods: [route.method],
     authLevel: route.authLevel,
