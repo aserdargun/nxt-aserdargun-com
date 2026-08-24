@@ -422,3 +422,185 @@ state was accessed. The opt-in live integration test remained unset/skipped.
 None. Live Google behavior remains intentionally unverified by the binding
 offline task boundary; the production conditional request shape is covered by
 the adapter and wrapped-client tests.
+
+# Fix round 4/5
+
+Status: **DONE**
+
+Implementation commit: `e0db37772ac2f53f43dc4cb56234f5c0eebd08bb`
+
+Implementation tree: `8ac6ba4cbf005204c577cacdcf85726b9fe043a5`
+
+The 12-route set, provisioned private system filenames, dependency pins,
+`pnpm-lock.yaml`, exact-owner authorization order, and live-integration boundary
+are unchanged.
+
+## Round 4 RED evidence
+
+Every command used Node `v22.23.1` through
+`PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH` and kept
+`NXT_RUN_GOOGLE_DRIVE_INTEGRATION` empty.
+
+1. Mandatory move version and ETag admission
+
+   Test files:
+   `api/test/local-drive-adapter.test.ts`,
+   `api/test/google-drive-adapter.test.ts`, and
+   `api/test/google-drive-client.test.ts`.
+
+   RED command, from `api`:
+
+   `PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm exec vitest run test/local-drive-adapter.test.ts test/google-drive-adapter.test.ts test/google-drive-client.test.ts`
+
+   RED output: **2 test files failed, 1 passed; 7 tests failed, 66 passed**.
+   The local adapter moved with an omitted version. Google admitted unquoted,
+   lowercase-weak, unterminated, trailing-data, and control-containing ETags,
+   and admitted an omitted move version before metadata/write calls.
+
+2. Destination-ancestry TOCTOU and folder conflict classification
+
+   Test files:
+   `api/test/vault-transactions.test.ts` and
+   `api/test/vault-functions.test.ts`.
+
+   RED command, from `api`:
+
+   `PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm exec vitest run test/vault-transactions.test.ts test/vault-functions.test.ts`
+
+   RED output: **1 test file failed, 1 passed; 4 tests failed, 38 passed**.
+   Destination-ancestor rename and move left descendant index paths at the
+   stale prefix, destination-ancestor Trash still allowed the source move, and
+   a typed post-reservation storage version conflict surfaced as
+   `DRIVE_UNAVAILABLE` instead of `CONFLICT`.
+
+3. Restart-safe conflict resolution and rescan progress recovery
+
+   Test files:
+   `api/test/rescan-persistence.test.ts` and
+   `packages/contracts/test/contracts.test.ts`.
+
+   Contract RED command, from the repository root:
+
+   `PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/contracts test`
+
+   RED output: **1 test failed, 7 passed**. The strict response contract
+   rejected the new owner-facing external-change recovery variant before it
+   was implemented. A second contract RED run also produced **1 failed,
+   7 passed** because the schema admitted 100 records plus 100 recoveries.
+
+   Rescan RED command, from `api`:
+
+   `PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm exec vitest run test/rescan-persistence.test.ts`
+
+   RED output: **1 test file failed; 2 tests failed, 6 passed**. A fresh
+   instance rejected the old signed cursor after an accepted Google-backed
+   progress write lost readback, and a deliberate rescan rejected persisted
+   conflicted intents instead of rebuilding actual state and reclaiming the
+   256-slot capacity.
+
+## Round 4 implementation
+
+- `StoragePort.move` remains compile-time required and now also has a shared
+  runtime version guard at `RootBoundaryStorage`, `GoogleDriveAdapter`, and
+  `LocalDriveAdapter`; missing, empty, control-containing, or oversized
+  preconditions fail before metadata admission or mutation. Local and Google
+  comparisons are unconditional. The same guard also hardens content updates.
+- Google move/upload admission accepts only RFC-shaped strong or weak HTTP
+  entity-tags, bounded to 512 characters and excluding controls, DEL, malformed
+  quoting, lowercase weak prefixes, and trailing data. The exact admitted ETag
+  reaches `If-Match`; the wrapped client continues to force `retry: false`, and
+  Drive `412` remains the internal typed storage version conflict.
+- Move intents now persist the preflight index generation and exact destination
+  ancestry chain: folder identity, name, parent, and version for every node
+  through `Notes`. Reservation CAS binds that generation. Owner/fence is checked
+  around post-reservation source and destination revalidation immediately before
+  the Drive mutation. Positive destination drift cancels the known-non-applied
+  reservation and retries fresh; an invalid/trashed refreshed destination returns
+  trusted `409`. Recovery refuses to replay into a changed destination chain.
+- Folder move readback derives the committed descendant prefix from verified
+  actual ancestry. Deterministic production-path interleavings cover destination
+  ancestor rename, move, and Trash after reservation; successful cases make the
+  actual folder path and descendant index path identical, while Trash performs
+  zero source moves. Existing source-ancestor and note/folder coordination tests
+  remain green.
+- A typed post-reservation `StorageVersionConflictError` in folder update now
+  becomes a trusted `ApiResponseError("CONFLICT")`; arbitrary dependency errors
+  still pass through static redacted `503`. Handler coverage verifies exact
+  `409`, code, static message, and absence of the raw folder identifier. Existing
+  note mutation classification remains typed `409`.
+- Conflicted intents are exposed only as bounded, path-only external-change
+  recovery records through the existing rescan response. Starting a deliberate
+  rescan is allowed only when every pending intent is terminal `conflicted`.
+  Completion rebuilds the index from actual Drive reads and clears exactly the
+  captured conflict IDs in the same CAS; it never writes Markdown or replays a
+  stale intent. Two batches totaling 300 conflicts prove the 256-slot capacity
+  is reclaimed without a new route, system file, or raw Drive ID response.
+- Rescan no longer relies on the fixed 70-operation reserve. A new scan first
+  persists and returns a signed checkpoint cursor. Resumed traversal consumes a
+  request-relative fraction of the actual remaining 100-operation budget, while
+  every adapter retry, RootBoundary ancestry read, system read/write/readback,
+  and CAS retry shares the same lowest-level counter and stops before call 101.
+- Every accepted progress transition persists its prior signed cursor binding
+  and exact bounded response page. The immediately prior cursor can therefore
+  replay only that committed successor without re-traversal; once the successor
+  advances, older cursors fail closed. Finalization stores one bounded completion
+  receipt in the existing index so an outcome-unknown final CAS is likewise
+  derivable. The real offline
+  `GoogleDriveAdapter -> RootBoundaryStorage -> SystemFileStore` probe injects
+  retryable metadata/media reads, exactly one `412`, an accepted write, and three
+  failed readbacks; every request stays at or below 100 calls, the old cursor
+  recovers on a fresh instance, and the scan completes with a schema-valid index.
+- Shared response schemas admit only the two static recovery variants and now
+  enforce at most 100 records and recoveries combined. Stored replay pages use
+  the same joint bound. No private mutation ID or Drive ID appears in recovery
+  responses.
+
+## Focused GREEN evidence
+
+Adapter GREEN command, from `api`:
+
+`PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm exec vitest run test/local-drive-adapter.test.ts test/google-drive-adapter.test.ts test/google-drive-client.test.ts`
+
+Output: **3 test files passed; 73 tests passed**.
+
+Vault/function GREEN command, from `api`:
+
+`PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm exec vitest run test/vault-transactions.test.ts test/vault-functions.test.ts`
+
+Output: **2 test files passed; 42 tests passed**.
+
+Final expanded focused command, from the repository root:
+
+`PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/contracts test && cd api && PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm exec vitest run test/google-drive-adapter.test.ts test/google-drive-client.test.ts test/local-drive-adapter.test.ts test/root-boundary.test.ts test/vault-service.test.ts test/vault-transactions.test.ts test/vault-functions.test.ts test/rescan-service.test.ts test/rescan-persistence.test.ts test/preferences-service.test.ts`
+
+Output: contracts **8 passed**; focused API **10 files passed, 146 tests
+passed**.
+
+## Root verification
+
+Final command:
+
+`PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm lint && PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm typecheck && PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm test && PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm build && git diff --check`
+
+Output:
+
+```text
+lint:       PASS
+typecheck:  PASS (contracts, domain, API)
+test:       PASS
+  contracts:   8 passed
+  domain:     15 passed
+  API:       275 passed, 1 live integration test skipped
+build:      PASS (contracts, domain, API)
+diff check: PASS
+```
+
+## Concerns and external-state statement
+
+Concerns: none within the authorized offline scope. Live Google behavior remains
+intentionally unverified; conditional requests, retries, budgets, and ambiguous
+acknowledgement recovery are covered through the real production adapters over
+an in-memory offline Drive client.
+
+No live Google Drive, OAuth, network, credentials, `.env.local`, DNS, cloud,
+deployment, repository remote, or other external state was accessed or changed.
