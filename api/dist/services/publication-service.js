@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { NoteIdSchema, MAX_PUBLICATION_ASSETS, MAX_PUBLICATION_TOTAL_ASSET_BYTES, PublicIdSchema, PublicNoteResponseSchema } from "@nxt/contracts";
 import { attachmentReferenceProjection, canonicalAttachmentReference, projectionReferencesAttachment, renderMarkdown } from "@nxt/domain";
 import { ApiResponseError } from "../http/api-response.js";
-import { StorageMutationOutcomeUnknownError, StorageOperationBudget, StorageOperationBudgetExceededError, StorageVersionConflictError } from "../storage/storage-port.js";
+import { StorageMutationNotAppliedError, StorageMutationOutcomeUnknownError, StorageOperationBudget, StorageOperationBudgetExceededError, StorageVersionConflictError } from "../storage/storage-port.js";
 import { MAX_ATTACHMENT_BYTES, detectAttachment, safeAttachmentDisposition } from "./attachment-policy.js";
 import { preserveApiError } from "./system-file-store.js";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
@@ -12,6 +12,7 @@ const MAX_MANIFEST_OPERATIONS = 64;
 const MAX_CLEANUP_RECORDS = 64;
 const MAX_TOMBSTONE_CLEANUP_RECORDS = 32;
 const MAX_CLEANUPS_PER_REQUEST = 4;
+const MAX_CREATE_RECOVERIES_PER_REQUEST = 4;
 const MAX_CHILDREN_PER_FOLDER = 100;
 const MAX_REVISION_COLLISIONS = 16;
 const MAX_RANDOM_ID_COLLISIONS = 16;
@@ -38,9 +39,10 @@ export class PublicationService {
         this.assertVersion(input.expectedVersion);
         const context = this.context();
         const initialCausality = await this.observePublicationCausality(input.noteId, context);
+        await this.recoverCreateIntents(context);
         await this.processCleanup(context);
         const causality = await this.observePublicationCausality(input.noteId, context);
-        if (initialCausality.identity !== causality.identity)
+        if (initialCausality.predecessorIdentity !== causality.predecessorIdentity)
             throw new ApiResponseError("CONFLICT");
         const source = await this.options.vault.getNote(input.noteId).catch((error) => { throw preserveApiError(error, "DRIVE_UNAVAILABLE"); });
         this.assertExpectedSource(source, input.expectedVersion);
@@ -67,25 +69,25 @@ export class PublicationService {
                 }
             });
             const publishedRoot = await this.verifyPublishedRoot(context);
-            const publicFolder = await this.ensurePublicFolder(operation, publishedRoot, context);
+            const publicFolderResult = await this.ensurePublicFolder(operation, publishedRoot, context);
+            const publicFolder = publicFolderResult.folder;
             if (operation.cleanupSlots === 2) {
                 orphans.push(publicRootCleanupArtifact(operation.publicId, publicFolder.file, publishedRoot.id));
             }
-            let activeOperation = await this.persistOperationFolder(operation, publicFolder.file, context);
+            let activeOperation = publicFolderResult.operation;
             const revisionId = activeOperation.revisionId ?? await this.chooseRevisionId(publicFolder.file.id, source.version, context);
             const revisionMarker = activeOperation.revisionMarker ?? publicationMarker(activeOperation.operationId, "revision");
             activeOperation = await this.persistOperationRevisionName(activeOperation, revisionId, revisionMarker, context);
-            const revisionFolder = await this.ensureOwnedFolder({
+            const revisionFolderResult = await this.ensureOperationFolder(activeOperation, {
                 parentId: publicFolder.file.id,
                 name: revisionId,
                 marker: revisionMarker,
                 kind: "revision",
-                publicId: activeOperation.publicId,
-                operationId: activeOperation.operationId,
                 context
             });
+            const revisionFolder = revisionFolderResult.folder;
             orphans.push(revisionCleanupArtifact(activeOperation.publicId, activeOperation.operationId, revisionId, revisionMarker, revisionFolder.file, publicFolder.file.id));
-            activeOperation = await this.persistOperationRevisionFolder(activeOperation, revisionFolder.file, context);
+            activeOperation = revisionFolderResult.operation;
             const snapshot = await this.writeSnapshot({
                 operation: activeOperation,
                 source,
@@ -108,6 +110,7 @@ export class PublicationService {
     async revoke(input) {
         this.assertPublicId(input.publicId);
         const context = this.context();
+        await this.recoverCreateIntents(context);
         await this.processCleanup(context);
         const now = this.now().toISOString();
         const cleanupCandidates = Array.from({ length: MAX_TOMBSTONE_CLEANUP_RECORDS * MAX_RANDOM_ID_COLLISIONS }, () => this.id());
@@ -181,6 +184,9 @@ export class PublicationService {
                 const stale = manifest.operations.find((operation) => operation.sourceNoteId === source.note.frontmatter.id);
                 if (stale !== undefined && !operationCanBeRecovered(stale, startedAt))
                     throw new ApiResponseError("CONFLICT");
+                if (stale?.createIntent !== null && stale?.createIntent !== undefined && stale.createIntent.state !== "prepared") {
+                    throw new ApiResponseError("CONFLICT");
+                }
                 const active = manifest.entries.find((entry) => entry.sourceNoteId === source.note.frontmatter.id);
                 const tombstone = manifest.tombstones.find((entry) => entry.sourceNoteId === source.note.frontmatter.id);
                 if (tombstone !== undefined && tombstone.cleanup.length !== 0)
@@ -225,6 +231,7 @@ export class PublicationService {
                     revisionFolderVersion: null,
                     revisionId: null,
                     revisionMarker: null,
+                    createIntent: null,
                     cleanupSlots
                 };
                 return bumpManifest(manifest, {
@@ -257,17 +264,94 @@ export class PublicationService {
             const exact = await this.exactChildren(publishedRoot.id, operation.publicId, context);
             if (exact.length !== 1 || exact[0]?.id !== file.id)
                 throw new ApiResponseError("CONFLICT");
-            return { file, marker, created: false };
+            return { folder: { file, marker, created: false }, operation };
         }
-        return this.ensureOwnedFolder({
+        return this.ensureOperationFolder(operation, {
             parentId: publishedRoot.id,
             name: operation.publicId,
             marker,
-            kind: "public",
-            publicId: operation.publicId,
-            operationId: operation.operationId,
+            kind: "public-root",
             context
         });
+    }
+    async ensureOperationFolder(operation, input) {
+        const desired = {
+            kind: input.kind,
+            state: "prepared",
+            parentFolderId: input.parentId,
+            folderName: input.name,
+            marker: input.marker,
+            publicId: operation.publicId,
+            operationId: operation.operationId,
+            folderId: null,
+            folderVersion: null
+        };
+        let activeOperation = operation;
+        if (activeOperation.createIntent === null) {
+            activeOperation = await this.updateOperation(activeOperation, (current) => ({ ...current, createIntent: desired }), input.context);
+        }
+        else if (!sameCreateIntentTarget(activeOperation.createIntent, desired)) {
+            throw new ApiResponseError("CONFLICT");
+        }
+        const existing = await this.exactChildren(input.parentId, input.name, input.context);
+        const storageKind = input.kind === "public-root" ? "public" : "revision";
+        const operationId = input.kind === "public-root" ? undefined : operation.operationId;
+        const owned = existing.filter((file) => markerMatches(file, input.marker, storageKind, operation.publicId, operationId));
+        if (owned.length === 1 && existing.length === 1) {
+            const file = await this.options.storage.get(owned[0].id, input.context);
+            this.assertFolder(file, input.parentId, input.name, input.marker, storageKind, operation.publicId, operationId);
+            activeOperation = await this.completeCreateIntent(activeOperation, file, input.context);
+            return { folder: { file, marker: input.marker, created: false }, operation: activeOperation };
+        }
+        if (existing.length !== 0)
+            throw new ApiResponseError("CONFLICT");
+        if (activeOperation.createIntent?.state !== "prepared")
+            throw new ApiResponseError("DRIVE_UNAVAILABLE");
+        activeOperation = await this.updateOperation(activeOperation, (current) => ({
+            ...current,
+            createIntent: current.createIntent === null ? null : { ...current.createIntent, state: "attempted" }
+        }), input.context);
+        const appProperties = publicationProperties(input.marker, storageKind, operation.publicId, operationId);
+        let createdId;
+        let createdVersion;
+        let outcomeUnknown;
+        try {
+            const created = await this.options.storage.createFolder({
+                parentId: input.parentId,
+                name: input.name,
+                appProperties
+            }, input.context);
+            createdId = created.id;
+            createdVersion = created.version;
+        }
+        catch (error) {
+            if (error instanceof StorageMutationNotAppliedError) {
+                await this.cancelCreateIntent(activeOperation, input.context);
+                throw error;
+            }
+            if (!(error instanceof StorageMutationOutcomeUnknownError))
+                throw error;
+            outcomeUnknown = error;
+            createdId = error.fileId;
+        }
+        activeOperation = await this.recordRecoverableCreate(activeOperation, createdId ?? null, createdVersion ?? null, input.context);
+        const recovered = await this.exactChildren(input.parentId, input.name, input.context);
+        if (recovered.length !== 1) {
+            if (recovered.length === 0)
+                throw outcomeUnknown ?? new ApiResponseError("DRIVE_UNAVAILABLE");
+            throw new ApiResponseError("CONFLICT");
+        }
+        const candidate = recovered[0];
+        if (createdId !== undefined && candidate.id !== createdId)
+            throw new ApiResponseError("CONFLICT");
+        if (!markerMatches(candidate, input.marker, storageKind, operation.publicId, operationId))
+            throw new ApiResponseError("CONFLICT");
+        const file = await this.options.storage.get(candidate.id, input.context);
+        this.assertFolder(file, input.parentId, input.name, input.marker, storageKind, operation.publicId, operationId);
+        if (createdVersion !== undefined && file.version !== createdVersion)
+            throw new ApiResponseError("DRIVE_UNAVAILABLE");
+        activeOperation = await this.completeCreateIntent(activeOperation, file, input.context);
+        return { folder: { file, marker: input.marker, created: true }, operation: activeOperation };
     }
     async ensureOwnedFolder(input) {
         const existing = await this.exactChildren(input.parentId, input.name, input.context);
@@ -616,32 +700,79 @@ export class PublicationService {
             throw error;
         }
     }
-    async persistOperationFolder(operation, folder, context) {
-        if (operation.publicFolderId === folder.id && operation.publicFolderVersion === folder.version)
+    async recordRecoverableCreate(operation, folderId, folderVersion, context) {
+        const intent = operation.createIntent;
+        if (intent === null || intent.state === "prepared" ||
+            (folderVersion !== null && folderId === null) ||
+            (intent.folderId !== null && intent.folderId !== folderId) ||
+            (intent.folderVersion !== null && intent.folderVersion !== folderVersion))
+            throw new ApiResponseError("CONFLICT");
+        if (intent.state === "recoverable" && intent.folderId === folderId && intent.folderVersion === folderVersion)
             return operation;
-        return this.updateOperation(operation, (current) => ({ ...current, publicFolderId: folder.id, publicFolderVersion: folder.version }), context);
+        return this.updateOperation(operation, (current) => ({
+            ...current,
+            createIntent: current.createIntent === null ? null : {
+                ...current.createIntent,
+                state: "recoverable",
+                folderId,
+                folderVersion
+            }
+        }), context);
+    }
+    async cancelCreateIntent(operation, context) {
+        if (operation.createIntent === null)
+            return operation;
+        return this.updateOperation(operation, (current) => ({ ...current, createIntent: null }), context);
+    }
+    async completeCreateIntent(operation, folder, context) {
+        const intent = operation.createIntent;
+        if (intent === null ||
+            (intent.folderId !== null && intent.folderId !== folder.id) ||
+            (intent.folderVersion !== null && intent.folderVersion !== folder.version))
+            throw new ApiResponseError("CONFLICT");
+        return this.updateOperation(operation, (current) => intent.kind === "public-root"
+            ? {
+                ...current,
+                publicFolderId: folder.id,
+                publicFolderVersion: folder.version,
+                createIntent: null
+            }
+            : {
+                ...current,
+                revisionFolderId: folder.id,
+                revisionFolderVersion: folder.version,
+                createIntent: null
+            }, context);
     }
     async persistOperationRevisionName(operation, revisionId, marker, context) {
         if (operation.revisionId === revisionId && operation.revisionMarker === marker)
             return operation;
         return this.updateOperation(operation, (current) => ({ ...current, revisionId, revisionMarker: marker }), context);
     }
-    async persistOperationRevisionFolder(operation, folder, context) {
-        if (operation.revisionFolderId === folder.id && operation.revisionFolderVersion === folder.version)
-            return operation;
-        return this.updateOperation(operation, (current) => ({ ...current, revisionFolderId: folder.id, revisionFolderVersion: folder.version }), context);
-    }
     async updateOperation(operation, transform, context) {
-        const committed = await this.options.manifestStore.compareAndSet((manifest) => {
-            const current = manifest.operations.find((candidate) => candidate.operationId === operation.operationId);
-            if (current === undefined || !sameOperationState(current, operation))
+        let proposed;
+        try {
+            const committed = await this.options.manifestStore.compareAndSet((manifest) => {
+                const current = manifest.operations.find((candidate) => candidate.operationId === operation.operationId);
+                if (current === undefined || !sameOperationState(current, operation))
+                    throw new ApiResponseError("CONFLICT");
+                proposed = transform(current);
+                return bumpManifest(manifest, {
+                    operations: manifest.operations.map((candidate) => candidate.operationId === operation.operationId ? proposed : candidate)
+                });
+            }, { context });
+            const result = committed.value.operations.find((candidate) => candidate.operationId === operation.operationId);
+            if (result === undefined)
                 throw new ApiResponseError("CONFLICT");
-            return bumpManifest(manifest, { operations: manifest.operations.map((candidate) => candidate.operationId === operation.operationId ? transform(current) : candidate) });
-        }, { context });
-        const result = committed.value.operations.find((candidate) => candidate.operationId === operation.operationId);
-        if (result === undefined)
-            throw new ApiResponseError("CONFLICT");
-        return result;
+            return result;
+        }
+        catch (error) {
+            const recovered = await this.options.manifestStore.read(context).catch(() => undefined);
+            const result = recovered?.value.operations.find((candidate) => candidate.operationId === operation.operationId);
+            if (result !== undefined && proposed !== undefined && sameOperationState(result, proposed))
+                return result;
+            throw error;
+        }
     }
     async abandonOperation(operationId, publicId, orphans) {
         const cleanupCandidates = Array.from({ length: MAX_RANDOM_ID_COLLISIONS * 2 }, () => this.id());
@@ -650,6 +781,16 @@ export class PublicationService {
             if (manifest.entries.some((entry) => entry.revisions.some((revision) => revision.operationId === operationId)))
                 return manifest;
             const operation = manifest.operations.find((candidate) => candidate.operationId === operationId);
+            const createIntent = operation?.createIntent;
+            if (createIntent !== null && createIntent !== undefined && createIntent.state !== "prepared") {
+                if (createIntent.state === "recoverable")
+                    return manifest;
+                return bumpManifest(manifest, {
+                    operations: manifest.operations.map((candidate) => candidate.operationId === operationId
+                        ? { ...candidate, createIntent: { ...createIntent, state: "recoverable" } }
+                        : candidate)
+                });
+            }
             const derived = [...orphans];
             if (operation?.revisionFolderId !== null && operation?.revisionFolderId !== undefined &&
                 operation.revisionFolderVersion !== null && operation.revisionMarker !== null &&
@@ -678,6 +819,123 @@ export class PublicationService {
                 cleanup: boundedCleanup([...manifest.cleanup, ...cleanup])
             });
         });
+    }
+    async recoverCreateIntents(context) {
+        const snapshot = await this.options.manifestStore.read(context);
+        const observedAt = this.now().toISOString();
+        const candidates = snapshot.value.operations.filter((operation) => operation.createIntent !== null && (operation.createIntent.state === "recoverable" ||
+            operation.createIntent.state === "attempted" && operationCanBeRecovered(operation, observedAt)));
+        if (candidates.length === 0)
+            return;
+        const start = snapshot.value.createRecoveryOffset % candidates.length;
+        const selected = Array.from({ length: Math.min(MAX_CREATE_RECOVERIES_PER_REQUEST, candidates.length) }, (_value, index) => candidates[(start + index) % candidates.length]);
+        for (const operation of selected) {
+            try {
+                await this.recoverCreateIntent(operation, context);
+            }
+            catch {
+                // The persisted intent retains cleanup capacity and is retried by a later bounded request.
+            }
+        }
+        await this.options.manifestStore.compareAndSet((manifest) => {
+            const remaining = manifest.operations.filter((operation) => operation.createIntent !== null && (operation.createIntent.state === "recoverable" ||
+                operation.createIntent.state === "attempted" && operationCanBeRecovered(operation, observedAt))).length;
+            const createRecoveryOffset = remaining === 0 ? 0 : (manifest.createRecoveryOffset + selected.length) % remaining;
+            return bumpManifest(manifest, { createRecoveryOffset });
+        }, { context }).catch(() => undefined);
+    }
+    async recoverCreateIntent(operation, context) {
+        const currentManifest = await this.options.manifestStore.read(context);
+        const current = currentManifest.value.operations.find((candidate) => candidate.operationId === operation.operationId);
+        if (current === undefined || !sameOperationState(current, operation) || current.createIntent === null)
+            return;
+        const intent = current.createIntent;
+        const publishedRoot = await this.verifyPublishedRoot(context);
+        let publicFolder;
+        if (intent.kind === "public-root") {
+            if (current.cleanupSlots !== 2 || current.publicFolderId !== null || current.publicFolderVersion !== null ||
+                intent.parentFolderId !== publishedRoot.id || intent.folderName !== current.publicId ||
+                intent.marker !== publicationMarker(current.publicId, "public"))
+                return;
+        }
+        else {
+            if (current.publicFolderId === null || current.publicFolderVersion === null ||
+                current.revisionId === null || current.revisionMarker === null ||
+                intent.parentFolderId !== current.publicFolderId || intent.folderName !== current.revisionId ||
+                intent.marker !== current.revisionMarker)
+                return;
+            publicFolder = await this.options.storage.get(current.publicFolderId, context);
+            if (publicFolder.version !== current.publicFolderVersion ||
+                !folderMatches(publicFolder, publishedRoot.id, current.publicId, publicationMarker(current.publicId, "public"), "public", current.publicId) || publicFolder.appProperties?.nxtPublicationOperation !== undefined ||
+                publicFolder.appProperties?.nxtPublicationAssetId !== undefined)
+                return;
+            const exactPublic = await this.exactChildren(publishedRoot.id, current.publicId, context);
+            if (exactPublic.length !== 1 || exactPublic[0]?.id !== publicFolder.id)
+                return;
+        }
+        const exact = await this.exactChildren(intent.parentFolderId, intent.folderName, context);
+        if (exact.length !== 1)
+            return;
+        const listed = exact[0];
+        const storageKind = intent.kind === "public-root" ? "public" : "revision";
+        const expectedOperationId = intent.kind === "public-root" ? undefined : current.operationId;
+        if (!markerMatches(listed, intent.marker, storageKind, current.publicId, expectedOperationId) ||
+            (intent.folderId !== null && listed.id !== intent.folderId))
+            return;
+        const folder = await this.options.storage.get(listed.id, context);
+        if (!folderMatches(folder, intent.parentFolderId, intent.folderName, intent.marker, storageKind, current.publicId, expectedOperationId) || folder.appProperties?.nxtPublicationAssetId !== undefined ||
+            (intent.kind === "public-root" && folder.appProperties?.nxtPublicationOperation !== undefined) ||
+            (intent.folderVersion !== null && folder.version !== intent.folderVersion))
+            return;
+        await this.queueRecoveredCreate(current, folder, publicFolder, context);
+    }
+    async queueRecoveredCreate(operation, folder, publicFolder, context) {
+        const intent = operation.createIntent;
+        if (intent === null)
+            return;
+        const artifactCount = intent.kind === "revision" && operation.cleanupSlots === 2 ? 2 : 1;
+        const cleanupCandidates = Array.from({ length: artifactCount * MAX_RANDOM_ID_COLLISIONS }, () => this.id());
+        const queuedAt = this.now().toISOString();
+        let proposedCleanup;
+        try {
+            await this.options.manifestStore.compareAndSet((manifest) => {
+                const current = manifest.operations.find((candidate) => candidate.operationId === operation.operationId);
+                if (current === undefined || !sameOperationState(current, operation) || current.createIntent === null) {
+                    throw new ApiResponseError("CONFLICT");
+                }
+                const artifacts = intent.kind === "public-root"
+                    ? [publicRootCleanupArtifact(operation.publicId, folder, this.options.publishedRootId)]
+                    : [
+                        revisionCleanupArtifact(operation.publicId, operation.operationId, intent.folderName, intent.marker, folder, intent.parentFolderId),
+                        ...(operation.cleanupSlots === 2 && publicFolder !== undefined
+                            ? [publicRootCleanupArtifact(operation.publicId, publicFolder, this.options.publishedRootId)]
+                            : [])
+                    ];
+                if (artifacts.length !== artifactCount || artifacts.length > operation.cleanupSlots)
+                    throw new ApiResponseError("CONFLICT");
+                const usedIds = manifestIdentifierSet(manifest);
+                const cleanupIds = takeUniqueIdentifiers(cleanupCandidates, artifacts.length, usedIds);
+                if (cleanupIds.length !== artifacts.length)
+                    throw new ApiResponseError("CONFLICT");
+                proposedCleanup = artifacts.map((artifact, index) => ({
+                    ...artifact,
+                    cleanupId: cleanupIds[index],
+                    queuedAt
+                }));
+                return bumpManifest(manifest, {
+                    operations: manifest.operations.filter((candidate) => candidate.operationId !== operation.operationId),
+                    cleanup: boundedCleanup([...manifest.cleanup, ...proposedCleanup])
+                });
+            }, { context });
+        }
+        catch (error) {
+            const recovered = await this.options.manifestStore.read(context).catch(() => undefined);
+            if (recovered !== undefined && proposedCleanup !== undefined &&
+                !recovered.value.operations.some((candidate) => candidate.operationId === operation.operationId) &&
+                proposedCleanup.every((record) => recovered.value.cleanup.some((candidate) => sameCleanupRecord(candidate, record))))
+                return;
+            throw error;
+        }
     }
     async processCleanup(context) {
         const snapshot = await this.options.manifestStore.read(context);
@@ -1048,10 +1306,13 @@ const publicationCausality = (manifest, noteId) => {
         .filter((operation) => operation.sourceNoteId === noteId)
         .map((operation) => operation)
         .sort((left, right) => left.operationId < right.operationId ? -1 : left.operationId > right.operationId ? 1 : 0);
+    const predecessorIdentity = createHash("sha256")
+        .update(JSON.stringify(predecessor), "utf8")
+        .digest("hex");
     const identity = createHash("sha256")
         .update(JSON.stringify({ predecessor, operations }), "utf8")
         .digest("hex");
-    return { generation: manifest.generation, identity };
+    return { generation: manifest.generation, predecessorIdentity, identity };
 };
 const samePublicationCausality = (left, right) => left.generation === right.generation && left.identity === right.identity;
 const takeUniqueIdentifiers = (candidates, count, used) => {
@@ -1097,7 +1358,7 @@ const manifestIdentifierSet = (manifest) => {
     return ids;
 };
 const manifestReferencesFolder = (manifest, folderId) => manifest.entries.some((entry) => entry.publicFolderId === folderId || entry.revisions.some((revision) => revision.snapshotFolderId === folderId || revision.assetsFolderId === folderId)) || manifest.tombstones.some((tombstone) => tombstone.publicFolderId === folderId) ||
-    manifest.operations.some((operation) => operation.publicFolderId === folderId || operation.revisionFolderId === folderId);
+    manifest.operations.some((operation) => operation.publicFolderId === folderId || operation.revisionFolderId === folderId || operation.createIntent?.folderId === folderId);
 const publicationMarker = (ownerId, kind) => `pm1.${ownerId}.${kind}`;
 const publicationProperties = (marker, kind, publicId, operationId, assetId) => ({
     nxtPublicationMarker: marker,
@@ -1134,6 +1395,8 @@ const snapshotAssetName = (assetId, originalName) => {
 const sameOperationSource = (left, right) => left.operationId === right.operationId && left.publicId === right.publicId && left.sourceNoteId === right.sourceNoteId &&
     left.epoch === right.epoch && left.startedAt === right.startedAt && left.sourceVersion === right.sourceVersion &&
     left.sourceChecksum === right.sourceChecksum && left.sourcePath === right.sourcePath && left.cleanupSlots === right.cleanupSlots;
+const sameCreateIntentTarget = (left, right) => left.kind === right.kind && left.parentFolderId === right.parentFolderId && left.folderName === right.folderName &&
+    left.marker === right.marker && left.publicId === right.publicId && left.operationId === right.operationId;
 const sameOperationState = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const equalBytes = (left, right) => left.byteLength === right.byteLength && left.every((value, index) => value === right[index]);

@@ -71,6 +71,24 @@ export const PublicationEntrySchema = z.object({
     if (!ids.has(value.activeRevisionId))
         context.addIssue({ code: "custom", path: ["activeRevisionId"], message: "active revision is missing" });
 });
+export const PublicationCreateIntentSchema = z.object({
+    kind: z.enum(["public-root", "revision"]),
+    state: z.enum(["prepared", "attempted", "recoverable"]),
+    parentFolderId: DriveIdSchema,
+    folderName: z.string().regex(/^[A-Za-z0-9_-]{3,64}$/u),
+    marker: MarkerSchema,
+    publicId: PublicIdSchema,
+    operationId: PublicIdSchema,
+    folderId: DriveIdSchema.nullable().default(null),
+    folderVersion: VersionSchema.nullable().default(null)
+}).strict().superRefine((value, context) => {
+    if (value.folderVersion !== null && value.folderId === null) {
+        context.addIssue({ code: "custom", path: ["folderId"], message: "a known create version must bind its exact folder ID" });
+    }
+    if (value.state === "prepared" && (value.folderId !== null || value.folderVersion !== null)) {
+        context.addIssue({ code: "custom", path: ["state"], message: "a prepared create cannot already own a folder identity" });
+    }
+});
 export const PublicationOperationSchema = z.object({
     operationId: PublicIdSchema,
     publicId: PublicIdSchema,
@@ -86,8 +104,31 @@ export const PublicationOperationSchema = z.object({
     revisionFolderVersion: VersionSchema.nullable().default(null),
     revisionId: z.string().regex(/^[A-Za-z0-9_-]{3,64}$/u).nullable().default(null),
     revisionMarker: MarkerSchema.nullable().default(null),
+    createIntent: PublicationCreateIntentSchema.nullable().default(null),
     cleanupSlots: z.number().int().min(1).max(2).default(2)
-}).strict();
+}).strict().superRefine((value, context) => {
+    const intent = value.createIntent;
+    if (intent === null)
+        return;
+    if (intent.publicId !== value.publicId || intent.operationId !== value.operationId) {
+        context.addIssue({ code: "custom", path: ["createIntent"], message: "create intent must bind its exact publication operation" });
+    }
+    if (intent.kind === "public-root") {
+        if (value.cleanupSlots !== 2 || value.publicFolderId !== null || value.publicFolderVersion !== null ||
+            value.revisionFolderId !== null || value.revisionFolderVersion !== null ||
+            value.revisionId !== null || value.revisionMarker !== null ||
+            intent.folderName !== value.publicId || intent.marker !== `pm1.${value.publicId}.public`) {
+            context.addIssue({ code: "custom", path: ["createIntent"], message: "public-root intent must bind the unpublished public folder" });
+        }
+        return;
+    }
+    if (value.publicFolderId === null || value.publicFolderVersion === null ||
+        value.revisionFolderId !== null || value.revisionFolderVersion !== null ||
+        value.revisionId === null || value.revisionMarker === null ||
+        intent.parentFolderId !== value.publicFolderId || intent.folderName !== value.revisionId || intent.marker !== value.revisionMarker) {
+        context.addIssue({ code: "custom", path: ["createIntent"], message: "revision intent must bind its exact persisted public parent and revision" });
+    }
+});
 export const PublicationCleanupSchema = z.object({
     cleanupId: PublicIdSchema,
     publicId: PublicIdSchema,
@@ -133,7 +174,8 @@ export const PublicationManifestSchema = z.object({
     tombstones: z.array(PublicationTombstoneSchema).max(10_000).default([]),
     operations: z.array(PublicationOperationSchema).max(64).default([]),
     cleanup: z.array(PublicationCleanupSchema).max(64).default([]),
-    cleanupOffset: z.number().int().nonnegative().max(320_064).default(0)
+    cleanupOffset: z.number().int().nonnegative().max(320_064).default(0),
+    createRecoveryOffset: z.number().int().nonnegative().max(64).default(0)
 }).strict().superRefine((value, context) => {
     const publicIds = new Set();
     const noteIds = new Set();

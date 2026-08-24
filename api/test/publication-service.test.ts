@@ -112,6 +112,23 @@ const publishCurrent = async (fixture: Awaited<ReturnType<typeof setup>>) => {
   return fixture.service.publish({ noteId, expectedVersion: note.version });
 };
 
+const restartPublicationService = (
+  fixture: Awaited<ReturnType<typeof setup>>,
+  now = "2026-08-24T12:01:00.000Z"
+): PublicationService => new PublicationService({
+  storage: fixture.privateStorage,
+  manifestStore: fixture.manifestStore,
+  indexStore: fixture.indexStore,
+  vault: fixture.vault,
+  attachments: fixture.attachments,
+  privateRootId: "private",
+  publishedRootId: fixture.ids.published.id,
+  now: () => new Date(now)
+});
+
+const missingPublicIdFor = (publicId: string): string =>
+  publicId === "Z".repeat(22) ? "Y".repeat(22) : "Z".repeat(22);
+
 type CleanupView = PublicationManifest["cleanup"][number] & {
   parentFolderId?: string | null;
   folderName?: string | null;
@@ -200,6 +217,205 @@ describe("immutable publication snapshots", () => {
     expect(manifest.cleanup.length).toBeLessThanOrEqual(64);
     expect(manifest.operations).toEqual([]);
   });
+
+  it("recovers and cleans an accepted public-root create after its immediate recovery read fails", async () => {
+    let createdRootId: string | undefined;
+    let failImmediateRecovery = false;
+    const fixture = await setup({
+      privateStorage: (raw, ids) => delegateStorage(raw, {
+        createFolder: async (input, context) => {
+          const created = await raw.createFolder(input, context);
+          if (input.appProperties?.nxtPublicationKind === "public") {
+            createdRootId = created.id;
+            failImmediateRecovery = true;
+          }
+          return created;
+        },
+        listChildren: async (input, context) => {
+          if (failImmediateRecovery && input.parentId === ids.publishedId) {
+            failImmediateRecovery = false;
+            throw new Error("injected accepted public-root recovery read failure");
+          }
+          return raw.listChildren(input, context);
+        }
+      })
+    });
+
+    await expect(publishCurrent(fixture)).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+    if (createdRootId === undefined) throw new Error("missing accepted public-root create");
+    const created = await fixture.raw.get(createdRootId);
+    const interrupted = (await fixture.manifestStore.read()).value;
+    expect(interrupted.entries).toEqual([]);
+    expect(interrupted.operations).toHaveLength(1);
+    expect(interrupted.operations[0]).toMatchObject({ publicId: created.name, cleanupSlots: 2 });
+    expect(created).toMatchObject({ parentIds: [fixture.ids.published.id], trashed: false });
+
+    const restarted = restartPublicationService(fixture);
+    await expect(restarted.revoke({ publicId: missingPublicIdFor(created.name) })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await fixture.raw.get(createdRootId)).toMatchObject({ trashed: true });
+    const recovered = (await fixture.manifestStore.read()).value;
+    expect(recovered.operations).toEqual([]);
+    expect(allCleanup(recovered)).toEqual([]);
+  });
+
+  it("recovers an accepted revision create before cleaning its retained public parent", async () => {
+    let publicRootId: string | undefined;
+    let revisionFolderId: string | undefined;
+    let failRevisionRecovery = false;
+    let failPublicRootTrash = true;
+    const fixture = await setup({
+      privateStorage: (raw) => delegateStorage(raw, {
+        createFolder: async (input, context) => {
+          const created = await raw.createFolder(input, context);
+          if (input.appProperties?.nxtPublicationKind === "public") publicRootId = created.id;
+          if (input.appProperties?.nxtPublicationKind === "revision") {
+            revisionFolderId = created.id;
+            failRevisionRecovery = true;
+          }
+          return created;
+        },
+        listChildren: async (input, context) => {
+          if (failRevisionRecovery && input.parentId === publicRootId) {
+            failRevisionRecovery = false;
+            throw new Error("injected accepted revision recovery read failure");
+          }
+          return raw.listChildren(input, context);
+        },
+        trash: async (input, context) => {
+          if (failPublicRootTrash && input.fileId === publicRootId) {
+            throw new StorageMutationOutcomeUnknownError(input.fileId);
+          }
+          return raw.trash(input, context);
+        }
+      })
+    });
+
+    await expect(publishCurrent(fixture)).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+    if (publicRootId === undefined || revisionFolderId === undefined) throw new Error("missing accepted revision fixture");
+    const publicRoot = await fixture.raw.get(publicRootId);
+    const interrupted = (await fixture.manifestStore.read()).value;
+    expect(interrupted.entries).toEqual([]);
+    expect(interrupted.operations).toHaveLength(1);
+    expect(interrupted.operations[0]).toMatchObject({ publicFolderId: publicRootId, cleanupSlots: 2 });
+
+    const restarted = restartPublicationService(fixture);
+    await expect(restarted.revoke({ publicId: missingPublicIdFor(publicRoot.name) })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await fixture.raw.get(revisionFolderId)).toMatchObject({ trashed: true });
+    expect(await fixture.raw.get(publicRootId)).toMatchObject({ trashed: false });
+    expect(allCleanup((await fixture.manifestStore.read()).value)).toContainEqual(expect.objectContaining({
+      kind: "public-root",
+      folderId: publicRootId,
+      parentFolderId: fixture.ids.published.id
+    }));
+
+    failPublicRootTrash = false;
+    await expect(restarted.revoke({ publicId: missingPublicIdFor(publicRoot.name) })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await fixture.raw.get(publicRootId)).toMatchObject({ trashed: true });
+    expect(allCleanup((await fixture.manifestStore.read()).value)).toEqual([]);
+  });
+
+  it("recovers an ambiguously accepted public-root create after its first discovery read fails", async () => {
+    let createdRootId: string | undefined;
+    let failImmediateRecovery = false;
+    const fixture = await setup({
+      privateStorage: (raw, ids) => delegateStorage(raw, {
+        createFolder: async (input, context) => {
+          const created = await raw.createFolder(input, context);
+          if (input.appProperties?.nxtPublicationKind === "public") {
+            createdRootId = created.id;
+            failImmediateRecovery = true;
+            throw new StorageMutationOutcomeUnknownError(created.id);
+          }
+          return created;
+        },
+        listChildren: async (input, context) => {
+          if (failImmediateRecovery && input.parentId === ids.publishedId) {
+            failImmediateRecovery = false;
+            throw new Error("injected ambiguous public-root discovery failure");
+          }
+          return raw.listChildren(input, context);
+        }
+      })
+    });
+
+    await expect(publishCurrent(fixture)).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+    if (createdRootId === undefined) throw new Error("missing ambiguously accepted public root");
+    const created = await fixture.raw.get(createdRootId);
+    expect((await fixture.manifestStore.read()).value.operations).toHaveLength(1);
+
+    const restarted = restartPublicationService(fixture);
+    await expect(restarted.revoke({ publicId: missingPublicIdFor(created.name) })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await fixture.raw.get(createdRootId)).toMatchObject({ trashed: true });
+    expect((await fixture.manifestStore.read()).value.operations).toEqual([]);
+  });
+
+  it.each(["copied-marker duplicate", "wrong-parent and wrong-marker"] as const)(
+    "keeps an interrupted create queued when discovery finds a %s",
+    async (variant) => {
+      let createdRootId: string | undefined;
+      let failImmediateRecovery = false;
+      const fixture = await setup({
+        privateStorage: (raw, ids) => delegateStorage(raw, {
+          createFolder: async (input, context) => {
+            const created = await raw.createFolder(input, context);
+            if (input.appProperties?.nxtPublicationKind === "public") {
+              createdRootId = created.id;
+              failImmediateRecovery = true;
+            }
+            return created;
+          },
+          listChildren: async (input, context) => {
+            if (failImmediateRecovery && input.parentId === ids.publishedId) {
+              failImmediateRecovery = false;
+              throw new Error("injected interrupted create discovery failure");
+            }
+            return raw.listChildren(input, context);
+          }
+        })
+      });
+
+      await expect(publishCurrent(fixture)).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+      if (createdRootId === undefined) throw new Error("missing interrupted public root");
+      let created = await fixture.raw.get(createdRootId);
+      const additionalTargets: string[] = [];
+      if (variant === "copied-marker duplicate") {
+        const copied = await fixture.raw.createFolder({
+          parentId: fixture.ids.published.id,
+          name: created.name,
+          appProperties: { ...created.appProperties }
+        });
+        additionalTargets.push(copied.id);
+      } else {
+        const holding = await fixture.raw.createFolder({ parentId: "private", name: "interrupted-create-holding" });
+        created = await fixture.raw.move({
+          fileId: created.id,
+          fromParentId: fixture.ids.published.id,
+          toParentId: holding.id,
+          expectedVersion: created.version
+        });
+        const wrongMarker = await fixture.raw.createFolder({
+          parentId: fixture.ids.published.id,
+          name: created.name,
+          appProperties: {
+            nxtPublicationMarker: `pm1.${created.name}.copied`,
+            nxtPublicationKind: "public",
+            nxtPublicationPublicId: created.name
+          }
+        });
+        additionalTargets.push(wrongMarker.id);
+      }
+
+      const restarted = restartPublicationService(fixture);
+      await expect(restarted.revoke({ publicId: missingPublicIdFor(created.name) })).rejects.toMatchObject({ code: "NOT_FOUND" });
+      const retained = (await fixture.manifestStore.read()).value;
+      expect(retained.operations).toHaveLength(1);
+      expect(retained.cleanup).toEqual([]);
+      expect(await fixture.raw.get(createdRootId)).toMatchObject({ trashed: false });
+      for (const targetId of additionalTargets) {
+        expect(await fixture.raw.get(targetId)).toMatchObject({ trashed: false });
+      }
+    }
+  );
 
   it("durably owns and cleans both first-publish folders when snapshot creation fails", async () => {
     let failSnapshot = true;
@@ -829,6 +1045,7 @@ describe("immutable publication snapshots", () => {
         revisionFolderVersion: staleRevision.version,
         revisionId: staleRevision.name,
         revisionMarker,
+        createIntent: null,
         cleanupSlots: 2
       }]
     }));

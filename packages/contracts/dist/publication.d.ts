@@ -95,6 +95,24 @@ export declare const PublicationEntrySchema: z.ZodObject<{
     }, z.core.$strict>>;
 }, z.core.$strict>;
 export type PublicationEntry = z.infer<typeof PublicationEntrySchema>;
+export declare const PublicationCreateIntentSchema: z.ZodObject<{
+    kind: z.ZodEnum<{
+        "public-root": "public-root";
+        revision: "revision";
+    }>;
+    state: z.ZodEnum<{
+        prepared: "prepared";
+        attempted: "attempted";
+        recoverable: "recoverable";
+    }>;
+    parentFolderId: z.ZodString;
+    folderName: z.ZodString;
+    marker: z.ZodString;
+    publicId: z.ZodString;
+    operationId: z.ZodString;
+    folderId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    folderVersion: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+}, z.core.$strict>;
 export declare const PublicationOperationSchema: z.ZodObject<{
     operationId: z.ZodString;
     publicId: z.ZodString;
@@ -110,6 +128,24 @@ export declare const PublicationOperationSchema: z.ZodObject<{
     revisionFolderVersion: z.ZodDefault<z.ZodNullable<z.ZodString>>;
     revisionId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
     revisionMarker: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    createIntent: z.ZodDefault<z.ZodNullable<z.ZodObject<{
+        kind: z.ZodEnum<{
+            "public-root": "public-root";
+            revision: "revision";
+        }>;
+        state: z.ZodEnum<{
+            prepared: "prepared";
+            attempted: "attempted";
+            recoverable: "recoverable";
+        }>;
+        parentFolderId: z.ZodString;
+        folderName: z.ZodString;
+        marker: z.ZodString;
+        publicId: z.ZodString;
+        operationId: z.ZodString;
+        folderId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        folderVersion: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    }, z.core.$strict>>>;
     cleanupSlots: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strict>;
 export declare const PublicationCleanupSchema: z.ZodObject<{
@@ -235,6 +271,24 @@ export declare const PublicationManifestSchema: z.ZodObject<{
         revisionFolderVersion: z.ZodDefault<z.ZodNullable<z.ZodString>>;
         revisionId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
         revisionMarker: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        createIntent: z.ZodDefault<z.ZodNullable<z.ZodObject<{
+            kind: z.ZodEnum<{
+                "public-root": "public-root";
+                revision: "revision";
+            }>;
+            state: z.ZodEnum<{
+                prepared: "prepared";
+                attempted: "attempted";
+                recoverable: "recoverable";
+            }>;
+            parentFolderId: z.ZodString;
+            folderName: z.ZodString;
+            marker: z.ZodString;
+            publicId: z.ZodString;
+            operationId: z.ZodString;
+            folderId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+            folderVersion: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        }, z.core.$strict>>>;
         cleanupSlots: z.ZodDefault<z.ZodNumber>;
     }, z.core.$strict>>>;
     cleanup: z.ZodDefault<z.ZodArray<z.ZodObject<{
@@ -254,6 +308,7 @@ export declare const PublicationManifestSchema: z.ZodObject<{
         operationId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
     }, z.core.$strict>>>;
     cleanupOffset: z.ZodDefault<z.ZodNumber>;
+    createRecoveryOffset: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strict>;
 export type PublicationManifest = z.infer<typeof PublicationManifestSchema>;
 //# sourceMappingURL=publication.d.ts.map

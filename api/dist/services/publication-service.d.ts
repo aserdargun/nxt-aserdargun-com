@@ -37,6 +37,7 @@ export declare class PublicationService {
     private observePublicationCausality;
     private reservePublish;
     private ensurePublicFolder;
+    private ensureOperationFolder;
     private ensureOwnedFolder;
     private chooseRevisionId;
     private prepareAssets;
@@ -45,11 +46,15 @@ export declare class PublicationService {
     private createVerifiedBytes;
     private readAndVerifyBytes;
     private commitPublication;
-    private persistOperationFolder;
+    private recordRecoverableCreate;
+    private cancelCreateIntent;
+    private completeCreateIntent;
     private persistOperationRevisionName;
-    private persistOperationRevisionFolder;
     private updateOperation;
     private abandonOperation;
+    private recoverCreateIntents;
+    private recoverCreateIntent;
+    private queueRecoveredCreate;
     private processCleanup;
     private verifyCleanupTarget;
     private assertUniqueCleanupChild;
