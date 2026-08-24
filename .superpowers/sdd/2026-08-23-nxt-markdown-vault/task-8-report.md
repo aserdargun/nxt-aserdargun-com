@@ -434,3 +434,124 @@ None.
 ## External state
 
 No live Google Drive, OAuth, credentials, `.env.local`, DNS, Azure, GitHub, deployments, remote repository, or other external mutable state was accessed or changed. Local/fake adapters only; live Drive integration remained skipped.
+
+# Fix round 4/5
+
+## Status
+
+DONE
+
+## Files
+
+- `packages/contracts/src/vault.ts`: added the strict bounded private `rc1.<22 base64url>` recovery-claim identity; generated contract artifacts are updated.
+- `api/src/services/attachment-service.ts`: made every recovery claim exclusive per CAS caller, carried the exact claim identity through fence/lease renewal, and required the exact committed mutation/owner/fence/claim/lease state before recovery Drive side effects and terminal/index transitions.
+- `api/src/services/rescan-service.ts`: completes against only the terminal conflict IDs captured at scan start, preserves later/live attachment intents, and rebases current attachment projections onto the rebuilt actual note index.
+- `api/src/services/attachment-policy.ts`: validates an exact single-chunk lossy VP8 WebP frame and a bounded stream-free classic-xref PDF object graph; VP8L, VP8X, and stream PDFs remain download-only.
+- `api/test/{attachment-service,attachment-policy,rescan-persistence}.test.ts` and `packages/contracts/test/contracts.test.ts`: added deterministic same-/cross-service claim barriers, callback retry/renewal/tamper/stale/double-action probes, real WebP/PDF fixtures and malformed containers, and a 260-terminal-conflict AttachmentService/RescanService lifecycle.
+- Generated API and contract artifacts were refreshed from the verified sources.
+
+## RED evidence
+
+Exclusive recovery ownership and renewal:
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/api exec vitest run test/attachment-service.test.ts
+```
+
+```text
+Test Files  1 failed (1)
+Tests  5 failed | 24 passed (29)
+FAIL same-service concurrent claim: expected one accepted claim, received two.
+FAIL cross-service claim: the committed record had no per-claim identity.
+FAIL lease renewal: renewRecoveryLease was absent.
+FAIL exact-upload finalize probe: two same-service callers accepted the claim.
+FAIL duplicate conditional Trash probe: two same-service callers accepted the claim.
+Exit status 1
+```
+
+WebP/PDF structural proof:
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/api exec vitest run test/attachment-policy.test.ts
+```
+
+```text
+Test Files  1 failed (1)
+Tests  2 failed | 20 passed (22)
+FAIL VP8 header shell/noise fixture was incorrectly inline.
+FAIL malformed classic-xref PDF fixture was incorrectly inline.
+Exit status 1
+```
+
+Real terminal-capacity lifecycle:
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/api exec vitest run test/rescan-persistence.test.ts -t "reclaims more than 256 terminal attachment conflicts"
+```
+
+```text
+Test Files  1 failed (1)
+Tests  1 failed | 14 skipped (15)
+FAIL RescanService.completeScan rejected a later live attachment intent instead of clearing only captured terminal IDs.
+Exit status 1
+```
+
+## GREEN evidence
+
+Focused recovery, policy, rescan, and contract validation:
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/api exec vitest run test/attachment-policy.test.ts test/attachment-service.test.ts test/rescan-service.test.ts test/rescan-persistence.test.ts
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/contracts test
+```
+
+```text
+api: Test Files 4 passed (4), Tests 69 passed (69)
+contracts: Test Files 1 passed (1), Tests 11 passed (11)
+Exit status 0
+```
+
+Root gates, with all live Google Drive settings explicitly unset:
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH node --version
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm lint
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm typecheck
+env -u GOOGLE_CLIENT_ID -u GOOGLE_CLIENT_SECRET -u GOOGLE_REFRESH_TOKEN -u NXT_VAULT_DRIVE_FOLDER_ID -u NXT_PRIVATE_DRIVE_FOLDER_ID -u NXT_VAULT_INDEX_DRIVE_FILE_ID -u NXT_PREFERENCES_DRIVE_FILE_ID -u NXT_NOTES_DRIVE_FOLDER_ID -u NXT_INBOX_DRIVE_FOLDER_ID -u NXT_PLANS_DRIVE_FOLDER_ID -u NXT_ARCHIVE_DRIVE_FOLDER_ID -u NXT_ASSETS_DRIVE_FOLDER_ID -u RUN_GOOGLE_DRIVE_INTEGRATION PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm test
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm build
+git diff --check
+```
+
+```text
+v22.23.1
+eslint .: exit status 0
+packages/contracts/domain/api typecheck: Done
+packages/contracts: 1 file passed, 11 tests passed
+packages/domain: 4 files passed, 19 tests passed
+api: 16 files passed, 1 skipped; 336 tests passed, 1 skipped
+packages/contracts/domain/api build: Done
+git diff --check: exit status 0
+```
+
+## Root verification and self-review
+
+- Claim IDs are generated before CAS with 128 bits of randomness. A caller accepts only its exact committed claim ID, incremented fence, service owner, phase, and lease fields; a same-service CAS loser therefore returns `undefined` instead of adopting the winner's record.
+- Recovery renewal advances the fence and preserves only the current claim ID. Fresh committed checks immediately precede each conditional recovery Trash, and finalize/restore/terminalize/reschedule/clear transitions compare the exact claim and live lease state. Tampered, prior-fence, prior-phase, and prior-claim snapshots cannot act.
+- Deterministic barriers prove same-service and cross-service exclusivity, CAS callback retry, lease renewal between snapshot/CAS, token tampering, stale snapshots after renewal, one finalize, and exactly two conditional Trash calls for two exact duplicates.
+- The production lifecycle creates ambiguous attachment outcomes, advances three bounded 15-minute recovery horizons in batches of at most eight intents per call, reaches terminal `conflicted` records, and uses fresh RescanService instances/pages to clear five captured batches totaling 260 conflicts. Responses contain only safe path recovery records, never mutation IDs, owner/claim IDs, Drive IDs, parent IDs, or markers. The rescan rebuilds a deliberately stale title from Drive reality, preserves a later live intent, reclaims capacity, and permits a new successful attachment upload.
+- VP8 inline proof requires an exact RIFF size, one exact padded `VP8 ` chunk, key-frame tag, supported version, show-frame bit, positive declared first partition, sync code, nonzero dimensions, a complete first partition, and nonempty token payload. VP8L/VP8X remain conservative downloads.
+- PDF inline proof is bounded to 10,000 xref entries, 100,000 parser tokens, and depth 32. It parses every classic-xref subsection and exact entry, validates free/active entries, exact object number/generation offsets, a coherent `/Size` and active Catalog `/Root`, all indirect references, only PDF trivia between regions, exact `startxref`/EOF, and no streams or trailing payload.
+- The approved three Task 8 routes and existing twelve Task 7 routes are unchanged. `file-type@22.0.2`, conditional Trash, reference serialization/rebasing, Unicode bounds, stream/Base64 handling, renderer behavior, forbidden MIME handling, auth/opaque IDs/system-file boundaries, and GET headers/errors remain covered by the full suite.
+
+## Commits
+
+- Implementation: `b7ad487` (`fix: prove attachment recovery ownership`).
+- Report: this separate documentation commit (its final hash is included in the task handoff).
+
+## Concerns
+
+None blocking. VP8L, VP8X, and PDFs containing streams intentionally remain download-only until equally bounded full parsers exist.
+
+## External state
+
+No live Google Drive, OAuth, credentials, `.env.local`, cloud resource, DNS, Azure, GitHub, deployment, remote repository, or other external mutable state was read or changed. All behavior tests used local/fake adapters, the live Drive integration remained skipped, and no commit was pushed.
