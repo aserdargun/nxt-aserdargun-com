@@ -176,8 +176,12 @@ it("defines strict Drive-ID-free private response contracts", () => {
     processed: 1,
     complete: true,
     records: [{ noteId: safeEntry.id, title: "Plan", path: "Notes/Plan.md", version: "4" }],
-    recoveries: []
-  }).records).toHaveLength(1);
+    recoveries: [{
+      path: "Notes/Externally-Changed.md",
+      rawSource: "",
+      error: "External change detected. Rescan is reconciling the index."
+    }]
+  }).recoveries).toHaveLength(1);
   expect(NoteResponseSchema.parse({
     note: {
       frontmatter: {
@@ -197,6 +201,13 @@ it("defines strict Drive-ID-free private response contracts", () => {
   }).path).toBe("Notes/Plan.md");
   expect(() => VaultResponseSchema.parse({ entries: [{ ...safeEntry, driveId: "raw" }], preferences, folders: [], treeVersion: "a".repeat(64), cursor: null, complete: true })).toThrow();
   expect(() => NoteResponseSchema.parse({ note: {}, driveId: "raw", version: "1", path: "Notes/x.md" })).toThrow();
+  expect(() => RescanVaultResponseSchema.parse({
+    cursor: null,
+    processed: 100,
+    complete: false,
+    records: Array.from({ length: 100 }, () => ({ noteId: safeEntry.id, title: "Plan", path: "Notes/Plan.md", version: "4" })),
+    recoveries: Array.from({ length: 100 }, () => ({ path: "Notes/Changed.md", rawSource: "", error: "External change detected. Rescan is reconciling the index." }))
+  })).toThrow("rescan response exceeds 100 items");
 });
 
 it("bounds note source bytes and validates safe folder mutation and confirmation tokens", () => {

@@ -209,7 +209,10 @@ export declare const RescanVaultResponseSchema: z.ZodObject<{
     recoveries: z.ZodArray<z.ZodObject<{
         path: z.ZodString;
         rawSource: z.ZodString;
-        error: z.ZodLiteral<"Invalid Markdown frontmatter.">;
+        error: z.ZodEnum<{
+            "Invalid Markdown frontmatter.": "Invalid Markdown frontmatter.";
+            "External change detected. Rescan is reconciling the index.": "External change detected. Rescan is reconciling the index.";
+        }>;
     }, z.core.$strict>>;
 }, z.core.$strict>;
 export type RescanVaultResponse = z.infer<typeof RescanVaultResponseSchema>;

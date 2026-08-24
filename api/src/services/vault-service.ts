@@ -51,6 +51,8 @@ export interface VaultNoteResult {
 
 type Folders = { notesId: string; inboxId: string; plansId: string; archiveId: string; assetsId: string };
 type TreeItem = { file: StoredFile; path: string };
+type DestinationAncestor = NonNullable<VaultPendingMutation["destinationAncestry"]>[number];
+type FolderAncestry = { path: string; depth: number; chain: DestinationAncestor[] };
 type Confirmation = { descendantCount: number; treeVersion: string; expiresAt: string; confirmationToken: string };
 type FolderTreeRecord = {
   id: string;
@@ -264,11 +266,21 @@ export class VaultService {
     parentId?: string;
   }): Promise<StoredFile> {
     await this.reconcileRecoverableMutations();
+    let sawStaleReservation = false;
     for (let attempt = 0; attempt < MAX_PREFLIGHT_RETRIES; attempt += 1) {
       try {
         return await this.updateFolderAttempt(input);
       } catch (error) {
-        if (!(error instanceof ReservationStaleError) || attempt === MAX_PREFLIGHT_RETRIES - 1) throw error;
+        if (error instanceof ReservationStaleError) {
+          sawStaleReservation = true;
+          if (attempt < MAX_PREFLIGHT_RETRIES - 1) continue;
+          throw error;
+        }
+        if (
+          sawStaleReservation && error instanceof ApiResponseError &&
+          (error.code === "INVALID_INPUT" || error.code === "DRIVE_UNAVAILABLE")
+        ) throw new ApiResponseError("CONFLICT");
+        throw error;
       }
     }
     throw new ApiResponseError("CONFLICT");
@@ -289,13 +301,14 @@ export class VaultService {
     const targetParentId = input.parentId ?? oldParentId;
     const targetName = input.name === undefined ? file.name : sanitizeName(input.name);
     if (targetParentId === oldParentId && targetName === file.name) throw new ApiResponseError("INVALID_INPUT");
-    await this.assertDestinationOutsideSubtree(file.id, targetParentId);
-    const parentDepth = await this.folderDepth(targetParentId);
+    const destination = await this.folderAncestry(targetParentId);
+    if (destination.chain.some((ancestor) => ancestor.id === file.id)) throw new ApiResponseError("INVALID_INPUT");
+    const parentDepth = destination.depth;
     const subtreeDepth = await this.maximumSubtreeDepth(input.folderId);
     if (parentDepth + 1 + subtreeDepth > MAX_FOLDER_DEPTH) throw new ApiResponseError("INVALID_INPUT");
     await this.assertNameAvailable(targetParentId, targetName, targetParentId === oldParentId ? file.id : undefined);
     const oldPath = await this.folderPath(file.id);
-    const newPath = `${await this.folderPath(targetParentId)}/${targetName}`;
+    const newPath = `${destination.path}/${targetName}`;
     const mutation = this.newMutation({
       operation: input.name !== undefined && input.parentId !== undefined
         ? "update-folder"
@@ -306,11 +319,14 @@ export class VaultService {
       targetName,
       oldPath,
       newPath,
-      expectedVersion: input.expectedVersion
+      expectedVersion: input.expectedVersion,
+      preflightGeneration: index.value.generation,
+      destinationAncestry: destination.chain
     });
     await this.reserve(mutation, { generation: index.value.generation });
     try {
       await this.revalidateReservedFile(mutation, file, oldPath);
+      await this.revalidateDestinationAncestry(mutation);
       await this.beginDriveMutation(mutation.id);
       const moved = await this.options.storage.move({
         fileId: file.id,
@@ -324,10 +340,12 @@ export class VaultService {
       if (verified.version !== moved.version || verified.parentIds[0] !== targetParentId || verified.name !== targetName) {
         throw new ApiResponseError("DRIVE_UNAVAILABLE");
       }
-      await this.finalize(mutation.id, (index) => replacePathPrefix(index, oldPath, newPath));
+      const committedPath = await this.folderPath(verified.id);
+      await this.finalize(mutation.id, (index) => replacePathPrefix(index, oldPath, committedPath));
       return verified;
     } catch (error) {
       await this.handleMutationFailure(mutation.id, error, file.id);
+      if (error instanceof StorageVersionConflictError) throw new ApiResponseError("CONFLICT");
       throw preserveApiError(error, "DRIVE_UNAVAILABLE");
     }
   }
@@ -399,11 +417,21 @@ export class VaultService {
   private async updateNoteUnserialized(input: { noteId: string; expectedVersion: string; source: string }): Promise<VaultNoteResult> {
     this.assertSourceSize(input.source);
     await this.reconcileRecoverableMutations();
+    let sawStaleReservation = false;
     for (let attempt = 0; attempt < MAX_PREFLIGHT_RETRIES; attempt += 1) {
       try {
         return await this.updateNoteAttempt(input);
       } catch (error) {
-        if (!(error instanceof ReservationStaleError) || attempt === MAX_PREFLIGHT_RETRIES - 1) throw error;
+        if (error instanceof ReservationStaleError) {
+          sawStaleReservation = true;
+          if (attempt < MAX_PREFLIGHT_RETRIES - 1) continue;
+          throw error;
+        }
+        if (
+          sawStaleReservation && error instanceof ApiResponseError &&
+          (error.code === "INVALID_INPUT" || error.code === "DRIVE_UNAVAILABLE")
+        ) throw new ApiResponseError("CONFLICT");
+        throw error;
       }
     }
     throw new ApiResponseError("CONFLICT");
@@ -427,7 +455,8 @@ export class VaultService {
     const newName = `${sanitizeName(nextNote.frontmatter.title)}.md`;
     if (beforeFile.name !== newName) await this.assertNameAvailable(parentId, newName, beforeFile.id);
     const oldPath = await this.notePath(beforeFile);
-    const newPath = `${posix.dirname(oldPath)}/${newName}`;
+    const destination = await this.folderAncestry(parentId);
+    const newPath = `${destination.path}/${newName}`;
     const mutation = this.newMutation({
       operation: "update-note",
       noteId: input.noteId,
@@ -439,12 +468,15 @@ export class VaultService {
       expectedVersion: input.expectedVersion,
       expectedChecksum: sha256(source),
       originalChecksum: beforeRead.checksum,
-      source
+      source,
+      preflightGeneration: index.value.generation,
+      destinationAncestry: destination.chain
     });
     await this.reserve(mutation, { generation: index.value.generation, entry });
     let written: StoredFile | undefined;
     try {
       await this.revalidateReservedFile(mutation, beforeFile, oldPath);
+      await this.revalidateDestinationAncestry(mutation);
       await this.beginDriveMutation(mutation.id);
       written = await this.options.storage.updateText({ fileId: beforeFile.id, expectedVersion: beforeFile.version, mimeType: MARKDOWN_MIME_TYPE, text: source });
       if (beforeFile.name !== newName) {
@@ -465,18 +497,27 @@ export class VaultService {
 
   private async moveNoteUnserialized(input: { noteId: string; expectedVersion: string; folderId: string }): Promise<VaultNoteResult> {
     await this.reconcileRecoverableMutations();
+    let sawStaleReservation = false;
     for (let attempt = 0; attempt < MAX_PREFLIGHT_RETRIES; attempt += 1) {
       try {
         return await this.moveNoteAttempt(input);
       } catch (error) {
-        if (!(error instanceof ReservationStaleError) || attempt === MAX_PREFLIGHT_RETRIES - 1) throw error;
+        if (error instanceof ReservationStaleError) {
+          sawStaleReservation = true;
+          if (attempt < MAX_PREFLIGHT_RETRIES - 1) continue;
+          throw error;
+        }
+        if (
+          sawStaleReservation && error instanceof ApiResponseError &&
+          (error.code === "INVALID_INPUT" || error.code === "DRIVE_UNAVAILABLE")
+        ) throw new ApiResponseError("CONFLICT");
+        throw error;
       }
     }
     throw new ApiResponseError("CONFLICT");
   }
 
   private async moveNoteAttempt(input: { noteId: string; expectedVersion: string; folderId: string }): Promise<VaultNoteResult> {
-    await this.assertFolderDestination(input.folderId);
     const { index, entry } = await this.findEntry(input.noteId);
     let file = await this.preflight(entry.driveId, input.expectedVersion);
     this.assertMarkdownFile(file);
@@ -486,7 +527,8 @@ export class VaultService {
     const readback = await this.readNote(file.id);
     this.parseOwnedNote(readback.text, input.noteId, "DRIVE_UNAVAILABLE", "DRIVE_UNAVAILABLE");
     const oldPath = await this.notePath(file);
-    const newPath = `${await this.folderPath(input.folderId)}/${file.name}`;
+    const destination = await this.folderAncestry(input.folderId);
+    const newPath = `${destination.path}/${file.name}`;
     const source = recalculateAttachmentLinks(readback.text, input.noteId, oldPath, newPath);
     this.assertSourceSize(source);
     const mutation = this.newMutation({
@@ -501,11 +543,14 @@ export class VaultService {
       expectedVersion: input.expectedVersion,
       expectedChecksum: sha256(source),
       originalChecksum: readback.checksum,
-      source
+      source,
+      preflightGeneration: index.value.generation,
+      destinationAncestry: destination.chain
     });
     await this.reserve(mutation, { generation: index.value.generation, entry });
     try {
       await this.revalidateReservedFile(mutation, file, oldPath);
+      await this.revalidateDestinationAncestry(mutation);
       await this.beginDriveMutation(mutation.id);
       if (source !== readback.text) {
         file = await this.options.storage.updateText({ fileId: file.id, expectedVersion: file.version, mimeType: MARKDOWN_MIME_TYPE, text: source });
@@ -529,7 +574,10 @@ export class VaultService {
     precondition?: { generation: number; entry?: VaultIndexEntry }
   ): Promise<void> {
     await this.options.indexStore.compareAndSet((index) => {
-      if (precondition !== undefined && index.generation !== precondition.generation) throw new ReservationStaleError();
+      if (
+        precondition !== undefined &&
+        (index.generation !== precondition.generation || mutation.preflightGeneration !== precondition.generation)
+      ) throw new ReservationStaleError();
       if (precondition?.entry !== undefined) {
         const current = index.entries.find((entry) => entry.id === precondition.entry?.id);
         if (
@@ -548,11 +596,7 @@ export class VaultService {
   }
 
   private async revalidateReservedFile(mutation: VaultPendingMutation, expected: StoredFile, expectedPath: string): Promise<void> {
-    const index = await this.options.indexStore.read();
-    const reserved = index.value.pendingMutations.find((candidate) => candidate.id === mutation.id);
-    if (reserved === undefined || reserved.ownerId !== this.ownerId || reserved.fence !== mutation.fence || reserved.phase !== "reserved") {
-      throw new ApiResponseError("CONFLICT");
-    }
+    await this.assertOwnedReservation(mutation);
     let actual: StoredFile;
     try { actual = await this.options.storage.get(expected.id); } catch { throw new ApiResponseError("DRIVE_UNAVAILABLE"); }
     const actualPath = actual.mimeType === FOLDER_MIME_TYPE ? await this.folderPath(actual.id) : await this.notePath(actual);
@@ -563,6 +607,38 @@ export class VaultService {
       await this.cancel(mutation.id);
       throw new ReservationStaleError();
     }
+  }
+
+  private async revalidateDestinationAncestry(mutation: VaultPendingMutation): Promise<void> {
+    if (mutation.destinationAncestry === undefined) return;
+    if (!(await this.matchesDestinationAncestry(mutation.destinationAncestry))) {
+      await this.cancel(mutation.id);
+      throw new ReservationStaleError();
+    }
+    await this.assertOwnedReservation(mutation);
+  }
+
+  private async assertOwnedReservation(mutation: VaultPendingMutation): Promise<void> {
+    const index = await this.options.indexStore.read();
+    const reserved = index.value.pendingMutations.find((candidate) => candidate.id === mutation.id);
+    if (
+      reserved === undefined || reserved.ownerId !== this.ownerId || reserved.fence !== mutation.fence ||
+      reserved.phase !== "reserved" || reserved.preflightGeneration !== mutation.preflightGeneration
+    ) throw new ApiResponseError("CONFLICT");
+  }
+
+  private async matchesDestinationAncestry(expected: readonly DestinationAncestor[]): Promise<boolean> {
+    for (const ancestor of expected) {
+      let actual: StoredFile;
+      try { actual = await this.options.storage.get(ancestor.id); }
+      catch { throw new ApiResponseError("DRIVE_UNAVAILABLE"); }
+      if (
+        actual.id !== ancestor.id || actual.name !== ancestor.name || actual.mimeType !== FOLDER_MIME_TYPE ||
+        actual.trashed || actual.version !== ancestor.version || actual.parentIds.length !== 1 ||
+        actual.parentIds[0] !== ancestor.parentId
+      ) return false;
+    }
+    return true;
   }
 
   private async checkpointMutation(
@@ -779,6 +855,13 @@ export class VaultService {
         await this.markMutationConflicted(mutation.id);
         return;
       }
+      if (
+        mutation.destinationAncestry !== undefined &&
+        !(await this.matchesDestinationAncestry(mutation.destinationAncestry))
+      ) {
+        await this.markMutationConflicted(mutation.id);
+        return;
+      }
       if (exactOriginal && readback.checksum !== mutation.expectedChecksum) {
         await this.beginDriveMutation(mutation.id);
         const written = await this.options.storage.updateText({
@@ -839,6 +922,13 @@ export class VaultService {
     let actualPath = await this.folderPath(folder.id);
     if (mutation.newPath !== undefined && actualPath !== mutation.newPath) {
       if (mutation.expectedVersion === undefined || actualPath !== mutation.oldPath || folder.version !== mutation.expectedVersion) {
+        await this.markMutationConflicted(mutation.id);
+        return;
+      }
+      if (
+        mutation.destinationAncestry !== undefined &&
+        !(await this.matchesDestinationAncestry(mutation.destinationAncestry))
+      ) {
         await this.markMutationConflicted(mutation.id);
         return;
       }
@@ -935,42 +1025,18 @@ export class VaultService {
 
   private async assertFolderDestination(folderId: string): Promise<void> { await this.folderDepth(folderId); }
 
-  private async assertDestinationOutsideSubtree(folderId: string, destinationId: string): Promise<void> {
-    let currentId = destinationId;
-    const seen = new Set<string>();
-    for (let depth = 0; depth <= MAX_FOLDER_DEPTH; depth += 1) {
-      if (currentId === folderId) throw new ApiResponseError("INVALID_INPUT");
-      if (seen.has(currentId)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
-      seen.add(currentId);
-      let file: StoredFile;
-      try { file = await this.options.storage.get(currentId); } catch { throw new ApiResponseError("DRIVE_UNAVAILABLE"); }
-      this.assertFolder(file);
-      if (file.id === this.options.folders.notesId) return;
-      if (file.parentIds.length !== 1) throw new ApiResponseError("DRIVE_UNAVAILABLE");
-      currentId = file.parentIds[0] as string;
-    }
-    throw new ApiResponseError("INVALID_INPUT");
-  }
-
   private async folderDepth(folderId: string): Promise<number> {
-    let currentId = folderId;
-    const seen = new Set<string>();
-    for (let depth = 0; depth <= MAX_FOLDER_DEPTH; depth += 1) {
-      if (seen.has(currentId)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
-      seen.add(currentId);
-      let file: StoredFile;
-      try { file = await this.options.storage.get(currentId); } catch { throw new ApiResponseError("DRIVE_UNAVAILABLE"); }
-      this.assertFolder(file);
-      if (file.id === this.options.folders.notesId) return depth;
-      if (file.parentIds.length !== 1) throw new ApiResponseError("DRIVE_UNAVAILABLE");
-      currentId = file.parentIds[0] as string;
-    }
-    throw new ApiResponseError("INVALID_INPUT");
+    return (await this.folderAncestry(folderId)).depth;
   }
 
   private async folderPath(folderId: string): Promise<string> {
+    return (await this.folderAncestry(folderId)).path;
+  }
+
+  private async folderAncestry(folderId: string): Promise<FolderAncestry> {
     let currentId = folderId;
     const names: string[] = [];
+    const chain: DestinationAncestor[] = [];
     const seen = new Set<string>();
     for (let depth = 0; depth <= MAX_FOLDER_DEPTH; depth += 1) {
       if (seen.has(currentId)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
@@ -978,10 +1044,14 @@ export class VaultService {
       let file: StoredFile;
       try { file = await this.options.storage.get(currentId); } catch { throw new ApiResponseError("DRIVE_UNAVAILABLE"); }
       this.assertFolder(file);
-      if (file.id === this.options.folders.notesId) return ["Notes", ...names.reverse()].join("/");
-      names.push(file.name);
       if (file.parentIds.length !== 1) throw new ApiResponseError("DRIVE_UNAVAILABLE");
-      currentId = file.parentIds[0] as string;
+      const parentId = file.parentIds[0] as string;
+      chain.push({ id: file.id, name: file.name, parentId, version: file.version });
+      if (file.id === this.options.folders.notesId) {
+        return { path: ["Notes", ...names.reverse()].join("/"), depth, chain };
+      }
+      names.push(file.name);
+      currentId = parentId;
     }
     throw new ApiResponseError("INVALID_INPUT");
   }

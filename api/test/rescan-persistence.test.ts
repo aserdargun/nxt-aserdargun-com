@@ -1,11 +1,13 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { VaultIndexSchema } from "@nxt/contracts";
+import { VaultIndexSchema, type VaultPendingMutation } from "@nxt/contracts";
 import { describe, expect, it } from "vitest";
 import { RescanService } from "../src/services/rescan-service.js";
 import { SystemFileStore } from "../src/services/system-file-store.js";
+import { GoogleDriveAdapter } from "../src/storage/google-drive-adapter.js";
+import type { GoogleDriveClient, GoogleDriveUpdateInput } from "../src/storage/google-drive-client.js";
 import { LocalDriveAdapter } from "../src/storage/local-drive-adapter.js";
 import { RootBoundaryStorage } from "../src/storage/root-boundary.js";
 import { StorageVersionConflictError, type StoragePort, type StoredFile } from "../src/storage/storage-port.js";
@@ -52,10 +54,15 @@ describe("persisted rescan staging", () => {
     const secondService = new RescanService({ storage: fixture.storage, indexStore: fixture.indexStore, notesFolderId: fixture.notes.id, cursorSecret: secret });
     await expect(secondService.scanPage({ cursor: null, limit: 100 })).rejects.toMatchObject({ code: "CONFLICT" });
     const second = await secondService.scanPage({ cursor: first.cursor, limit: 100 });
-    await expect(firstService.scanPage({ cursor: first.cursor, limit: 100 })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(firstService.scanPage({ cursor: first.cursor, limit: 100 })).resolves.toEqual(second);
 
     let page = second;
     let service = firstService;
+    if (!page.complete) {
+      service = service === firstService ? secondService : firstService;
+      page = await service.scanPage({ cursor: page.cursor, limit: 100 });
+      await expect(firstService.scanPage({ cursor: first.cursor, limit: 100 })).rejects.toMatchObject({ code: "CONFLICT" });
+    }
     while (!page.complete) {
       service = service === firstService ? secondService : firstService;
       page = await service.scanPage({ cursor: page.cursor, limit: 100 });
@@ -312,6 +319,60 @@ describe("persisted rescan staging", () => {
     expect(injectConflict).toBe(false);
   });
 
+  it("recovers an accepted Google-backed progress write from the old cursor within the 100-call budget", async () => {
+    const drive = createRescanGoogleDrive();
+    const google = new GoogleDriveAdapter(drive.client, {
+      rootId: "root",
+      sleep: async () => undefined,
+      random: () => 0
+    });
+    const bounded = new RootBoundaryStorage(google, "root");
+    const indexStore = new SystemFileStore({
+      storage: bounded,
+      fileId: "index",
+      parentId: "private",
+      name: "vault-index.json",
+      schema: VaultIndexSchema
+    });
+    const service = () => new RescanService({
+      storage: bounded,
+      indexStore,
+      notesFolderId: "notes",
+      cursorSecret: "google-rescan-recovery-secret-more-than-32-bytes"
+    });
+
+    drive.resetCalls();
+    const started = await service().scanPage({ cursor: null, limit: 100 });
+    expect(started.complete).toBe(false);
+    expect(started.cursor).not.toBeNull();
+    expect(drive.calls()).toBeLessThanOrEqual(100);
+
+    drive.enableAmbiguousProgressProbe();
+    drive.resetCalls();
+    await expect(service().scanPage({ cursor: started.cursor, limit: 100 })).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+    expect(drive.calls()).toBeLessThanOrEqual(100);
+    expect(drive.acceptedProbeWrites()).toBe(1);
+    expect(drive.injectedCasConflicts()).toBe(1);
+    expect(drive.injectedRetryableReads()).toBeGreaterThan(0);
+
+    drive.resetCalls();
+    let page = await service().scanPage({ cursor: started.cursor, limit: 100 });
+    expect(drive.calls()).toBeLessThanOrEqual(100);
+    expect(page.cursor === null || page.cursor !== started.cursor).toBe(true);
+    expect(page.records.length + page.recoveries.length).toBeLessThanOrEqual(100);
+    let pages = 0;
+    while (!page.complete) {
+      drive.resetCalls();
+      page = await service().scanPage({ cursor: page.cursor, limit: 100 });
+      expect(drive.calls()).toBeLessThanOrEqual(100);
+      expect(page.records.length + page.recoveries.length).toBeLessThanOrEqual(100);
+      pages += 1;
+      expect(pages).toBeLessThan(100);
+    }
+
+    expect(VaultIndexSchema.parse((await indexStore.read()).value).rescanState).toBeNull();
+  });
+
   it("persists bounded invalid-frontmatter recovery source instead of process-local state", async () => {
     const fixture = await setup();
     const rawSource = `---\ntitle: broken\n---\n\n${"recovery".repeat(1_000)}`;
@@ -326,10 +387,218 @@ describe("persisted rescan staging", () => {
       cursorSecret: "persisted-rescan-cursor-secret-32-bytes"
     });
 
-    const page = await service.scanPage({ cursor: null, limit: 100 });
-    const state = (await fixture.indexStore.read()).value.rescanState;
+    let page = await service.scanPage({ cursor: null, limit: 100 });
+    let state = (await fixture.indexStore.read()).value.rescanState;
+    while (!page.complete && state?.recoveries[0] === undefined) {
+      page = await service.scanPage({ cursor: page.cursor, limit: 100 });
+      state = (await fixture.indexStore.read()).value.rescanState;
+    }
 
     expect(page.complete).toBe(false);
     expect(state?.recoveries[0]).toMatchObject({ path: "Notes/000-Broken.md", rawSource });
   });
+
+  it("deliberately rebuilds actual state and reclaims conflict capacity across more than 256 sequential conflicts", async () => {
+    const fixture = await setup();
+    const secret = "persisted-rescan-cursor-secret-32-bytes";
+    const recoveredPaths: string[] = [];
+    const seedConflicts = async (count: number, offset: number): Promise<string[]> => {
+      const snapshot = await fixture.indexStore.read();
+      const rawIds: string[] = [];
+      const pendingMutations = Array.from({ length: count }, (_, index): VaultPendingMutation => {
+        const id = randomUUID();
+        rawIds.push(id);
+        return {
+          id,
+          operation: "move-folder",
+          folderId: `raw-folder-${offset + index}`,
+          oldPath: `Notes/External-${String(offset + index).padStart(3, "0")}`,
+          newPath: `Notes/Intended-${String(offset + index).padStart(3, "0")}`,
+          expectedVersion: "1",
+          ownerId: randomUUID(),
+          fence: 2,
+          phase: "conflicted",
+          createdAt: "2026-08-24T08:00:00.000Z",
+          expiresAt: "2026-08-24T08:15:00.000Z"
+        };
+      });
+      await fixture.indexStore.update({ ...snapshot.value, pendingMutations }, snapshot.file.version);
+      return rawIds;
+    };
+    const reconcile = async (rawIds: readonly string[]): Promise<void> => {
+      let cursor: string | null = null;
+      let complete: boolean;
+      do {
+        const page = await new RescanService({
+          storage: fixture.storage,
+          indexStore: fixture.indexStore,
+          notesFolderId: fixture.notes.id,
+          cursorSecret: secret
+        }).scanPage({ cursor, limit: 100 });
+        expect(page.records.length + page.recoveries.length).toBeLessThanOrEqual(100);
+        expect(page.recoveries.every((recovery) =>
+          recovery.error === "External change detected. Rescan is reconciling the index." && recovery.rawSource === ""
+        )).toBe(true);
+        const serialized = JSON.stringify(page);
+        for (const rawId of rawIds) expect(serialized).not.toContain(rawId);
+        expect(serialized).not.toContain("raw-folder-");
+        recoveredPaths.push(...page.recoveries.map((recovery) => recovery.path));
+        cursor = page.cursor;
+        complete = page.complete;
+      } while (!complete);
+      expect((await fixture.indexStore.read()).value.pendingMutations).toEqual([]);
+    };
+
+    const firstBatch = await seedConflicts(256, 0);
+    await reconcile(firstBatch);
+    const secondBatch = await seedConflicts(44, 256);
+    await reconcile(secondBatch);
+
+    expect(new Set(recoveredPaths).size).toBe(300);
+    expect((await fixture.indexStore.read()).value.entries).toEqual([]);
+  });
 });
+
+const createRescanGoogleDrive = () => {
+  const folderMime = "application/vnd.google-apps.folder";
+  type DriveFile = {
+    id: string;
+    name: string;
+    mimeType: string;
+    parents: string[];
+    version: number;
+    trashed: boolean;
+    content?: string;
+  };
+  const files = new Map<string, DriveFile>();
+  const add = (file: DriveFile): void => { files.set(file.id, file); };
+  add({ id: "root", name: "root", mimeType: folderMime, parents: [], version: 1, trashed: false });
+  add({ id: "notes", name: "Notes", mimeType: folderMime, parents: ["root"], version: 1, trashed: false });
+  add({ id: "private", name: "NXT-PRIVATE-COM", mimeType: folderMime, parents: ["root"], version: 1, trashed: false });
+  add({
+    id: "index",
+    name: "vault-index.json",
+    mimeType: "application/json",
+    parents: ["private"],
+    version: 1,
+    trashed: false,
+    content: '{"schemaVersion":1,"entries":[]}\n'
+  });
+  for (let index = 0; index < 35; index += 1) {
+    add({
+      id: `empty-${String(index).padStart(3, "0")}`,
+      name: `Empty-${String(index).padStart(3, "0")}`,
+      mimeType: folderMime,
+      parents: ["notes"],
+      version: 1,
+      trashed: false
+    });
+  }
+  let rawCalls = 0;
+  let probeEnabled = false;
+  let injectCasConflict = false;
+  let acceptedProbeWriteCount = 0;
+  let injectedCasConflictCount = 0;
+  let retryPairs = 0;
+  let retryPending = false;
+  let retryableReadCount = 0;
+  let failAcceptedReadback = 0;
+  const statusError = (status: number): Error => Object.assign(new Error(`injected ${status}`), { response: { status } });
+  const file = (fileId: string): DriveFile => {
+    const value = files.get(fileId);
+    if (value === undefined) throw new Error("missing fake Drive file");
+    return value;
+  };
+  const metadata = (value: DriveFile): Record<string, unknown> => ({
+    id: value.id,
+    name: value.name,
+    mimeType: value.mimeType,
+    parents: [...value.parents],
+    version: String(value.version),
+    modifiedTime: `2026-08-24T08:00:00.${String(value.version).padStart(3, "0")}Z`,
+    ...(value.mimeType === folderMime ? {} : {
+      size: String(new TextEncoder().encode(value.content ?? "").byteLength),
+      md5Checksum: createHash("md5").update(value.content ?? "").digest("hex")
+    }),
+    trashed: value.trashed
+  });
+  const client: GoogleDriveClient = {
+    files: {
+      get: async (input) => {
+        rawCalls += 1;
+        if (input.fileId === "index" && input.alt !== "media" && failAcceptedReadback > 0) {
+          failAcceptedReadback -= 1;
+          retryableReadCount += 1;
+          throw statusError(503);
+        }
+        if (probeEnabled && retryPairs > 0) {
+          if (!retryPending) {
+            retryPending = true;
+            retryPairs -= 1;
+            retryableReadCount += 1;
+            throw statusError(503);
+          }
+          retryPending = false;
+        }
+        const value = file(input.fileId);
+        return input.alt === "media"
+          ? { data: value.content ?? "" }
+          : { data: metadata(value), headers: { etag: `"version-${value.version}"` } };
+      },
+      list: async (input) => {
+        rawCalls += 1;
+        const match = /^'([^']+)' in parents/u.exec(input.q);
+        if (match === null) throw new Error("invalid fake Drive query");
+        const parentId = match[1] as string;
+        const offset = input.pageToken === undefined ? 0 : Number(input.pageToken);
+        const children = [...files.values()]
+          .filter((candidate) => !candidate.trashed && candidate.parents.length === 1 && candidate.parents[0] === parentId)
+          .sort((first, second) => first.name.localeCompare(second.name, "en-US"));
+        const page = children.slice(offset, offset + input.pageSize);
+        const next = offset + page.length;
+        return {
+          data: {
+            files: page.map(metadata),
+            ...(next < children.length ? { nextPageToken: String(next) } : {})
+          }
+        };
+      },
+      create: async () => { throw new Error("unsupported fake Drive create"); },
+      update: async (input: GoogleDriveUpdateInput, options) => {
+        rawCalls += 1;
+        const current = file(input.fileId);
+        if (options?.headers["If-Match"] !== `"version-${current.version}"`) throw statusError(412);
+        if (probeEnabled && injectCasConflict) {
+          injectCasConflict = false;
+          injectedCasConflictCount += 1;
+          throw statusError(412);
+        }
+        if (typeof input.media?.body !== "string") throw new Error("fake Drive update requires text media");
+        current.content = input.media.body;
+        current.mimeType = input.media.mimeType;
+        current.version += 1;
+        if (probeEnabled) {
+          acceptedProbeWriteCount += 1;
+          probeEnabled = false;
+          failAcceptedReadback = 3;
+        }
+        return { data: { id: current.id } };
+      }
+    },
+    revisions: { list: async () => ({ data: { revisions: [] } }) }
+  };
+  return {
+    client,
+    calls: () => rawCalls,
+    resetCalls: () => { rawCalls = 0; },
+    enableAmbiguousProgressProbe: () => {
+      probeEnabled = true;
+      injectCasConflict = true;
+      retryPairs = 3;
+      retryPending = false;
+    },
+    acceptedProbeWrites: () => acceptedProbeWriteCount,
+    injectedCasConflicts: () => injectedCasConflictCount,
+    injectedRetryableReads: () => retryableReadCount
+  };
+};

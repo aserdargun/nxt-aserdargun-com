@@ -430,4 +430,34 @@ describe("private folder handlers", () => {
     expect(updateFolder).toHaveBeenCalledTimes(1);
     expect(updateFolder).toHaveBeenCalledWith({ folderId, expectedVersion: "1", name: "Renamed", parentId: destinationId });
   });
+
+  it("returns the static redacted 409 body for a trusted folder version conflict", async () => {
+    const rawFolderId = "raw-folder-conflict-id";
+    const folderRef = identityCodec.encode(rawFolderId);
+    const handlers = createFolderHandlers({
+      authorize: () => ({ provider: "github", userId: "owner", userDetails: "aserdargun" }),
+      resolveServices: () => ({
+        vault: {
+          updateFolder: async () => { throw new ApiResponseError("CONFLICT"); }
+        }
+      }) as never,
+      idCodec: identityCodec
+    });
+
+    const response = await handlers.updateFolder(request(
+      "PUT",
+      `https://nxt.example/api/private/folders/${folderRef}`,
+      { expectedVersion: "7", name: "Renamed" },
+      { folderId: folderRef }
+    ));
+
+    expect(response.status).toBe(409);
+    expect(response.jsonBody).toMatchObject({
+      error: {
+        code: "CONFLICT",
+        message: "The resource changed. Refresh and try again."
+      }
+    });
+    expect(JSON.stringify(response.jsonBody)).not.toContain(rawFolderId);
+  });
 });

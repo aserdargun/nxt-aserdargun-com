@@ -4,6 +4,7 @@ import {
   GoogleDriveAdapter,
   RootBoundaryStorage
 } from "../src/storage/index.js";
+import { StorageVersionConflictError } from "../src/storage/storage-port.js";
 import type { GoogleDriveClient } from "../src/storage/google-drive-client.js";
 
 const FILE_FIELDS =
@@ -704,7 +705,8 @@ describe("GoogleDriveAdapter", () => {
         adapter.move({
           fileId: "file-id",
           fromParentId: "from-parent",
-          toParentId: "to-parent"
+          toParentId: "to-parent",
+          expectedVersion: "1"
         })
       ).rejects.toThrow("move verification failed");
     }
@@ -734,6 +736,7 @@ describe("GoogleDriveAdapter", () => {
         fileId: "file-id",
         fromParentId: "from-parent",
         toParentId: "to-parent",
+        expectedVersion: "1",
         newName: "renamed.md"
       })
     ).resolves.toMatchObject({ name: "renamed.md", parentIds: ["to-parent"] });
@@ -775,6 +778,7 @@ describe("GoogleDriveAdapter", () => {
         fileId: "file-id",
         fromParentId: "same-parent",
         toParentId: "same-parent",
+        expectedVersion: "1",
         newName: "renamed.md"
       })
     ).resolves.toMatchObject({ name: "renamed.md", parentIds: ["same-parent"] });
@@ -822,6 +826,99 @@ describe("GoogleDriveAdapter", () => {
     ]]);
   });
 
+  it.each(['"strong-etag"', 'W/"weak-etag"'])("accepts a syntactically valid %s Drive entity-tag", async (etag) => {
+    const calls: unknown[][] = [];
+    let metadataReads = 0;
+    const adapter = new GoogleDriveAdapter(createClient({
+      get: async () => ({
+        data: metadataReads++ === 0
+          ? driveFile({ parents: ["from-parent"], version: "7" })
+          : driveFile({ parents: ["to-parent"], version: "8" }),
+        headers: { etag }
+      }),
+      update: (async (...args: unknown[]) => {
+        calls.push(args);
+        return { data: { id: "file-id" } };
+      }) as GoogleDriveClient["files"]["update"]
+    }));
+
+    await adapter.move({
+      fileId: "file-id",
+      fromParentId: "from-parent",
+      toParentId: "to-parent",
+      expectedVersion: "7"
+    });
+
+    expect(calls[0]?.[1]).toEqual({ headers: { "If-Match": etag } });
+  });
+
+  it.each([
+    ["missing", {}],
+    ["unquoted", { etag: "version-7" }],
+    ["lowercase weak prefix", { etag: 'w/"version-7"' }],
+    ["unterminated", { etag: '"version-7' }],
+    ["trailing data", { etag: '"version-7" trailing' }],
+    ["control", { etag: '"version\u0001-7"' }],
+    ["oversized", { etag: `"${"x".repeat(511)}"` }]
+  ])("rejects a %s Drive ETag before moving", async (_label, headers) => {
+    let writes = 0;
+    const adapter = new GoogleDriveAdapter(createClient({
+      get: async () => ({ data: driveFile({ parents: ["from-parent"], version: "7" }), headers }),
+      update: async () => {
+        writes += 1;
+        return { data: { id: "file-id" } };
+      }
+    }));
+
+    await expect(adapter.move({
+      fileId: "file-id",
+      fromParentId: "from-parent",
+      toParentId: "to-parent",
+      expectedVersion: "7"
+    })).rejects.toThrow("version precondition is unavailable");
+    expect(writes).toBe(0);
+  });
+
+  it("rejects an omitted move version before metadata admission or writing", async () => {
+    let reads = 0;
+    let writes = 0;
+    const adapter = new GoogleDriveAdapter(createClient({
+      get: async () => {
+        reads += 1;
+        return { data: driveFile({ parents: ["from-parent"] }) };
+      },
+      update: async () => {
+        writes += 1;
+        return { data: { id: "file-id" } };
+      }
+    }));
+
+    await expect(adapter.move({
+      fileId: "file-id",
+      fromParentId: "from-parent",
+      toParentId: "to-parent",
+      expectedVersion: undefined
+    } as never)).rejects.toThrow("invalid storage version");
+    expect({ reads, writes }).toEqual({ reads: 0, writes: 0 });
+  });
+
+  it("maps a Drive 412 move rejection to the typed storage version conflict", async () => {
+    const adapter = new GoogleDriveAdapter(createClient({
+      get: async () => ({
+        data: driveFile({ parents: ["from-parent"], version: "7" }),
+        headers: { etag: '"version-7"' }
+      }),
+      update: async () => { throw statusError(412, "raw file-id precondition failed"); }
+    }));
+
+    await expect(adapter.move({
+      fileId: "file-id",
+      fromParentId: "from-parent",
+      toParentId: "to-parent",
+      expectedVersion: "7"
+    })).rejects.toBeInstanceOf(StorageVersionConflictError);
+  });
+
   it("rejects a same-parent move without a rename before writing", async () => {
     let writes = 0;
     const adapter = new GoogleDriveAdapter(
@@ -838,7 +935,8 @@ describe("GoogleDriveAdapter", () => {
       adapter.move({
         fileId: "file-id",
         fromParentId: "same-parent",
-        toParentId: "same-parent"
+        toParentId: "same-parent",
+        expectedVersion: "1"
       })
     ).rejects.toThrow("same-parent move requires a rename");
     expect(writes).toBe(0);

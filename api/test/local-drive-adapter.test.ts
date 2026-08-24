@@ -58,7 +58,8 @@ describe("LocalDriveAdapter", () => {
       storage.move({
         fileId: file.id,
         fromParentId: "vault",
-        toParentId: "vault"
+        toParentId: "vault",
+        expectedVersion: updated.version
       })
     ).rejects.toThrow("same-parent move requires a rename");
   });
@@ -119,8 +120,8 @@ describe("LocalDriveAdapter", () => {
     const child = await storage.createFolder({ parentId: parent.id, name: "child" });
     const file = await storage.createText({ parentId: parent.id, name: "note.md", mimeType: "text/markdown", text: "text" });
 
-    await expect(storage.move({ fileId: parent.id, fromParentId: "vault", toParentId: child.id })).rejects.toThrow("cycle");
-    const moved = await storage.move({ fileId: file.id, fromParentId: parent.id, toParentId: child.id, newName: "moved.md" });
+    await expect(storage.move({ fileId: parent.id, fromParentId: "vault", toParentId: child.id, expectedVersion: parent.version })).rejects.toThrow("cycle");
+    const moved = await storage.move({ fileId: file.id, fromParentId: parent.id, toParentId: child.id, expectedVersion: file.version, newName: "moved.md" });
     expect(moved.parentIds).toEqual([child.id]);
     expect(moved.name).toBe("moved.md");
     await expect(storage.readText(file.id)).resolves.toMatchObject({ text: "text" });
@@ -136,8 +137,9 @@ describe("LocalDriveAdapter", () => {
       fileId: file.id,
       fromParentId: first.id,
       toParentId: first.id,
+      expectedVersion: file.version,
       newName: "external.md"
-    } as never);
+    });
 
     await expect(storage.move({
       fileId: file.id,
@@ -149,6 +151,27 @@ describe("LocalDriveAdapter", () => {
     await expect(storage.get(file.id)).resolves.toMatchObject({
       version: externallyRenamed.version,
       name: "external.md",
+      parentIds: [first.id]
+    });
+  });
+
+  it("rejects an omitted move version before changing local metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const first = await storage.createFolder({ parentId: "vault", name: "first" });
+    const second = await storage.createFolder({ parentId: "vault", name: "second" });
+    const file = await storage.createText({ parentId: first.id, name: "note.md", mimeType: "text/markdown", text: "text" });
+
+    await expect(storage.move({
+      fileId: file.id,
+      fromParentId: first.id,
+      toParentId: second.id,
+      expectedVersion: undefined
+    } as never)).rejects.toThrow("invalid storage version");
+
+    await expect(storage.get(file.id)).resolves.toMatchObject({
+      version: file.version,
+      name: "note.md",
       parentIds: [first.id]
     });
   });

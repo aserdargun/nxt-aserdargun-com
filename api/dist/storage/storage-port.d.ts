@@ -25,6 +25,7 @@ export declare class StorageOperationBudget {
 export interface StorageOperationContext {
     operationBudget?: StorageOperationBudget;
 }
+export declare const assertStorageVersion: (value: unknown) => asserts value is string;
 /** A storage mutation was rejected before it could reach the backing store. */
 export declare class StorageMutationNotAppliedError extends Error {
     constructor();

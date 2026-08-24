@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { setTimeout as sleepTimer } from "node:timers/promises";
-import { StorageMutationOutcomeUnknownError, StorageOperationBudgetExceededError, StorageVersionConflictError } from "./storage-port.js";
+import { assertStorageVersion, StorageMutationOutcomeUnknownError, StorageOperationBudgetExceededError, StorageVersionConflictError } from "./storage-port.js";
 const FILE_FIELDS = "id,name,mimeType,parents,version,modifiedTime,size,trashed,md5Checksum";
 const LIST_FIELDS = `nextPageToken,files(${FILE_FIELDS})`;
 const REVISION_FIELDS = "nextPageToken,revisions(id,modifiedTime)";
@@ -114,8 +114,8 @@ export class GoogleDriveAdapter {
     async updateText(input, context) {
         assertFileId(input.fileId);
         assertMimeType(input.mimeType);
-        if (input.expectedVersion !== undefined)
-            assertVersion(input.expectedVersion);
+        assertStorageVersion(input.expectedVersion);
+        assertVersion(input.expectedVersion);
         let before;
         let etag;
         try {
@@ -162,8 +162,8 @@ export class GoogleDriveAdapter {
         assertFileId(input.fileId);
         assertFileId(input.fromParentId);
         assertFileId(input.toParentId);
-        if (input.expectedVersion !== undefined)
-            assertVersion(input.expectedVersion);
+        assertStorageVersion(input.expectedVersion);
+        assertVersion(input.expectedVersion);
         if (input.newName !== undefined)
             assertName(input.newName);
         let before;
@@ -177,7 +177,7 @@ export class GoogleDriveAdapter {
             throw preserveSafeError(error, "Google Drive read failed.");
         }
         assertActiveNonShortcut(before);
-        if (input.expectedVersion !== undefined && before.version !== input.expectedVersion)
+        if (before.version !== input.expectedVersion)
             throw new StorageVersionConflictError();
         if (before.parentIds.length !== 1 ||
             before.parentIds[0] !== input.fromParentId) {
@@ -514,7 +514,9 @@ const responseEtag = (headers) => {
             etag = undefined;
         }
     }
-    if (typeof etag !== "string" || etag.length < 3 || etag.length > 512 || /[\r\n\0]/u.test(etag)) {
+    if (typeof etag !== "string" ||
+        etag.length > 512 ||
+        !/^(?:W\/)?"[\x21\x23-\x7E\x80-\xFF]*"$/u.test(etag)) {
         throw new DriveContractError("Google Drive version precondition is unavailable.");
     }
     return etag;

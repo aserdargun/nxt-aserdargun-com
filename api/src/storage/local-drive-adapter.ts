@@ -4,7 +4,7 @@ import { link, lstat, mkdir, open, readFile, realpath, rename, rmdir, writeFile 
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { StorageVersionConflictError, type StorageOperationContext, type StoragePort, type StoredFile } from "./storage-port.js";
+import { assertStorageVersion, StorageVersionConflictError, type StorageOperationContext, type StoragePort, type StoredFile } from "./storage-port.js";
 import {
   TRASH_TRANSACTION_SCHEMA_VERSION,
   isTrashTransactionState,
@@ -160,14 +160,13 @@ export class LocalDriveAdapter implements StoragePort {
     });
   }
 
-  public updateText(input: { fileId: string; expectedVersion: string; mimeType: string; text: string }, context?: StorageOperationContext): Promise<StoredFile> {
+  public async updateText(input: { fileId: string; expectedVersion: string; mimeType: string; text: string }, context?: StorageOperationContext): Promise<StoredFile> {
+    assertStorageVersion(input.expectedVersion);
     context?.operationBudget?.consume();
     return this.mutate(async (metadata) => {
       assertMimeType(input.mimeType);
       const file = this.getActiveContentFile(metadata, input.fileId);
-      // Keep runtime compatibility for callers compiled against the prior boundary;
-      // all current production mutations supply this required precondition.
-      if (input.expectedVersion !== undefined && file.version !== input.expectedVersion) {
+      if (file.version !== input.expectedVersion) {
         throw new StorageVersionConflictError();
       }
       const bytes = new TextEncoder().encode(input.text);
@@ -180,16 +179,15 @@ export class LocalDriveAdapter implements StoragePort {
     });
   }
 
-  public move(input: { fileId: string; fromParentId: string; toParentId: string; expectedVersion: string; newName?: string }, context?: StorageOperationContext): Promise<StoredFile> {
+  public async move(input: { fileId: string; fromParentId: string; toParentId: string; expectedVersion: string; newName?: string }, context?: StorageOperationContext): Promise<StoredFile> {
+    assertStorageVersion(input.expectedVersion);
     context?.operationBudget?.consume();
     return this.mutate(async (metadata) => {
       if (input.newName !== undefined) {
         assertName(input.newName);
       }
       const file = this.getActiveFile(metadata, input.fileId);
-      // Runtime guard for older test fixtures; the StoragePort type and all
-      // production callers require the observed version.
-      if (input.expectedVersion !== undefined && file.version !== input.expectedVersion) {
+      if (file.version !== input.expectedVersion) {
         throw new StorageVersionConflictError();
       }
       if (file.kind === "root") {

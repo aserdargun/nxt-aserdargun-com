@@ -7,6 +7,7 @@ import type {
   GoogleDriveUpdateInput
 } from "./google-drive-client.js";
 import {
+  assertStorageVersion,
   StorageMutationOutcomeUnknownError,
   StorageOperationBudgetExceededError,
   StorageVersionConflictError,
@@ -183,7 +184,8 @@ export class GoogleDriveAdapter implements StoragePort {
   }, context?: StorageOperationContext): Promise<StoredFile> {
     assertFileId(input.fileId);
     assertMimeType(input.mimeType);
-    if (input.expectedVersion !== undefined) assertVersion(input.expectedVersion);
+    assertStorageVersion(input.expectedVersion);
+    assertVersion(input.expectedVersion);
     let before: StoredFile;
     let etag: string;
     try {
@@ -242,7 +244,8 @@ export class GoogleDriveAdapter implements StoragePort {
     assertFileId(input.fileId);
     assertFileId(input.fromParentId);
     assertFileId(input.toParentId);
-    if (input.expectedVersion !== undefined) assertVersion(input.expectedVersion);
+    assertStorageVersion(input.expectedVersion);
+    assertVersion(input.expectedVersion);
     if (input.newName !== undefined) assertName(input.newName);
     let before: StoredFile;
     let etag: string;
@@ -254,7 +257,7 @@ export class GoogleDriveAdapter implements StoragePort {
       throw preserveSafeError(error, "Google Drive read failed.");
     }
     assertActiveNonShortcut(before);
-    if (input.expectedVersion !== undefined && before.version !== input.expectedVersion) throw new StorageVersionConflictError();
+    if (before.version !== input.expectedVersion) throw new StorageVersionConflictError();
     if (
       before.parentIds.length !== 1 ||
       before.parentIds[0] !== input.fromParentId
@@ -650,7 +653,11 @@ const responseEtag = (headers: unknown): string => {
   if (typeof etag !== "string" && typeof record.get === "function") {
     try { etag = (record.get as (name: string) => unknown)("etag"); } catch { etag = undefined; }
   }
-  if (typeof etag !== "string" || etag.length < 3 || etag.length > 512 || /[\r\n\0]/u.test(etag)) {
+  if (
+    typeof etag !== "string" ||
+    etag.length > 512 ||
+    !/^(?:W\/)?"[\x21\x23-\x7E\x80-\xFF]*"$/u.test(etag)
+  ) {
     throw new DriveContractError("Google Drive version precondition is unavailable.");
   }
   return etag;

@@ -49,6 +49,12 @@ export declare const VaultMutationPhaseSchema: z.ZodEnum<{
     "index-applied": "index-applied";
     conflicted: "conflicted";
 }>;
+export declare const VaultMutationDestinationAncestorSchema: z.ZodObject<{
+    id: z.ZodString;
+    name: z.ZodString;
+    parentId: z.ZodString;
+    version: z.ZodString;
+}, z.core.$strict>;
 export declare const VaultPendingMutationSchema: z.ZodObject<{
     id: z.ZodUUID;
     operation: z.ZodEnum<{
@@ -70,6 +76,13 @@ export declare const VaultPendingMutationSchema: z.ZodObject<{
     targetName: z.ZodOptional<z.ZodString>;
     oldPath: z.ZodOptional<z.ZodString>;
     newPath: z.ZodOptional<z.ZodString>;
+    preflightGeneration: z.ZodOptional<z.ZodNumber>;
+    destinationAncestry: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        id: z.ZodString;
+        name: z.ZodString;
+        parentId: z.ZodString;
+        version: z.ZodString;
+    }, z.core.$strict>>>;
     expectedVersion: z.ZodOptional<z.ZodString>;
     moveExpectedVersion: z.ZodOptional<z.ZodString>;
     originalChecksum: z.ZodOptional<z.ZodString>;
@@ -102,10 +115,43 @@ export declare const RescanStagedRecordSchema: z.ZodObject<{
         size: z.ZodNumber;
     }, z.core.$strict>>;
 }, z.core.$strict>;
+export declare const RescanRecoveryErrorSchema: z.ZodEnum<{
+    "Invalid Markdown frontmatter.": "Invalid Markdown frontmatter.";
+    "External change detected. Rescan is reconciling the index.": "External change detected. Rescan is reconciling the index.";
+}>;
 export declare const RescanRecoveryStateSchema: z.ZodObject<{
     path: z.ZodString;
     rawSource: z.ZodString;
-    error: z.ZodLiteral<"Invalid Markdown frontmatter.">;
+    error: z.ZodEnum<{
+        "Invalid Markdown frontmatter.": "Invalid Markdown frontmatter.";
+        "External change detected. Rescan is reconciling the index.": "External change detected. Rescan is reconciling the index.";
+    }>;
+}, z.core.$strict>;
+export declare const RescanResponseRecordStateSchema: z.ZodObject<{
+    noteId: z.ZodUUID;
+    title: z.ZodString;
+    path: z.ZodString;
+    version: z.ZodString;
+}, z.core.$strict>;
+export declare const VaultRescanTransitionSchema: z.ZodObject<{
+    fromPosition: z.ZodNumber;
+    fromNonce: z.ZodString;
+    fromExpiresAt: z.ZodISODateTime;
+    processed: z.ZodNumber;
+    records: z.ZodArray<z.ZodObject<{
+        noteId: z.ZodUUID;
+        title: z.ZodString;
+        path: z.ZodString;
+        version: z.ZodString;
+    }, z.core.$strict>>;
+    recoveries: z.ZodArray<z.ZodObject<{
+        path: z.ZodString;
+        rawSource: z.ZodString;
+        error: z.ZodEnum<{
+            "Invalid Markdown frontmatter.": "Invalid Markdown frontmatter.";
+            "External change detected. Rescan is reconciling the index.": "External change detected. Rescan is reconciling the index.";
+        }>;
+    }, z.core.$strict>>;
 }, z.core.$strict>;
 export declare const VaultRescanStateSchema: z.ZodObject<{
     scanId: z.ZodUUID;
@@ -144,11 +190,57 @@ export declare const VaultRescanStateSchema: z.ZodObject<{
     recoveries: z.ZodArray<z.ZodObject<{
         path: z.ZodString;
         rawSource: z.ZodString;
-        error: z.ZodLiteral<"Invalid Markdown frontmatter.">;
+        error: z.ZodEnum<{
+            "Invalid Markdown frontmatter.": "Invalid Markdown frontmatter.";
+            "External change detected. Rescan is reconciling the index.": "External change detected. Rescan is reconciling the index.";
+        }>;
     }, z.core.$strict>>;
     deliveredRecoveryCount: z.ZodNumber;
+    conflictMutationIds: z.ZodDefault<z.ZodArray<z.ZodUUID>>;
+    lastTransition: z.ZodDefault<z.ZodNullable<z.ZodObject<{
+        fromPosition: z.ZodNumber;
+        fromNonce: z.ZodString;
+        fromExpiresAt: z.ZodISODateTime;
+        processed: z.ZodNumber;
+        records: z.ZodArray<z.ZodObject<{
+            noteId: z.ZodUUID;
+            title: z.ZodString;
+            path: z.ZodString;
+            version: z.ZodString;
+        }, z.core.$strict>>;
+        recoveries: z.ZodArray<z.ZodObject<{
+            path: z.ZodString;
+            rawSource: z.ZodString;
+            error: z.ZodEnum<{
+                "Invalid Markdown frontmatter.": "Invalid Markdown frontmatter.";
+                "External change detected. Rescan is reconciling the index.": "External change detected. Rescan is reconciling the index.";
+            }>;
+        }, z.core.$strict>>;
+    }, z.core.$strict>>>;
 }, z.core.$strict>;
 export type VaultRescanState = z.infer<typeof VaultRescanStateSchema>;
+export declare const VaultCompletedRescanSchema: z.ZodObject<{
+    fromPosition: z.ZodNumber;
+    fromNonce: z.ZodString;
+    fromExpiresAt: z.ZodISODateTime;
+    processed: z.ZodNumber;
+    records: z.ZodArray<z.ZodObject<{
+        noteId: z.ZodUUID;
+        title: z.ZodString;
+        path: z.ZodString;
+        version: z.ZodString;
+    }, z.core.$strict>>;
+    recoveries: z.ZodArray<z.ZodObject<{
+        path: z.ZodString;
+        rawSource: z.ZodString;
+        error: z.ZodEnum<{
+            "Invalid Markdown frontmatter.": "Invalid Markdown frontmatter.";
+            "External change detected. Rescan is reconciling the index.": "External change detected. Rescan is reconciling the index.";
+        }>;
+    }, z.core.$strict>>;
+    scanId: z.ZodUUID;
+    baseGeneration: z.ZodNumber;
+}, z.core.$strict>;
 export declare const VaultIndexSchema: z.ZodObject<{
     schemaVersion: z.ZodLiteral<1>;
     generation: z.ZodDefault<z.ZodNumber>;
@@ -195,6 +287,13 @@ export declare const VaultIndexSchema: z.ZodObject<{
         targetName: z.ZodOptional<z.ZodString>;
         oldPath: z.ZodOptional<z.ZodString>;
         newPath: z.ZodOptional<z.ZodString>;
+        preflightGeneration: z.ZodOptional<z.ZodNumber>;
+        destinationAncestry: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            id: z.ZodString;
+            name: z.ZodString;
+            parentId: z.ZodString;
+            version: z.ZodString;
+        }, z.core.$strict>>>;
         expectedVersion: z.ZodOptional<z.ZodString>;
         moveExpectedVersion: z.ZodOptional<z.ZodString>;
         originalChecksum: z.ZodOptional<z.ZodString>;
@@ -251,9 +350,55 @@ export declare const VaultIndexSchema: z.ZodObject<{
         recoveries: z.ZodArray<z.ZodObject<{
             path: z.ZodString;
             rawSource: z.ZodString;
-            error: z.ZodLiteral<"Invalid Markdown frontmatter.">;
+            error: z.ZodEnum<{
+                "Invalid Markdown frontmatter.": "Invalid Markdown frontmatter.";
+                "External change detected. Rescan is reconciling the index.": "External change detected. Rescan is reconciling the index.";
+            }>;
         }, z.core.$strict>>;
         deliveredRecoveryCount: z.ZodNumber;
+        conflictMutationIds: z.ZodDefault<z.ZodArray<z.ZodUUID>>;
+        lastTransition: z.ZodDefault<z.ZodNullable<z.ZodObject<{
+            fromPosition: z.ZodNumber;
+            fromNonce: z.ZodString;
+            fromExpiresAt: z.ZodISODateTime;
+            processed: z.ZodNumber;
+            records: z.ZodArray<z.ZodObject<{
+                noteId: z.ZodUUID;
+                title: z.ZodString;
+                path: z.ZodString;
+                version: z.ZodString;
+            }, z.core.$strict>>;
+            recoveries: z.ZodArray<z.ZodObject<{
+                path: z.ZodString;
+                rawSource: z.ZodString;
+                error: z.ZodEnum<{
+                    "Invalid Markdown frontmatter.": "Invalid Markdown frontmatter.";
+                    "External change detected. Rescan is reconciling the index.": "External change detected. Rescan is reconciling the index.";
+                }>;
+            }, z.core.$strict>>;
+        }, z.core.$strict>>>;
+    }, z.core.$strict>>>;
+    lastCompletedRescan: z.ZodDefault<z.ZodNullable<z.ZodObject<{
+        fromPosition: z.ZodNumber;
+        fromNonce: z.ZodString;
+        fromExpiresAt: z.ZodISODateTime;
+        processed: z.ZodNumber;
+        records: z.ZodArray<z.ZodObject<{
+            noteId: z.ZodUUID;
+            title: z.ZodString;
+            path: z.ZodString;
+            version: z.ZodString;
+        }, z.core.$strict>>;
+        recoveries: z.ZodArray<z.ZodObject<{
+            path: z.ZodString;
+            rawSource: z.ZodString;
+            error: z.ZodEnum<{
+                "Invalid Markdown frontmatter.": "Invalid Markdown frontmatter.";
+                "External change detected. Rescan is reconciling the index.": "External change detected. Rescan is reconciling the index.";
+            }>;
+        }, z.core.$strict>>;
+        scanId: z.ZodUUID;
+        baseGeneration: z.ZodNumber;
     }, z.core.$strict>>>;
 }, z.core.$strict>;
 export type VaultIndex = z.infer<typeof VaultIndexSchema>;

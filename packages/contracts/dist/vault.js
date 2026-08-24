@@ -47,6 +47,12 @@ export const VaultMutationPhaseSchema = z.enum([
     "index-applied",
     "conflicted"
 ]);
+export const VaultMutationDestinationAncestorSchema = z.object({
+    id: DriveIdSchema,
+    name: z.string().trim().min(1).max(255),
+    parentId: DriveIdSchema,
+    version: z.string().min(1).max(512)
+}).strict();
 export const VaultPendingMutationSchema = z
     .object({
     id: NoteIdSchema,
@@ -59,6 +65,8 @@ export const VaultPendingMutationSchema = z
     targetName: z.string().trim().min(1).max(255).optional(),
     oldPath: z.string().trim().min(1).max(4096).optional(),
     newPath: z.string().trim().min(1).max(4096).optional(),
+    preflightGeneration: z.number().int().nonnegative().optional(),
+    destinationAncestry: z.array(VaultMutationDestinationAncestorSchema).min(1).max(21).optional(),
     expectedVersion: z.string().min(1).max(512).optional(),
     moveExpectedVersion: z.string().min(1).max(512).optional(),
     originalChecksum: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
@@ -95,11 +103,29 @@ export const RescanStagedRecordSchema = z.object({
     driveVersion: z.string().min(1).max(512),
     attachments: z.array(VaultAttachmentSchema).max(10_000)
 }).strict();
+export const RescanRecoveryErrorSchema = z.enum([
+    "Invalid Markdown frontmatter.",
+    "External change detected. Rescan is reconciling the index."
+]);
 export const RescanRecoveryStateSchema = z.object({
     path: z.string().trim().min(1).max(4096),
     rawSource: z.string().max(100_000),
-    error: z.literal("Invalid Markdown frontmatter.")
+    error: RescanRecoveryErrorSchema
 }).strict();
+export const RescanResponseRecordStateSchema = z.object({
+    noteId: NoteIdSchema,
+    title: NoteTitleSchema,
+    path: z.string().trim().min(1).max(4096),
+    version: z.string().min(1).max(512)
+}).strict();
+export const VaultRescanTransitionSchema = z.object({
+    fromPosition: z.number().int().nonnegative(),
+    fromNonce: z.string().regex(/^[A-Za-z0-9_-]{22}$/u),
+    fromExpiresAt: TimestampSchema,
+    processed: z.number().int().min(0).max(100),
+    records: z.array(RescanResponseRecordStateSchema).max(100),
+    recoveries: z.array(RescanRecoveryStateSchema).max(100)
+}).strict().refine((value) => value.records.length + value.recoveries.length <= 100, { message: "rescan transition response exceeds 100 items" });
 export const VaultRescanStateSchema = z.object({
     scanId: NoteIdSchema,
     baseGeneration: z.number().int().nonnegative(),
@@ -112,7 +138,13 @@ export const VaultRescanStateSchema = z.object({
     seenDriveIds: z.array(DriveIdSchema).max(100_000),
     seenNoteIds: z.array(NoteIdSchema).max(100_000),
     recoveries: z.array(RescanRecoveryStateSchema).max(1_000),
-    deliveredRecoveryCount: z.number().int().nonnegative()
+    deliveredRecoveryCount: z.number().int().nonnegative(),
+    conflictMutationIds: z.array(NoteIdSchema).max(256).default([]),
+    lastTransition: VaultRescanTransitionSchema.nullable().default(null)
+}).strict();
+export const VaultCompletedRescanSchema = VaultRescanTransitionSchema.safeExtend({
+    scanId: NoteIdSchema,
+    baseGeneration: z.number().int().nonnegative()
 }).strict();
 export const VaultIndexSchema = z
     .object({
@@ -120,7 +152,8 @@ export const VaultIndexSchema = z
     generation: z.number().int().nonnegative().default(0),
     entries: z.array(VaultIndexEntrySchema).max(100_000),
     pendingMutations: z.array(VaultPendingMutationSchema).max(256).default([]),
-    rescanState: VaultRescanStateSchema.nullable().default(null)
+    rescanState: VaultRescanStateSchema.nullable().default(null),
+    lastCompletedRescan: VaultCompletedRescanSchema.nullable().default(null)
 })
     .strict();
 export const PreferencesPanelStateSchema = z

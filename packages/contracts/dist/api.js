@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { NoteDocumentSchema, NoteIdSchema, NoteTitleSchema, TimestampSchema } from "./note.js";
 import { PublicIdSchema } from "./publication.js";
-import { PreferencesPanelStateSchema, PreferencesSchema, VaultIndexEntrySchema } from "./vault.js";
+import { PreferencesPanelStateSchema, PreferencesSchema, RescanRecoveryErrorSchema, VaultIndexEntrySchema } from "./vault.js";
 export const MAX_NOTE_SOURCE_BYTES = 100_000;
 const utf8Bytes = (value) => new TextEncoder().encode(value).byteLength;
 const PathSchema = z.string().trim().min(1).max(4096);
@@ -140,10 +140,11 @@ export const RescanVaultResponseSchema = z
     recoveries: z.array(z.object({
         path: PathSchema,
         rawSource: z.string().refine((value) => utf8Bytes(value) <= MAX_NOTE_SOURCE_BYTES),
-        error: z.literal("Invalid Markdown frontmatter.")
+        error: RescanRecoveryErrorSchema
     }).strict()).max(100)
 })
-    .strict();
+    .strict()
+    .refine((value) => value.records.length + value.recoveries.length <= 100, { message: "rescan response exceeds 100 items" });
 export const TrashResponseSchema = z.object({ trashed: z.literal(true) }).strict();
 export const UpdatePreferencesRequestSchema = z
     .object({

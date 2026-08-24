@@ -43,6 +43,20 @@ export interface StorageOperationContext {
   operationBudget?: StorageOperationBudget;
 }
 
+export const assertStorageVersion: (value: unknown) => asserts value is string = (value) => {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 512 ||
+    [...value].some((character) => {
+      const code = character.codePointAt(0) as number;
+      return code <= 31 || code === 127;
+    })
+  ) {
+    throw new Error("invalid storage version");
+  }
+};
+
 /** A storage mutation was rejected before it could reach the backing store. */
 export class StorageMutationNotAppliedError extends Error {
   public constructor() {

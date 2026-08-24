@@ -1,4 +1,4 @@
-import { StorageOperationBudgetExceededError } from "./storage-port.js";
+import { assertStorageVersion, StorageOperationBudgetExceededError } from "./storage-port.js";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const SHORTCUT_MIME_TYPE = "application/vnd.google-apps.shortcut";
 const MAX_FILE_ID_LENGTH = 512;
@@ -129,6 +129,7 @@ export class RootBoundaryStorage {
         return file;
     }
     async updateText(input, context) {
+        assertStorageVersion(input.expectedVersion);
         await this.assertInside(input.fileId, context);
         const file = await this.storage.updateText(input, context);
         if (file.id !== input.fileId) {
@@ -139,6 +140,7 @@ export class RootBoundaryStorage {
         return file;
     }
     async move(input, context) {
+        assertStorageVersion(input.expectedVersion);
         await this.assertInside(input.fileId, context);
         await this.assertInside(input.fromParentId, context);
         await this.assertInside(input.toParentId, context);

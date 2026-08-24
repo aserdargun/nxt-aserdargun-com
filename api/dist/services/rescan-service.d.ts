@@ -10,7 +10,7 @@ export interface RescanRecord {
 export interface RescanRecovery {
     path: string;
     rawSource: string;
-    error: "Invalid Markdown frontmatter.";
+    error: "Invalid Markdown frontmatter." | "External change detected. Rescan is reconciling the index.";
 }
 export interface RescanPage {
     cursor: string | null;

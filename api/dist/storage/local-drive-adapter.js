@@ -4,7 +4,7 @@ import { link, lstat, mkdir, open, readFile, realpath, rename, rmdir, writeFile 
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { StorageVersionConflictError } from "./storage-port.js";
+import { assertStorageVersion, StorageVersionConflictError } from "./storage-port.js";
 import { TRASH_TRANSACTION_SCHEMA_VERSION, isTrashTransactionState, planTrashRecovery, transitionTrashTransaction } from "./trash-transaction.js";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const MAX_FILE_ID_LENGTH = 512;
@@ -113,14 +113,13 @@ export class LocalDriveAdapter {
             return this.toStoredFile(file);
         });
     }
-    updateText(input, context) {
+    async updateText(input, context) {
+        assertStorageVersion(input.expectedVersion);
         context?.operationBudget?.consume();
         return this.mutate(async (metadata) => {
             assertMimeType(input.mimeType);
             const file = this.getActiveContentFile(metadata, input.fileId);
-            // Keep runtime compatibility for callers compiled against the prior boundary;
-            // all current production mutations supply this required precondition.
-            if (input.expectedVersion !== undefined && file.version !== input.expectedVersion) {
+            if (file.version !== input.expectedVersion) {
                 throw new StorageVersionConflictError();
             }
             const bytes = new TextEncoder().encode(input.text);
@@ -132,16 +131,15 @@ export class LocalDriveAdapter {
             return this.toStoredFile(file);
         });
     }
-    move(input, context) {
+    async move(input, context) {
+        assertStorageVersion(input.expectedVersion);
         context?.operationBudget?.consume();
         return this.mutate(async (metadata) => {
             if (input.newName !== undefined) {
                 assertName(input.newName);
             }
             const file = this.getActiveFile(metadata, input.fileId);
-            // Runtime guard for older test fixtures; the StoragePort type and all
-            // production callers require the observed version.
-            if (input.expectedVersion !== undefined && file.version !== input.expectedVersion) {
+            if (file.version !== input.expectedVersion) {
                 throw new StorageVersionConflictError();
             }
             if (file.kind === "root") {

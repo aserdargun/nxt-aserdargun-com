@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import { SystemFileStore } from "../src/services/system-file-store.js";
 import { VaultService } from "../src/services/vault-service.js";
 import { LocalDriveAdapter } from "../src/storage/local-drive-adapter.js";
-import { StorageMutationNotAppliedError, type StoragePort } from "../src/storage/storage-port.js";
+import { StorageMutationNotAppliedError, StorageVersionConflictError, type StoragePort, type StoredFile } from "../src/storage/storage-port.js";
 
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 
@@ -108,6 +108,39 @@ const gateFirstReservation = (base: SystemFileStore<VaultIndex>) => {
     }
   } as unknown as SystemFileStore<VaultIndex>;
   return { store, didEnter, release, observed };
+};
+
+const interleaveAfterReservation = (
+  base: SystemFileStore<VaultIndex>,
+  matches: (mutation: VaultPendingMutation) => boolean,
+  interleave: () => Promise<void>
+) => {
+  let fired = false;
+  const observed: VaultPendingMutation[] = [];
+  const store = {
+    read: base.read.bind(base),
+    update: base.update.bind(base),
+    compareAndSet: async (
+      transform: (current: VaultIndex) => VaultIndex,
+      options?: { attempts?: number }
+    ) => {
+      let matchedReservation = false;
+      const result = await base.compareAndSet((current) => {
+        const before = new Set(current.pendingMutations.map((mutation) => mutation.id));
+        const next = transform(current);
+        const added = next.pendingMutations.filter((mutation) => !before.has(mutation.id));
+        observed.push(...added);
+        matchedReservation ||= added.some(matches);
+        return next;
+      }, options);
+      if (!fired && matchedReservation) {
+        fired = true;
+        await interleave();
+      }
+      return result;
+    }
+  } as unknown as SystemFileStore<VaultIndex>;
+  return { store, observed, didFire: () => fired };
 };
 
 describe("persisted vault mutation coordination", () => {
@@ -662,5 +695,110 @@ describe("persisted vault mutation coordination", () => {
     await pending;
 
     expect(gate.observed.at(-1)?.oldPath).toBe("Notes/Plans/Parent - Renamed/Child");
+  });
+
+  it.each([
+    ["rename", "Notes/Inbox/Destination-Renamed/Leaf/Moved - Source", async (
+      fixture: Awaited<ReturnType<typeof setup>>,
+      ancestor: StoredFile
+    ) => fixture.storage.move({
+      fileId: ancestor.id,
+      fromParentId: fixture.folders.inboxId,
+      toParentId: fixture.folders.inboxId,
+      expectedVersion: ancestor.version,
+      newName: "Destination-Renamed"
+    })],
+    ["move", "Notes/Archive/Destination/Leaf/Moved - Source", async (
+      fixture: Awaited<ReturnType<typeof setup>>,
+      ancestor: StoredFile
+    ) => fixture.storage.move({
+      fileId: ancestor.id,
+      fromParentId: fixture.folders.inboxId,
+      toParentId: fixture.folders.archiveId,
+      expectedVersion: ancestor.version
+    })]
+  ])("retries a combined folder update when its destination ancestor is externally %s after reservation", async (_change, expectedFolderPath, changeAncestor) => {
+    const fixture = await setup();
+    const service = fixture.serviceFor(randomUUID());
+    const source = await service.createFolder({ parentId: fixture.folders.plansId, name: "Source" });
+    const note = await service.createNote({ title: "Nested", body: "body", folderId: source.id });
+    const destinationAncestor = await service.createFolder({ parentId: fixture.folders.inboxId, name: "Destination" });
+    const destination = await service.createFolder({ parentId: destinationAncestor.id, name: "Leaf" });
+    const interleaved = interleaveAfterReservation(
+      fixture.storeFor(),
+      (mutation) => mutation.folderId === source.id,
+      () => changeAncestor(fixture, destinationAncestor).then(() => undefined)
+    );
+
+    const moved = await fixture.serviceFor(randomUUID(), fixture.storage, interleaved.store).updateFolder({
+      folderId: source.id,
+      expectedVersion: source.version,
+      name: "Moved-Source",
+      parentId: destination.id
+    });
+
+    const actualFolder = (await service.vaultTree()).folders.find((folder) => folder.id === moved.id);
+    const indexedNote = (await fixture.storeFor().read()).value.entries.find((entry) => entry.id === note.note.frontmatter.id);
+    expect(interleaved.didFire()).toBe(true);
+    expect(actualFolder?.path).toBe(expectedFolderPath);
+    expect(indexedNote?.path).toBe(`${expectedFolderPath}/Nested.md`);
+    expect(interleaved.observed.filter((mutation) => mutation.folderId === source.id)).toHaveLength(2);
+  });
+
+  it("does not move a folder when a destination ancestor is trashed after reservation", async () => {
+    const fixture = await setup();
+    const service = fixture.serviceFor(randomUUID());
+    const source = await service.createFolder({ parentId: fixture.folders.plansId, name: "Source" });
+    const destinationAncestor = await service.createFolder({ parentId: fixture.folders.inboxId, name: "Destination" });
+    const destination = await service.createFolder({ parentId: destinationAncestor.id, name: "Leaf" });
+    let sourceMoves = 0;
+    const counted = delegate(fixture.storage, {
+      move: async (input) => {
+        if (input.fileId === source.id) sourceMoves += 1;
+        return fixture.storage.move(input);
+      }
+    });
+    const interleaved = interleaveAfterReservation(
+      fixture.storeFor(counted),
+      (mutation) => mutation.folderId === source.id,
+      async () => { await fixture.storage.trash(destinationAncestor.id); }
+    );
+
+    await expect(fixture.serviceFor(randomUUID(), counted, interleaved.store).updateFolder({
+      folderId: source.id,
+      expectedVersion: source.version,
+      name: "Moved-Source",
+      parentId: destination.id
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+
+    expect(sourceMoves).toBe(0);
+    await expect(fixture.storage.get(source.id)).resolves.toMatchObject({
+      name: "Source",
+      parentIds: [fixture.folders.plansId],
+      version: source.version
+    });
+    expect((await fixture.storeFor().read()).value.pendingMutations.some((mutation) => mutation.folderId === source.id)).toBe(false);
+  });
+
+  it("classifies a post-reservation folder move version conflict as a trusted conflict", async () => {
+    const fixture = await setup();
+    const service = fixture.serviceFor(randomUUID());
+    const source = await service.createFolder({ parentId: fixture.folders.plansId, name: "Source" });
+    const conflicted = delegate(fixture.storage, {
+      move: async (input) => {
+        if (input.fileId === source.id) throw new StorageVersionConflictError();
+        return fixture.storage.move(input);
+      }
+    });
+
+    await expect(fixture.serviceFor(randomUUID(), conflicted).updateFolder({
+      folderId: source.id,
+      expectedVersion: source.version,
+      name: "Renamed"
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await fixture.storeFor().read()).value.pendingMutations).toContainEqual(expect.objectContaining({
+      folderId: source.id,
+      phase: "conflicted"
+    }));
   });
 });

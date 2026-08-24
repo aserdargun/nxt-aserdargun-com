@@ -118,6 +118,9 @@ export declare class VaultService {
     private moveNoteAttempt;
     private reserve;
     private revalidateReservedFile;
+    private revalidateDestinationAncestry;
+    private assertOwnedReservation;
+    private matchesDestinationAncestry;
     private checkpointMutation;
     private markMutationConflicted;
     private finalizeEntry;
@@ -143,9 +146,9 @@ export declare class VaultService {
     private assertMarkdownFile;
     private assertFolder;
     private assertFolderDestination;
-    private assertDestinationOutsideSubtree;
     private folderDepth;
     private folderPath;
+    private folderAncestry;
     private notePath;
     private assertNameAvailable;
     private listAllChildren;

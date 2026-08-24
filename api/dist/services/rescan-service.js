@@ -8,7 +8,6 @@ const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const MAX_ENTRIES_PER_PAGE = 100;
 const MAX_OPERATIONS_PER_PAGE = 20;
 const MAX_DRIVE_OPERATIONS_PER_REQUEST = 100;
-const PERSISTENCE_OPERATION_RESERVE = 70;
 const MAX_INDEX_CAS_ATTEMPTS = 3;
 const SCAN_TTL_MS = 10 * 60 * 1_000;
 const MAX_FOLDER_DEPTH = 20;
@@ -31,12 +30,17 @@ export class RescanService {
         let state;
         if (input.cursor === null) {
             state = await this.startScan(context);
+            return { cursor: this.signCursor(state), processed: 0, complete: false, records: [], recoveries: [] };
         }
         else {
-            state = await this.resumeScan(input.cursor, context);
+            const resumed = await this.resumeScan(input.cursor, context);
+            if (resumed.kind === "replay")
+                return resumed.page;
+            state = resumed.state;
         }
         const priorPosition = state.position;
         const priorNonce = state.nonce;
+        const priorExpiresAt = state.expiresAt;
         const priorDeliveredRecoveryCount = state.deliveredRecoveryCount;
         const committedIndex = (await this.options.indexStore.read(context)).value;
         const pageRecords = [];
@@ -44,8 +48,10 @@ export class RescanService {
         let operations = 0;
         let listedEntries = 0;
         let processed = 0;
+        const traversalStart = operationBudget.used;
+        const traversalAllowance = Math.max(1, Math.floor(operationBudget.remaining / 4));
         while (state.queue.length > 0 && operations < MAX_OPERATIONS_PER_PAGE &&
-            operationBudget.remaining > PERSISTENCE_OPERATION_RESERVE) {
+            operationBudget.used - traversalStart < traversalAllowance) {
             const current = state.queue[0];
             if (current === undefined)
                 break;
@@ -159,24 +165,36 @@ export class RescanService {
             state.deliveredRecoveryCount += 1;
         }
         const complete = state.queue.length === 0 && state.deliveredRecoveryCount === state.recoveries.length;
+        const transition = {
+            fromPosition: priorPosition,
+            fromNonce: priorNonce,
+            fromExpiresAt: priorExpiresAt,
+            processed,
+            records: pageRecords.map((record) => ({ ...record })),
+            recoveries: recoveries.map((recovery) => ({ ...recovery }))
+        };
         if (complete) {
-            await this.completeScan(state, priorPosition, priorNonce, context);
+            await this.completeScan(state, transition, context);
             return { cursor: null, processed, complete: true, records: pageRecords, recoveries };
         }
         if (operations === 0 && state.deliveredRecoveryCount === priorDeliveredRecoveryCount) {
             return { cursor: this.signCursor(state), processed, complete: false, records: pageRecords, recoveries };
         }
-        state = await this.persistProgress(state, priorPosition, priorNonce, context);
+        state = await this.persistProgress(state, transition, context);
         return { cursor: this.signCursor(state), processed, complete: false, records: pageRecords, recoveries };
     }
     async startScan(context) {
         const now = this.now();
         let created;
         await this.options.indexStore.compareAndSet((index) => {
-            if (index.pendingMutations.length > 0)
-                throw new ApiResponseError("CONFLICT");
             if (index.rescanState !== null && Date.parse(index.rescanState.expiresAt) > now.getTime())
                 throw new ApiResponseError("CONFLICT");
+            if (index.pendingMutations.some((mutation) => mutation.phase !== "conflicted"))
+                throw new ApiResponseError("CONFLICT");
+            const conflicts = index.pendingMutations.map((mutation) => ({
+                id: mutation.id,
+                path: mutation.oldPath ?? mutation.newPath ?? "Notes"
+            }));
             created = {
                 scanId: randomUUID(),
                 baseGeneration: index.generation,
@@ -188,8 +206,14 @@ export class RescanService {
                 records: [],
                 seenDriveIds: [],
                 seenNoteIds: [],
-                recoveries: [],
-                deliveredRecoveryCount: 0
+                recoveries: conflicts.map((conflict) => ({
+                    path: conflict.path,
+                    rawSource: "",
+                    error: "External change detected. Rescan is reconciling the index."
+                })),
+                deliveredRecoveryCount: 0,
+                conflictMutationIds: conflicts.map((conflict) => conflict.id),
+                lastTransition: null
             };
             return { ...index, rescanState: created };
         }, { attempts: MAX_INDEX_CAS_ATTEMPTS, context });
@@ -199,26 +223,40 @@ export class RescanService {
         const payload = this.verifyCursor(cursor);
         const snapshot = await this.options.indexStore.read(context);
         const state = snapshot.value.rescanState;
-        if (state === null || Date.parse(state.expiresAt) <= this.now().getTime())
+        if (Date.parse(payload.expiresAt) <= this.now().getTime())
             throw new ApiResponseError("CONFLICT");
-        if (payload.scanId !== state.scanId || payload.generation !== state.baseGeneration || payload.position !== state.position ||
-            payload.nonce !== state.nonce || payload.expiresAt !== state.expiresAt)
+        if (state === null) {
+            const completed = snapshot.value.lastCompletedRescan;
+            if (completed === null || completed.scanId !== payload.scanId || completed.baseGeneration !== payload.generation ||
+                !transitionMatches(completed, payload))
+                throw new ApiResponseError("CONFLICT");
+            return { kind: "replay", page: transitionPage(completed, null, true) };
+        }
+        if (Date.parse(state.expiresAt) <= this.now().getTime())
             throw new ApiResponseError("CONFLICT");
-        return structuredClone(state);
+        if (payload.scanId === state.scanId && payload.generation === state.baseGeneration && payload.position === state.position &&
+            payload.nonce === state.nonce && payload.expiresAt === state.expiresAt)
+            return { kind: "current", state: structuredClone(state) };
+        if (payload.scanId === state.scanId && payload.generation === state.baseGeneration && state.lastTransition !== null &&
+            transitionMatches(state.lastTransition, payload))
+            return { kind: "replay", page: transitionPage(state.lastTransition, this.signCursor(state), false) };
+        throw new ApiResponseError("CONFLICT");
     }
-    async persistProgress(state, priorPosition, priorNonce, context) {
+    async persistProgress(state, transition, context) {
         state.position += 1;
         state.nonce = randomBytes(16).toString("base64url");
         state.expiresAt = new Date(this.now().getTime() + SCAN_TTL_MS).toISOString();
+        state.lastTransition = transition;
         await this.options.indexStore.compareAndSet((index) => {
             const current = index.rescanState;
-            if (current === null || current.scanId !== state.scanId || current.position !== priorPosition || current.nonce !== priorNonce)
+            if (current === null || current.scanId !== state.scanId || current.position !== transition.fromPosition ||
+                current.nonce !== transition.fromNonce || current.expiresAt !== transition.fromExpiresAt)
                 throw new ApiResponseError("CONFLICT");
             return { ...index, rescanState: state };
         }, { attempts: MAX_INDEX_CAS_ATTEMPTS, context });
         return state;
     }
-    async completeScan(state, priorPosition, priorNonce, context) {
+    async completeScan(state, transition, context) {
         let entries;
         try {
             entries = deriveIndex(state.records).entries;
@@ -228,9 +266,21 @@ export class RescanService {
         }
         await this.options.indexStore.compareAndSet((index) => {
             const current = index.rescanState;
-            if (current === null || current.scanId !== state.scanId || current.position !== priorPosition || current.nonce !== priorNonce)
+            if (current === null || current.scanId !== state.scanId || current.position !== transition.fromPosition ||
+                current.nonce !== transition.fromNonce || current.expiresAt !== transition.fromExpiresAt)
                 throw new ApiResponseError("CONFLICT");
-            return { ...index, generation: index.generation + 1, entries, rescanState: null };
+            const captured = new Set(state.conflictMutationIds);
+            if (index.pendingMutations.some((mutation) => mutation.phase !== "conflicted" || !captured.has(mutation.id)) ||
+                captured.size !== index.pendingMutations.length)
+                throw new ApiResponseError("CONFLICT");
+            return {
+                ...index,
+                generation: index.generation + 1,
+                entries,
+                pendingMutations: index.pendingMutations.filter((mutation) => !captured.has(mutation.id)),
+                rescanState: null,
+                lastCompletedRescan: { scanId: state.scanId, baseGeneration: state.baseGeneration, ...transition }
+            };
         }, { attempts: MAX_INDEX_CAS_ATTEMPTS, context });
     }
     signCursor(state) {
@@ -272,8 +322,17 @@ const isCursorPayload = (value) => {
     if (typeof value !== "object" || value === null || Array.isArray(value) || Object.keys(value).length !== 5)
         return false;
     const record = value;
-    return typeof record.scanId === "string" && typeof record.generation === "number" && Number.isSafeInteger(record.generation) &&
-        typeof record.position === "number" && Number.isSafeInteger(record.position) && typeof record.nonce === "string" &&
+    return typeof record.scanId === "string" && typeof record.generation === "number" && Number.isSafeInteger(record.generation) && record.generation >= 0 &&
+        typeof record.position === "number" && Number.isSafeInteger(record.position) && record.position >= 0 && typeof record.nonce === "string" &&
         /^[A-Za-z0-9_-]{22}$/u.test(record.nonce) && typeof record.expiresAt === "string" && Number.isFinite(Date.parse(record.expiresAt));
 };
+const transitionMatches = (transition, payload) => transition.fromPosition === payload.position && transition.fromNonce === payload.nonce &&
+    transition.fromExpiresAt === payload.expiresAt;
+const transitionPage = (transition, cursor, complete) => ({
+    cursor,
+    processed: transition.processed,
+    complete,
+    records: transition.records.map((record) => ({ ...record })),
+    recoveries: transition.recoveries.map((recovery) => ({ ...recovery }))
+});
 //# sourceMappingURL=rescan-service.js.map
