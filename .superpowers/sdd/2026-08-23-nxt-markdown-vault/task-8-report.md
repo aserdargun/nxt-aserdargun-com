@@ -222,3 +222,110 @@ None. The unrelated `pnpm artifact:verify` script references a missing `scripts/
 ## External state
 
 No live Google Drive, OAuth, credentials, `.env.local`, DNS, Azure, GitHub, deployment, remote repository, or other external mutable state was accessed or changed. All tests used local/fake adapters; live integration remained skipped.
+
+# Fix round 2/5
+
+## Status
+
+DONE
+
+## Files
+
+- `api/src/services/attachment-service.ts`: marker-proven recovery, version-conditional Trash, fenced committed-CAS re-reads, recovery leases, and terminal conflicts for ambiguous artifacts.
+- `api/src/storage/{storage-port,local-drive-adapter,google-drive-adapter,google-drive-client}.ts`: bounded internal app properties and conditional Trash.
+- `packages/domain/src/{render-markdown,attachment-references}.ts`: rendering-parser AST projection plus canonical URL segment handling.
+- `api/src/services/attachment-policy.ts`: strict WebP/GIF/classic-xref-PDF validation.
+- `packages/contracts/src/vault.ts`: discriminated 255-folder/180-attachment pending-name validation.
+- Regression tests: contracts, attachment policy/service, Google adapter, and domain attachment references.
+
+## RED evidence
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/contracts test
+```
+
+```text
+Test Files  1 failed (1)
+Tests  1 failed | 8 passed (9)
+FAIL keeps folder pending names at 255 and attachment pending names at 180 code points
+Expected true, received false for a 255-character create-folder targetName.
+Exit status 1
+```
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/domain exec vitest run test/attachment-references.test.ts
+```
+
+```text
+Test Files  1 failed (1)
+Tests  1 failed | 2 passed (3)
+FAIL uses the renderer parser for collapsed definitions and decodes path segments only after syntax checks
+Expected projection to contain the percent-decoded attachment filename; received [].
+Exit status 1
+```
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/api exec vitest run test/attachment-service.test.ts
+```
+
+```text
+Test Files  1 failed (1)
+Tests  1 failed | 22 passed (23)
+FAIL stores a readback-verified asset only beneath its resolved note folder and projects no raw ID
+Expected a bounded nxtAttachmentMutation marker; received undefined.
+Exit status 1
+```
+
+## GREEN evidence
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/api exec vitest run test/attachment-service.test.ts test/attachment-policy.test.ts
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/domain test -- attachment-references.test.ts render-markdown.test.ts
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/contracts test
+```
+
+```text
+api: Test Files 2 passed (2), Tests 43 passed (43)
+domain: Test Files 4 passed (4), Tests 19 passed (19)
+contracts: Test Files 1 passed (1), Tests 9 passed (9)
+Exit status 0
+```
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm lint
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm typecheck
+env -u GOOGLE_CLIENT_ID -u GOOGLE_CLIENT_SECRET -u GOOGLE_REFRESH_TOKEN -u NXT_VAULT_DRIVE_FOLDER_ID -u NXT_PRIVATE_DRIVE_FOLDER_ID -u NXT_VAULT_INDEX_DRIVE_FILE_ID -u NXT_PREFERENCES_DRIVE_FILE_ID -u NXT_NOTES_DRIVE_FOLDER_ID -u NXT_INBOX_DRIVE_FOLDER_ID -u NXT_PLANS_DRIVE_FOLDER_ID -u NXT_ARCHIVE_DRIVE_FOLDER_ID -u NXT_ASSETS_DRIVE_FOLDER_ID -u RUN_GOOGLE_DRIVE_INTEGRATION PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm test
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm build
+git diff --check
+```
+
+```text
+eslint .
+packages/contracts/domain/api typecheck: Done
+packages/contracts: 9 passed
+packages/domain: 19 passed
+api: 325 passed, 1 skipped
+packages/contracts/domain/api build: Done
+Exit status 0
+```
+
+## Root verification and self-review
+
+- Create records a phase boundary, random marker, and revalidates parent/name/size/checksum/detected MIME/version/marker before projection or delivery. Same-name/checksum alone is never ownership proof.
+- Recovery re-reads its committed owner/fence claim, has a future lease, clears only expired non-Drive reservations, waits bounded unknown-create horizons, and hands ambiguous artifacts to existing rescan as terminal conflicts. Task 7 still skips live attachment recovery.
+- Trash binds owner source checksum/path and index generation/projection, blocks pending cross-note source mutations, checks storage version, and removes only the exact projection after verified trashed readback.
+- Projection uses the renderer Remark AST for Markdown links/references and the existing wiki dialect; query/fragment syntax is rejected before segment decoding. Opaque token grammar remains strict.
+- WebP requires VP8/VP8L image content, GIF requires an image/LZW payload, and PDF requires bounded classic-xref Catalog validation. No routes changed; the approved 3 Task 8 and existing 12 Task 7 routes remain exact. `file-type@22.0.2` remains pinned.
+
+## Commits
+
+- Implementation: `2c3fddacfe2eaedc9ca0d9236620ffa6d31a08ed` (`fix: harden attachment recovery`).
+- Report: recorded in the report commit below.
+
+## Concerns
+
+None.
+
+## External state
+
+No live Google Drive, OAuth, credentials, `.env.local`, DNS, Azure, GitHub, deployments, or other external mutable state was accessed or changed. Local/fake adapters only; live Drive integration remained skipped.
