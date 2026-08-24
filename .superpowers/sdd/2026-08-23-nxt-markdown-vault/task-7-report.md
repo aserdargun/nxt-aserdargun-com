@@ -272,3 +272,153 @@ to remain the CAS authority, sharding or journaling *inside the same file* still
 rewrites all bytes. The measured probe above confirms bounded call count but
 proportional serialized bytes and transform work. No unsupported partial-write
 or vault-size-independent claim is made.
+
+# Fix round 3/5
+
+Status: **DONE**
+
+Implementation commit: `40cc627dc5aa3b1a966ae7c6a70af6c27ffc75ce`
+
+Implementation tree: `d5a98e34f0ba0d3630f8437e6502baf193d7d7eb`
+
+Round 2 findings B/F/G and the fresh review's acceptance of the measured
+single-file proportionality remain unchanged. Dependency pins,
+`pnpm-lock.yaml`, the 12-route set, provisioned system-file names, and the live
+integration boundary are unchanged.
+
+## Round 3 RED evidence
+
+Every command used Node 22 through the explicit
+`PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH` prefix. No live
+integration variable was enabled. RED and focused commands below ran from the
+`api` directory; root commands ran from the worktree root.
+
+1. `api/test/local-drive-adapter.test.ts` and
+   `api/test/google-drive-adapter.test.ts`
+
+   Command:
+   `PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm exec vitest run test/local-drive-adapter.test.ts test/google-drive-adapter.test.ts`
+
+   Output: **2 failed, 57 passed**. Local move overwrote a file whose observed
+   version had changed, and the Google move issued only the update request with
+   no conditional header instead of the required `If-Match` precondition.
+
+2. `api/test/vault-transactions.test.ts`
+
+   Command:
+   `PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm exec vitest run test/vault-transactions.test.ts`
+
+   Output: **7 failed, 15 passed**. The failures reproduced recovery
+   overwriting an external folder rename, external folder parent move, and
+   external note content; exact safe replay omitted a move version
+   precondition; and note update, note move, and nested folder update reserved
+   stale paths when an ancestor completed between preflight and reservation.
+
+3. `api/test/vault-functions.test.ts` and
+   `api/test/rescan-persistence.test.ts`
+
+   Command:
+   `PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm exec vitest run test/vault-functions.test.ts test/rescan-persistence.test.ts`
+
+   Output: **2 failed, 19 passed**. A real `RootBoundaryStorage` projection over
+   a counting low-level adapter performed **563** Drive-like calls in one
+   request, and shuffled provider folder order made offset pagination duplicate
+   `Notes/Charlie` while omitting `Notes/Bravo`.
+
+## Round 3 implementation
+
+- `StoragePort.move` now requires the exact observed version. The local adapter
+  checks it inside its metadata lock. The Google adapter re-reads metadata,
+  verifies that Drive version, obtains the response ETag, and sends the move
+  through `files.update` with `If-Match`; HTTP `412` is classified as an
+  optimistic conflict. The Google client wrapper preserves the conditional
+  header while retaining disabled transport retries.
+- Mutation intents persist the original checksum, the exact version prepared
+  for a subsequent move, and a terminal internal `conflicted` phase. Recovery
+  first classifies the current identity/checksum/path/parent/name/version:
+  already-intended state finalizes, exact original or exact prepared state can
+  be conditionally replayed, and any intervening external state/version change
+  is retained as a static conflict without overwriting it. Conflicted scopes
+  continue to block overlapping work while unrelated operations proceed.
+- Note update/move and folder update establish reservations against the exact
+  index generation and note identity/path/Drive version used by preflight.
+  Generation or entry drift raises an internal stale-reservation signal and
+  retries from fresh metadata. After reservation, the service verifies
+  reservation ownership/fence and re-reads the exact Drive parent, name,
+  version, and ancestry-derived path before beginning any Drive mutation.
+- A request-scoped `StorageOperationBudget` is threaded only through rescan,
+  through `SystemFileStore`, `RootBoundaryStorage`, and into the lowest adapter
+  calls. Every metadata ancestry read, list, media read, index read/write
+  preflight, write, readback, and retry consumes the same 100-operation token.
+  Traversal uses one-child pages and reserves capacity for persisted progress;
+  exhaustion is recognized before call 101 and leaves the existing signed scan
+  cursor/state resumable by a fresh service instance.
+- Folder tree collection sorts each provider page and the completed projection
+  by normalized path plus internal identity before hashing, descendant counts,
+  confirmations, and pagination. The handler applies the same deterministic
+  projection rule defensively, so identical tree versions cannot reorder
+  offset pages.
+
+## Covering tests and GREEN evidence
+
+- `api/test/google-drive-adapter.test.ts`
+- `api/test/google-drive-client.test.ts`
+- `api/test/local-drive-adapter.test.ts`
+- `api/test/vault-transactions.test.ts`
+- `api/test/rescan-persistence.test.ts`
+- `api/test/vault-functions.test.ts`
+- existing focused service/storage coverage in `api/test/vault-service.test.ts`,
+  `api/test/rescan-service.test.ts`, `api/test/preferences-service.test.ts`, and
+  `api/test/root-boundary.test.ts`
+
+Focused round-3 command:
+
+`PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm exec vitest run test/google-drive-adapter.test.ts test/google-drive-client.test.ts test/local-drive-adapter.test.ts test/vault-transactions.test.ts test/vault-functions.test.ts test/rescan-persistence.test.ts`
+
+Output: **6 files passed, 104 tests passed**.
+
+Expanded focused service/storage/functions command:
+
+`PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm exec vitest run test/vault-service.test.ts test/vault-transactions.test.ts test/rescan-service.test.ts test/rescan-persistence.test.ts test/preferences-service.test.ts test/vault-functions.test.ts test/google-drive-adapter.test.ts test/google-drive-client.test.ts test/local-drive-adapter.test.ts test/root-boundary.test.ts`
+
+Output: **10 files passed, 127 tests passed**.
+
+## Root verification
+
+Lint and typecheck command:
+
+`PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm lint && PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm typecheck`
+
+Output: lint **PASS**; typecheck **PASS** for contracts, domain, and API.
+
+Root test command:
+
+`PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm test`
+
+Output:
+
+```text
+contracts:   8 passed
+domain:     15 passed
+api:       256 passed, 1 live integration test skipped
+```
+
+Build and diff command:
+
+`PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH NXT_RUN_GOOGLE_DRIVE_INTEGRATION= pnpm build && git diff --check`
+
+Output: contracts/domain/API build **PASS**; diff check **PASS**.
+
+The first self-review lint run reported one `preserve-caught-error` violation in
+`RootBoundaryStorage`; attaching the dependency error as the internal cause
+resolved it, and the final lint above is clean. No error cause is included in a
+public response.
+
+No live Google Drive, OAuth, network, credentials, `.env.local`, or external
+state was accessed. The opt-in live integration test remained unset/skipped.
+
+## Concerns
+
+None. Live Google behavior remains intentionally unverified by the binding
+offline task boundary; the production conditional request shape is covered by
+the adapter and wrapped-client tests.
