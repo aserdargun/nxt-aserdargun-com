@@ -213,7 +213,8 @@ export type VaultRescanState = z.infer<typeof VaultRescanStateSchema>;
 
 export const VaultCompletedRescanSchema = VaultRescanTransitionSchema.safeExtend({
   scanId: NoteIdSchema,
-  baseGeneration: z.number().int().nonnegative()
+  baseGeneration: z.number().int().nonnegative(),
+  finalizationAttemptId: z.string().regex(/^[A-Za-z0-9_-]{22}$/u).nullable().default(null)
 }).strict();
 
 export const VaultIndexSchema = z

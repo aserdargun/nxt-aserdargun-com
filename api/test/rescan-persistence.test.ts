@@ -279,6 +279,46 @@ const createOutcomeUnknownStore = (fixture: Awaited<ReturnType<typeof setup>>) =
   };
 };
 
+const createCompletionRaceStore = (fixture: Awaited<ReturnType<typeof setup>>) => {
+  let completionArrivals = 0;
+  let releaseArrivals!: () => void;
+  let winnerWriteApplied = false;
+  let releaseLoser!: () => void;
+  const bothArrived = new Promise<void>((resolve) => { releaseArrivals = resolve; });
+  const winnerReadBack = new Promise<void>((resolve) => { releaseLoser = resolve; });
+  const storage = delegate(fixture.storage, {
+    readText: async (fileId, context) => {
+      const readback = await fixture.storage.readText(fileId, context);
+      if (fileId === fixture.indexFile.id && winnerWriteApplied && JSON.parse(readback.text).rescanState === null) {
+        releaseLoser();
+      }
+      return readback;
+    },
+    updateText: async (input, context) => {
+      const parsed = input.fileId === fixture.indexFile.id ? JSON.parse(input.text) as { rescanState?: unknown } : undefined;
+      if (parsed?.rescanState === null && completionArrivals < 2) {
+        completionArrivals += 1;
+        if (completionArrivals === 2) releaseArrivals();
+        await bothArrived;
+        if (!winnerWriteApplied) {
+          const updated = await fixture.storage.updateText(input, context);
+          winnerWriteApplied = true;
+          return updated;
+        }
+        await winnerReadBack;
+      }
+      return fixture.storage.updateText(input, context);
+    }
+  });
+  return new SystemFileStore({
+    storage,
+    fileId: fixture.indexFile.id,
+    parentId: "private",
+    name: "vault-index.json",
+    schema: VaultIndexSchema
+  });
+};
+
 describe("persisted rescan staging", () => {
   it("recovers an accepted progress transition after the prior cursor expires and continues on a fresh instance", async () => {
     const fixture = await setup();
@@ -375,6 +415,112 @@ describe("persisted rescan staging", () => {
     expect(completed.entries).toHaveLength(1);
     expect(completed.entries[0]).toMatchObject({ id: noteId, title: "Actual Drive title" });
     expect(completed.rescanState).toBeNull();
+    expect(completed.lastCompletedRescan?.finalizationAttemptId).toMatch(/^[A-Za-z0-9_-]{22}$/u);
+  });
+
+  it("lets exactly one byte-identical finalizer win without the losing CAS caller rolling it back", async () => {
+    const fixture = await setup();
+    const noteId = randomUUID();
+    const source = serializeNote({
+      frontmatter: {
+        id: noteId,
+        title: "Concurrent winner",
+        created: "2026-08-24T09:30:00.000Z",
+        updated: "2026-08-24T09:30:00.000Z",
+        tags: [],
+        aliases: []
+      },
+      body: "# Winner\n"
+    });
+    await fixture.storage.createText({ parentId: fixture.notes.id, name: "Winner.md", mimeType: "text/markdown", text: source });
+    const indexStore = createCompletionRaceStore(fixture);
+    const service = () => new RescanService({
+      storage: fixture.storage,
+      indexStore,
+      notesFolderId: fixture.notes.id,
+      cursorSecret: "concurrent-finalizer-secret-more-than-32-bytes",
+      now: () => new Date("2026-08-24T09:30:00.000Z")
+    });
+    const started = await service().scanPage({ cursor: null, limit: 100 });
+    const results = await Promise.allSettled([
+      service().scanPage({ cursor: started.cursor, limit: 100 }),
+      service().scanPage({ cursor: started.cursor, limit: 100 })
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejection = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    expect(rejection?.reason).toMatchObject({ code: "CONFLICT" });
+    const completed = (await indexStore.read()).value;
+    expect(completed.entries).toHaveLength(1);
+    expect(completed.entries[0]).toMatchObject({ id: noteId, title: "Concurrent winner" });
+    expect(completed.rescanState).toBeNull();
+    expect(completed.lastCompletedRescan?.finalizationAttemptId).toMatch(/^[A-Za-z0-9_-]{22}$/u);
+  });
+
+  it("never rolls an accepted completion back over a later index version", async () => {
+    const fixture = await setup();
+    const noteId = randomUUID();
+    const source = serializeNote({
+      frontmatter: {
+        id: noteId,
+        title: "Later state",
+        created: "2026-08-24T09:45:00.000Z",
+        updated: "2026-08-24T09:45:00.000Z",
+        tags: [],
+        aliases: []
+      },
+      body: "# Later\n"
+    });
+    await fixture.storage.createText({ parentId: fixture.notes.id, name: "Later.md", mimeType: "text/markdown", text: source });
+    let armed = false;
+    let injectReadbackLoss = false;
+    const storage = delegate(fixture.storage, {
+      updateText: async (input, context) => {
+        const updated = await fixture.storage.updateText(input, context);
+        if (input.fileId === fixture.indexFile.id && armed && JSON.parse(input.text).rescanState === null) {
+          armed = false;
+          injectReadbackLoss = true;
+        }
+        return updated;
+      },
+      readText: async (fileId, context) => {
+        const readback = await fixture.storage.readText(fileId, context);
+        if (fileId === fixture.indexFile.id && injectReadbackLoss) {
+          injectReadbackLoss = false;
+          const later = JSON.parse(readback.text) as { generation: number } & Record<string, unknown>;
+          await fixture.storage.updateText({
+            fileId,
+            expectedVersion: readback.file.version,
+            mimeType: "application/json",
+            text: `${JSON.stringify({ ...later, generation: later.generation + 1 }, null, 2)}\n`
+          }, context);
+          throw new Error("injected readback loss after a later write");
+        }
+        return readback;
+      }
+    });
+    const indexStore = new SystemFileStore({
+      storage,
+      fileId: fixture.indexFile.id,
+      parentId: "private",
+      name: "vault-index.json",
+      schema: VaultIndexSchema
+    });
+    const service = new RescanService({
+      storage,
+      indexStore,
+      notesFolderId: fixture.notes.id,
+      cursorSecret: "later-state-finalizer-secret-more-than-32-bytes",
+      now: () => new Date("2026-08-24T09:45:00.000Z")
+    });
+    const started = await service.scanPage({ cursor: null, limit: 100 });
+    armed = true;
+    await expect(service.scanPage({ cursor: started.cursor, limit: 100 })).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+
+    const later = (await fixture.indexStore.read()).value;
+    expect(later.generation).toBe(2);
+    expect(later.entries[0]).toMatchObject({ id: noteId, title: "Later state" });
+    expect(later.rescanState).toBeNull();
   });
 
   it("rejects the exact prior cursor once its progress receipt recovery expiry passes", async () => {

@@ -301,6 +301,7 @@ export declare const VaultCompletedRescanSchema: z.ZodObject<{
     }, z.core.$strict>>;
     scanId: z.ZodUUID;
     baseGeneration: z.ZodNumber;
+    finalizationAttemptId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
 }, z.core.$strict>;
 export declare const VaultIndexSchema: z.ZodObject<{
     schemaVersion: z.ZodLiteral<1>;
@@ -495,6 +496,7 @@ export declare const VaultIndexSchema: z.ZodObject<{
         }, z.core.$strict>>;
         scanId: z.ZodUUID;
         baseGeneration: z.ZodNumber;
+        finalizationAttemptId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
     }, z.core.$strict>>>;
 }, z.core.$strict>;
 export type VaultIndex = z.infer<typeof VaultIndexSchema>;

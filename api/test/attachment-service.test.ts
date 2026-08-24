@@ -21,6 +21,7 @@ import {
 const noteId = "018f47d2-6a34-7b2a-9f21-8a7034963aef";
 const otherNoteId = "018f47d2-6a34-7b2a-9f21-8a7034963af0";
 const png = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=", "base64"));
+const webp = Uint8Array.from(Buffer.from("UklGRiYAAABXRUJQVlA4IBoAAABQAQCdASoBAAEAAgA0JZwABAAAAP75HbIQAA==", "base64"));
 
 const request = (method: string, url: string, body?: unknown, params: Record<string, string> = {}, headers: Record<string, string> = {}): HttpRequest =>
   new HttpRequest({
@@ -263,6 +264,54 @@ describe("AttachmentService", () => {
     expect(uploaded.disposition).toBe("download");
     expect(delivered.disposition).toBe("download");
     expect(delivered.mimeType).toBe("image/png");
+  });
+
+  it("keeps new and legacy WebP projections download-only during verified delivery", async () => {
+    const { service, indexStore } = await setup();
+    const uploaded = await service.upload({ noteId, name: "legacy.webp", declaredMime: "image/webp", bytes: webp });
+    expect(uploaded.disposition).toBe("download");
+
+    await indexStore.compareAndSet((index) => ({
+      ...index,
+      entries: index.entries.map((entry) => entry.id === noteId
+        ? { ...entry, attachments: entry.attachments.map((attachment) => attachment.driveId === uploaded.driveId ? { ...attachment, disposition: "inline" as const } : attachment) }
+        : entry)
+    }));
+
+    await expect(service.read(uploaded.driveId)).resolves.toMatchObject({
+      name: "legacy.webp",
+      mimeType: "image/webp",
+      disposition: "download"
+    });
+  });
+
+  it("downgrades a legacy inline WebP mutation while recovering an ambiguous upload", async () => {
+    const { raw, indexStore, ids, vault } = await setup();
+    const storage = delegateStorage(raw, {
+      createBytes: async (input, context) => {
+        const created = await raw.createBytes(input, context);
+        throw new StorageMutationOutcomeUnknownError(created.id);
+      }
+    });
+    const uncertain = new AttachmentService({ storage, indexStore, vault, assetsRootId: ids.assets.id });
+    await expect(uncertain.upload({ noteId, name: "recover-legacy.webp", declaredMime: "image/webp", bytes: webp }))
+      .rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+    const pending = (await indexStore.read()).value.pendingMutations[0];
+    if (pending?.driveId === undefined) throw new Error("ambiguous legacy WebP upload did not retain its Drive ID");
+    await indexStore.compareAndSet((index) => ({
+      ...index,
+      pendingMutations: index.pendingMutations.map((mutation) => mutation.id === pending.id
+        ? { ...mutation, attachmentDisposition: "inline" as const }
+        : mutation)
+    }));
+
+    const recovered = new AttachmentService({ storage: raw, indexStore, vault, assetsRootId: ids.assets.id });
+    await expect(recovered.read(pending.driveId)).resolves.toMatchObject({
+      name: "recover-legacy.webp",
+      mimeType: "image/webp",
+      disposition: "download"
+    });
+    expect((await indexStore.read()).value.entries[0]?.attachments[0]?.disposition).toBe("download");
   });
 
   it("resolves duplicate normalized filenames deterministically before writing", async () => {

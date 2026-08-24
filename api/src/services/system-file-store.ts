@@ -22,6 +22,12 @@ export interface SystemFileSnapshot<T> {
   checksum: string;
 }
 
+export interface PreparedSystemFile<T> {
+  value: T;
+  source: string;
+  checksum: string;
+}
+
 export class SystemFileStore<T> {
   public constructor(
     private readonly options: {
@@ -54,13 +60,8 @@ export class SystemFileStore<T> {
     if (expectedVersion !== undefined && before.file.version !== expectedVersion) {
       throw new ApiResponseError("CONFLICT");
     }
-    let parsed: T;
-    try {
-      parsed = this.options.schema.parse(value);
-    } catch {
-      throw new ApiResponseError("DRIVE_UNAVAILABLE");
-    }
-    const source = `${JSON.stringify(parsed, null, 2)}\n`;
+    const prepared = this.prepare(value);
+    const source = prepared.source;
     let updated: StoredFile;
     try {
       updated = await this.options.storage.updateText({
@@ -83,6 +84,17 @@ export class SystemFileStore<T> {
     } catch (error) {
       throw preserveApiError(error, "DRIVE_UNAVAILABLE");
     }
+  }
+
+  public prepare(value: T): PreparedSystemFile<T> {
+    let parsed: T;
+    try {
+      parsed = this.options.schema.parse(value);
+    } catch {
+      throw new ApiResponseError("DRIVE_UNAVAILABLE");
+    }
+    const source = `${JSON.stringify(parsed, null, 2)}\n`;
+    return { value: parsed, source, checksum: createHash("sha256").update(source).digest("hex") };
   }
 
   public async compareAndSet(

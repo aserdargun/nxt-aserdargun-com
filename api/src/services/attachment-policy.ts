@@ -27,6 +27,7 @@ const STRUCTURALLY_PROVEN_INLINE_MIME_TYPES = new Set([
   "image/jpeg",
   "image/gif"
 ]);
+const PERMANENT_DOWNLOAD_MIME_TYPES = new Set(["image/webp", "application/pdf"]);
 const INLINE_EXTENSIONS: Record<string, ReadonlySet<string>> = {
   "image/png": new Set(["png"]),
   "image/jpeg": new Set(["jpg", "jpeg"]),
@@ -48,6 +49,16 @@ const FORBIDDEN_DRIVE_MIME_TYPES = new Set([
 
 export const classifyAttachment = (mimeType: string): AttachmentDisposition =>
   INLINE_MIME_TYPES.has(mimeType.toLocaleLowerCase("en-US")) ? "inline" : "download";
+
+/** Fresh content may only preserve or safely lower a persisted disposition. */
+export const safeAttachmentDisposition = (
+  persisted: AttachmentDisposition,
+  fresh: DetectedAttachment
+): AttachmentDisposition =>
+  persisted === "download" || fresh.disposition === "download" ||
+    PERMANENT_DOWNLOAD_MIME_TYPES.has(fresh.mimeType.toLocaleLowerCase("en-US"))
+    ? "download"
+    : "inline";
 
 /** Reject Drive container declarations before any storage operation can occur. */
 export const assertAttachmentDeclaration = (declaredMime: string): void => {
@@ -100,12 +111,15 @@ export const detectAttachment = async (input: {
   }
   const detectedMime = sniffed?.mime ?? detectSafeTextMime(input.bytes, extension) ?? "application/octet-stream";
   const extensionCoherent = extension !== undefined && INLINE_EXTENSIONS[detectedMime]?.has(extension) === true;
-  const disposition = classifyAttachment(detectedMime) === "inline" &&
+  const detectedDisposition = classifyAttachment(detectedMime) === "inline" &&
     STRUCTURALLY_PROVEN_INLINE_MIME_TYPES.has(detectedMime) &&
     extensionCoherent && declaredMime === detectedMime && structurallyValidInline(input.bytes, detectedMime)
     ? "inline"
     : "download";
-  return { mimeType: detectedMime, disposition };
+  return {
+    mimeType: detectedMime,
+    disposition: safeAttachmentDisposition("inline", { mimeType: detectedMime, disposition: detectedDisposition })
+  };
 };
 
 export const isInlineExtensionCoherent = (mimeType: string, name: string): boolean => {

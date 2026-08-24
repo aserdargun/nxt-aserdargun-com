@@ -138,6 +138,31 @@ describe("RescanService", () => {
     expect(index.entries.map((item) => item.path)).toEqual(["Notes/Plans/External.md"]);
   });
 
+  it("downgrades legacy WebP and PDF projections while preserving existing downloads during rescan", async () => {
+    const fixture = await setup();
+    await seedStaleIndexedNote(fixture);
+    await fixture.indexStore.compareAndSet((index) => ({
+      ...index,
+      entries: index.entries.map((entry) => entry.id === noteId ? {
+        ...entry,
+        attachments: [
+          { driveId: "legacy-webp", name: "legacy.webp", mimeType: "image/webp", size: 42, checksum: "a".repeat(64), disposition: "inline", version: "1", marker: "am1.AAAAAAAAAAAAAAAAAAAAAA" },
+          { driveId: "legacy-pdf", name: "legacy.pdf", mimeType: "application/pdf", size: 84, checksum: "b".repeat(64), disposition: "inline", version: "1", marker: "am1.BBBBBBBBBBBBBBBBBBBBBB" },
+          { driveId: "download-png", name: "private.png", mimeType: "image/png", size: 68, checksum: "c".repeat(64), disposition: "download", version: "1", marker: "am1.CCCCCCCCCCCCCCCCCCCCCC" }
+        ]
+      } : entry)
+    }));
+
+    const started = await fixture.rescan.scanPage({ cursor: null, limit: 100 });
+    await finishScan(fixture.rescan, started.cursor);
+
+    expect((await fixture.indexStore.read()).value.entries[0]?.attachments.map(({ name, disposition }) => ({ name, disposition }))).toEqual([
+      { name: "legacy.webp", disposition: "download" },
+      { name: "legacy.pdf", disposition: "download" },
+      { name: "private.png", disposition: "download" }
+    ]);
+  });
+
   it("never asks Drive for or processes more than 100 entries in one request", async () => {
     let listed = 0;
     const { raw, ids } = await setup();
