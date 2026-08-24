@@ -417,14 +417,14 @@ Exit status 0
 
 - All Trash calls now carry `{ fileId, expectedVersion }`; RootBoundary passes that exact object to the inner adapter. Local and Google adapters validate it at runtime; Google uses exact `If-Match`, disables write retries, and maps 412 to the typed version conflict.
 - Attachment recovery claims the current CAS record only when owner, fence, phase, lease horizon, and due time still exactly match; every recovery/phase horizon renewal advances the fence. Invalid dates, missing identity, parent/marker mismatch, duplicate ambiguity, and version/readback drift become bounded terminal rescan conflicts rather than active hot loops.
-- Active Trash recovery requires exact attachment identity and refuses a same-name different-ID projection. It never adopts or quarantines unmarked lookalikes; a version drift is left active and terminalized without a second Trash attempt.
+- Active Trash recovery requires exact attachment identity and refuses a same-name different-ID projection. It never adopts or quarantines unmarked lookalikes; a version drift is left active and terminalized without a second Trash attempt. An `index-applied` Trash intent clears only its owned terminal reservation and never replays Drive I/O.
 - Attachment deletion serializes with every pending note or folder path mutation, including `conflicted` mutations. Folder path commits re-resolve canonical relative asset references at the new note path and retain opaque attachment URLs unchanged.
 - VP8X and five-byte VP8L shells are download-only; VP8 needs a bounded key-frame payload. GIF requires code size 2..8 plus real LZW data; PDF accepts only the bounded classic-xref/Catalog form with no injected payload between trailer and `startxref`; JPEG end-marker scanning accepts valid EOI while rejecting truncation.
 - Self-review: the approved three Task 8 routes and existing twelve Task 7 routes are unchanged; raw Drive IDs and mutation markers stay internal; `file-type@22.0.2` remains pinned; live integration is skipped.
 
 ## Commits
 
-- Implementation: `2c065d10828e7a4ad7f83a4b9a720407e84d719f` (`fix: fence attachment recovery`).
+- Implementation: `2c065d10828e7a4ad7f83a4b9a720407e84d719f` (`fix: fence attachment recovery`), `83d3ecc` (`fix: finalize fenced trash recovery`), and `60521b7` (`build: refresh fenced attachment artifacts`).
 - Report: this separate documentation commit (its final hash is included in the task handoff).
 
 ## Concerns
