@@ -46,7 +46,7 @@ export declare class PublicationService {
     private createVerifiedBytes;
     private readAndVerifyBytes;
     private commitPublication;
-    private recordRecoverableCreate;
+    private recordAttemptedCreateIdentity;
     private cancelCreateIntent;
     private completeCreateIntent;
     private persistOperationRevisionName;

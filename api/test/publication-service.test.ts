@@ -349,6 +349,66 @@ describe("immutable publication snapshots", () => {
     expect((await fixture.manifestStore.read()).value.operations).toEqual([]);
   });
 
+  it("never recovers or trashes a non-stale attempted create owned by a live publisher", async () => {
+    let releaseVerification!: () => void;
+    let signalVerification!: () => void;
+    const verificationGate = new Promise<void>((resolve) => { releaseVerification = resolve; });
+    const verificationStarted = new Promise<void>((resolve) => { signalVerification = resolve; });
+    let createdRootId: string | undefined;
+    let pauseImmediateVerification = false;
+    const fixture = await setup({
+      privateStorage: (raw, ids) => delegateStorage(raw, {
+        createFolder: async (input, context) => {
+          const created = await raw.createFolder(input, context);
+          if (input.appProperties?.nxtPublicationKind === "public" && createdRootId === undefined) {
+            createdRootId = created.id;
+            pauseImmediateVerification = true;
+          }
+          return created;
+        },
+        listChildren: async (input, context) => {
+          if (pauseImmediateVerification && input.parentId === ids.publishedId) {
+            pauseImmediateVerification = false;
+            signalVerification();
+            await verificationGate;
+          }
+          return raw.listChildren(input, context);
+        }
+      })
+    });
+    const opened = await fixture.vault.getNote(noteId);
+    const origin = fixture.service.publish({ noteId, expectedVersion: opened.version });
+    await verificationStarted;
+    if (createdRootId === undefined) throw new Error("missing live attempted public root");
+    const liveOperation = (await fixture.manifestStore.read()).value.operations[0];
+    if (liveOperation === undefined) throw new Error("missing live publication operation");
+
+    const contender = (await Promise.allSettled([
+      fixture.service.publish({ noteId, expectedVersion: opened.version })
+    ]))[0];
+    const duringContention = (await fixture.manifestStore.read()).value;
+    const duringFolder = await fixture.raw.get(createdRootId);
+    releaseVerification();
+    const originResult = (await Promise.allSettled([origin]))[0];
+
+    expect(contender).toMatchObject({ status: "rejected", reason: { code: "CONFLICT" } });
+    expect(duringContention.operations).toContainEqual(expect.objectContaining({
+      operationId: liveOperation.operationId,
+      createIntent: expect.objectContaining({
+        state: "attempted",
+        folderId: createdRootId,
+        folderVersion: duringFolder.version
+      })
+    }));
+    expect(allCleanup(duringContention)).toEqual([]);
+    expect(duringFolder).toMatchObject({ trashed: false });
+    expect(originResult).toMatchObject({
+      status: "fulfilled",
+      value: { publicId: liveOperation.publicId }
+    });
+    expect(await fixture.reader.getNote(liveOperation.publicId)).toMatchObject({ title: "Share me" });
+  });
+
   it.each(["copied-marker duplicate", "wrong-parent and wrong-marker"] as const)(
     "keeps an interrupted create queued when discovery finds a %s",
     async (variant) => {
@@ -416,6 +476,78 @@ describe("immutable publication snapshots", () => {
       }
     }
   );
+
+  it("rotates beyond four retained create intents so unprovable owners cannot starve a later recovery", async () => {
+    const fixture = await setup();
+    const operations: PublicationManifest["operations"] = [];
+    let recoverableFolderId: string | undefined;
+    let recoverablePublicId: string | undefined;
+    for (let index = 0; index < 5; index += 1) {
+      const publicId = idFor(300 + index);
+      const operationId = idFor(400 + index);
+      const marker = `pm1.${publicId}.public`;
+      let folderId: string | null = null;
+      let folderVersion: string | null = null;
+      if (index === 4) {
+        const folder = await fixture.raw.createFolder({
+          parentId: fixture.ids.published.id,
+          name: publicId,
+          appProperties: {
+            nxtPublicationMarker: marker,
+            nxtPublicationKind: "public",
+            nxtPublicationPublicId: publicId
+          }
+        });
+        folderId = folder.id;
+        folderVersion = folder.version;
+        recoverableFolderId = folder.id;
+        recoverablePublicId = publicId;
+      }
+      operations.push({
+        operationId,
+        publicId,
+        sourceNoteId: `018f47d2-6a34-7b2a-9f21-8a7034963a${(index + 1).toString(16).padStart(2, "0")}`,
+        epoch: 1,
+        startedAt: "2026-08-24T11:00:00.000Z",
+        sourceVersion: "1",
+        sourceChecksum: "a".repeat(64),
+        sourcePath: `Notes/Inbox/Recovery-${index}.md`,
+        publicFolderId: null,
+        publicFolderVersion: null,
+        revisionFolderId: null,
+        revisionFolderVersion: null,
+        revisionId: null,
+        revisionMarker: null,
+        createIntent: {
+          kind: "public-root",
+          state: "recoverable",
+          parentFolderId: fixture.ids.published.id,
+          folderName: publicId,
+          marker,
+          publicId,
+          operationId,
+          folderId,
+          folderVersion
+        },
+        cleanupSlots: 2
+      });
+    }
+    await fixture.manifestStore.compareAndSet((manifest) => ({ ...manifest, operations }));
+    if (recoverableFolderId === undefined || recoverablePublicId === undefined) throw new Error("missing fifth recovery target");
+    const missingPublicId = missingPublicIdFor(recoverablePublicId);
+
+    await expect(fixture.service.revoke({ publicId: missingPublicId })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    const afterFirstBoundedPass = (await fixture.manifestStore.read()).value;
+    expect(afterFirstBoundedPass.operations).toHaveLength(5);
+    expect(await fixture.raw.get(recoverableFolderId)).toMatchObject({ trashed: false });
+
+    await expect(fixture.service.revoke({ publicId: missingPublicId })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    const afterRotation = (await fixture.manifestStore.read()).value;
+    expect(afterRotation.operations).toHaveLength(4);
+    expect(afterRotation.operations.map((operation) => operation.publicId)).not.toContain(recoverablePublicId);
+    expect(await fixture.raw.get(recoverableFolderId)).toMatchObject({ trashed: true });
+    expect(allCleanup(afterRotation)).toEqual([]);
+  });
 
   it("durably owns and cleans both first-publish folders when snapshot creation fails", async () => {
     let failSnapshot = true;

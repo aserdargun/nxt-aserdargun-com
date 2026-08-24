@@ -444,7 +444,7 @@ export class PublicationService {
       outcomeUnknown = error;
       createdId = error.fileId;
     }
-    activeOperation = await this.recordRecoverableCreate(
+    activeOperation = await this.recordAttemptedCreateIdentity(
       activeOperation,
       createdId ?? null,
       createdVersion ?? null,
@@ -830,7 +830,7 @@ export class PublicationService {
     }
   }
 
-  private async recordRecoverableCreate(
+  private async recordAttemptedCreateIdentity(
     operation: ManifestOperation,
     folderId: string | null,
     folderVersion: string | null,
@@ -838,17 +838,16 @@ export class PublicationService {
   ): Promise<ManifestOperation> {
     const intent = operation.createIntent;
     if (
-      intent === null || intent.state === "prepared" ||
+      intent === null || intent.state !== "attempted" ||
       (folderVersion !== null && folderId === null) ||
       (intent.folderId !== null && intent.folderId !== folderId) ||
       (intent.folderVersion !== null && intent.folderVersion !== folderVersion)
     ) throw new ApiResponseError("CONFLICT");
-    if (intent.state === "recoverable" && intent.folderId === folderId && intent.folderVersion === folderVersion) return operation;
+    if (intent.folderId === folderId && intent.folderVersion === folderVersion) return operation;
     return this.updateOperation(operation, (current) => ({
       ...current,
       createIntent: current.createIntent === null ? null : {
         ...current.createIntent,
-        state: "recoverable",
         folderId,
         folderVersion
       }
