@@ -1,4 +1,4 @@
-import type { VaultIndex } from "@nxt/contracts";
+import { type VaultIndex } from "@nxt/contracts";
 import type { StoragePort } from "../storage/storage-port.js";
 import { type SystemFileSnapshot, type SystemFileStore } from "./system-file-store.js";
 export interface RescanRecord {
@@ -21,7 +21,6 @@ export interface RescanPage {
 }
 export declare class RescanService {
     private readonly options;
-    private readonly sessions;
     constructor(options: {
         storage: StoragePort;
         indexStore: SystemFileStore<VaultIndex>;
@@ -34,8 +33,12 @@ export declare class RescanService {
         cursor: string | null;
         limit: number;
     }): Promise<RescanPage>;
-    private createCursor;
-    private pruneExpiredSessions;
+    private startScan;
+    private resumeScan;
+    private persistProgress;
+    private completeScan;
+    private signCursor;
+    private verifyCursor;
     private now;
 }
 //# sourceMappingURL=rescan-service.d.ts.map

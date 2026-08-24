@@ -4,7 +4,7 @@ import { link, lstat, mkdir, open, readFile, realpath, rename, rmdir, writeFile 
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import type { StoragePort, StoredFile } from "./storage-port.js";
+import { StorageVersionConflictError, type StoragePort, type StoredFile } from "./storage-port.js";
 import {
   TRASH_TRANSACTION_SCHEMA_VERSION,
   isTrashTransactionState,
@@ -31,7 +31,7 @@ type LocalMetadata = {
   files: Record<string, LocalFile>;
   revisions: Record<string, LocalRevision[]>;
 };
-type PageCursor = { parentId: string; offset: number; generation: number };
+type PageCursor = { parentId: string; offset: number; fingerprint: string };
 type LoadedTrashJournal =
   | { format: "legacy"; journal: LegacyTrashJournal<LocalMetadata> }
   | { format: "current"; journal: TrashTransaction<LocalMetadata> };
@@ -90,23 +90,23 @@ export class LocalDriveAdapter implements StoragePort {
       assertPageSize(input.pageSize);
       const parent = this.getActiveFolder(metadata, input.parentId);
       const cursor = input.pageToken === undefined ? undefined : decodeCursor(input.pageToken);
-      if (cursor !== undefined && (cursor.parentId !== parent.id || cursor.generation !== metadata.generation)) {
+      const children = Object.values(metadata.files)
+        .filter((file) => !file.trashed && file.parentIds.length === 1 && file.parentIds[0] === parent.id)
+        .sort(compareFiles);
+      const fingerprint = createHash("sha256").update(children.map((file) => `${file.id}\0${file.name}\0${file.version}`).join("\n")).digest("base64url");
+      if (cursor !== undefined && (cursor.parentId !== parent.id || cursor.fingerprint !== fingerprint)) {
         throw new Error("stale page token");
       }
       const offset = cursor?.offset ?? 0;
-      const files = Object.values(metadata.files)
-        .filter((file) => !file.trashed && file.parentIds.length === 1 && file.parentIds[0] === parent.id)
-        .sort(compareFiles)
+      const files = children
         .slice(offset, offset + input.pageSize)
         .map((file) => this.toStoredFile(file));
-      const total = Object.values(metadata.files).filter(
-        (file) => !file.trashed && file.parentIds.length === 1 && file.parentIds[0] === parent.id
-      ).length;
+      const total = children.length;
       const nextOffset = offset + files.length;
       if (nextOffset >= total) {
         return { files };
       }
-      return { files, nextPageToken: encodeCursor({ parentId: parent.id, offset: nextOffset, generation: metadata.generation }) };
+      return { files, nextPageToken: encodeCursor({ parentId: parent.id, offset: nextOffset, fingerprint }) };
     });
   }
 
@@ -159,7 +159,7 @@ export class LocalDriveAdapter implements StoragePort {
       assertMimeType(input.mimeType);
       const file = this.getActiveContentFile(metadata, input.fileId);
       if (file.version !== input.expectedVersion) {
-        throw new Error("version conflict");
+        throw new StorageVersionConflictError();
       }
       const bytes = new TextEncoder().encode(input.text);
       this.bumpFile(metadata, file, { mimeType: input.mimeType, size: bytes.byteLength });
@@ -1156,7 +1156,13 @@ const decodeCursor = (token: string): PageCursor => {
       throw new Error("invalid page token");
     }
     const cursor = value as Partial<PageCursor>;
-    if (typeof cursor.parentId !== "string" || !Number.isInteger(cursor.offset) || (cursor.offset as number) < 0 || !Number.isInteger(cursor.generation)) {
+    if (
+      typeof cursor.parentId !== "string" ||
+      !Number.isInteger(cursor.offset) ||
+      (cursor.offset as number) < 0 ||
+      typeof cursor.fingerprint !== "string" ||
+      !/^[A-Za-z0-9_-]{43}$/u.test(cursor.fingerprint)
+    ) {
       throw new Error("invalid page token");
     }
     assertOpaqueFileId(cursor.parentId);

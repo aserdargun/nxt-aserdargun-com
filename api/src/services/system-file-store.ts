@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { ApiResponseError } from "../http/api-response.js";
-import type { StoragePort, StoredFile } from "../storage/storage-port.js";
+import { StorageVersionConflictError, type StoragePort, type StoredFile } from "../storage/storage-port.js";
 
 const JSON_MIME_TYPE = "application/json";
 const CHECKSUM = /^[a-f0-9]{64}$/u;
@@ -64,7 +64,7 @@ export class SystemFileStore<T> {
         text: source
       });
     } catch (error) {
-      throw new ApiResponseError(isVersionConflict(error) ? "CONFLICT" : "DRIVE_UNAVAILABLE");
+      throw new ApiResponseError(error instanceof StorageVersionConflictError ? "CONFLICT" : "DRIVE_UNAVAILABLE");
     }
     try {
       this.assertPinnedFile(updated);
@@ -76,6 +76,28 @@ export class SystemFileStore<T> {
     } catch (error) {
       throw preserveApiError(error, "DRIVE_UNAVAILABLE");
     }
+  }
+
+  public async compareAndSet(
+    transform: (current: T) => T,
+    options: { attempts?: number } = {}
+  ): Promise<SystemFileSnapshot<T>> {
+    const attempts = options.attempts ?? 8;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const current = await this.read();
+      let next: T;
+      try {
+        next = transform(current.value);
+      } catch (error) {
+        throw preserveApiError(error, "DRIVE_UNAVAILABLE");
+      }
+      try {
+        return await this.update(next, current.file.version);
+      } catch (error) {
+        if (!(error instanceof ApiResponseError) || error.code !== "CONFLICT" || attempt === attempts - 1) throw error;
+      }
+    }
+    throw new ApiResponseError("CONFLICT");
   }
 
   private assertPinnedFile(file: StoredFile): void {
@@ -98,9 +120,6 @@ export class SystemFileStore<T> {
     }
   }
 }
-
-const isVersionConflict = (error: unknown): boolean =>
-  error instanceof Error && /version conflict/iu.test(error.message);
 
 export const preserveApiError = (
   error: unknown,

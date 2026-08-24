@@ -8,6 +8,9 @@ export interface StoredFile {
     size: number;
     trashed: boolean;
 }
+export declare class StorageVersionConflictError extends Error {
+    constructor();
+}
 export interface StoragePort {
     get(fileId: string): Promise<StoredFile>;
     listChildren(input: {

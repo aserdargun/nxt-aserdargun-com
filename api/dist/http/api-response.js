@@ -49,6 +49,34 @@ export const json = (value, status = 200) => ({
     headers: JSON_HEADERS,
     jsonBody: safelySanitize(value)
 });
+export const typedJson = (value, schema, status = 200) => {
+    let unvalidatedSource;
+    try {
+        unvalidatedSource = JSON.stringify(value);
+    }
+    catch {
+        throw new ApiResponseError("DRIVE_UNAVAILABLE");
+    }
+    if (new TextEncoder().encode(unvalidatedSource).byteLength > MAX_SANITIZATION_OUTPUT_BYTES)
+        throw new ApiResponseError("TOO_LARGE");
+    let parsed;
+    try {
+        parsed = schema.parse(value);
+    }
+    catch {
+        throw new ApiResponseError("DRIVE_UNAVAILABLE");
+    }
+    let source;
+    try {
+        source = JSON.stringify(parsed);
+    }
+    catch {
+        throw new ApiResponseError("DRIVE_UNAVAILABLE");
+    }
+    if (new TextEncoder().encode(source).byteLength > MAX_SANITIZATION_OUTPUT_BYTES)
+        throw new ApiResponseError("TOO_LARGE");
+    return { status, headers: JSON_HEADERS, jsonBody: parsed };
+};
 export const errorResponse = (error, suppliedRequestId) => {
     const code = extractErrorCode(error) ?? "DRIVE_UNAVAILABLE";
     const definition = ERROR_DEFINITIONS[code];

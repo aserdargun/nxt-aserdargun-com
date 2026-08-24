@@ -1,47 +1,26 @@
-import { createHmac, randomBytes } from "node:crypto";
-import type { VaultAttachment, VaultIndex } from "@nxt/contracts";
-import { deriveIndex, parseNote, type IndexedSourceNote } from "@nxt/domain";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  MAX_NOTE_SOURCE_BYTES,
+  type VaultAttachment,
+  type VaultIndex,
+  type VaultRescanState
+} from "@nxt/contracts";
+import { deriveIndex, parseNote } from "@nxt/domain";
 import { ApiResponseError } from "../http/api-response.js";
 import type { StoragePort } from "../storage/storage-port.js";
 import { preserveApiError, type SystemFileSnapshot, type SystemFileStore } from "./system-file-store.js";
 
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const MAX_ENTRIES_PER_PAGE = 100;
-const MAX_CURSOR_LENGTH = 512;
-const MAX_ACTIVE_SCANS = 64;
+const MAX_OPERATIONS_PER_PAGE = 100;
 const SCAN_TTL_MS = 10 * 60 * 1_000;
 const MAX_FOLDER_DEPTH = 20;
+const MAX_RECORD_RESPONSE_BYTES = 100_000;
+const MAX_TOTAL_RESPONSE_BYTES = 220_000;
+const CURSOR = /^s1\.([A-Za-z0-9_-]{16,430})\.([A-Za-z0-9_-]{43})$/u;
 
-type QueueItem = {
-  folderId: string;
-  path: string;
-  depth: number;
-  pageToken?: string;
-  seenPageTokens: Set<string>;
-};
-
-type ScanSession = {
-  expiresAt: number;
-  baseIndex: SystemFileSnapshot<VaultIndex>;
-  queue: QueueItem[];
-  records: IndexedSourceNote[];
-  seenDriveIds: Set<string>;
-  seenNoteIds: Set<string>;
-};
-
-export interface RescanRecord {
-  noteId: string;
-  title: string;
-  path: string;
-  version: string;
-}
-
-export interface RescanRecovery {
-  path: string;
-  rawSource: string;
-  error: "Invalid Markdown frontmatter.";
-}
-
+export interface RescanRecord { noteId: string; title: string; path: string; version: string }
+export interface RescanRecovery { path: string; rawSource: string; error: "Invalid Markdown frontmatter." }
 export interface RescanPage {
   cursor: string | null;
   processed: number;
@@ -50,9 +29,9 @@ export interface RescanPage {
   recoveries: RescanRecovery[];
 }
 
-export class RescanService {
-  private readonly sessions = new Map<string, ScanSession>();
+type CursorPayload = { scanId: string; generation: number; position: number; nonce: string; expiresAt: string };
 
+export class RescanService {
   public constructor(
     private readonly options: {
       storage: StoragePort;
@@ -65,148 +44,212 @@ export class RescanService {
     if (options.cursorSecret.length < 32) throw new Error("rescan cursor secret is too short");
   }
 
-  public readIndex(): Promise<SystemFileSnapshot<VaultIndex>> {
-    return this.options.indexStore.read();
-  }
+  public readIndex(): Promise<SystemFileSnapshot<VaultIndex>> { return this.options.indexStore.read(); }
 
   public async scanPage(input: { cursor: string | null; limit: number }): Promise<RescanPage> {
-    if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > MAX_ENTRIES_PER_PAGE) {
-      throw new ApiResponseError("INVALID_INPUT");
-    }
-    this.pruneExpiredSessions();
-    let session: ScanSession;
-    const previousCursor: string | null = input.cursor;
+    if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > MAX_ENTRIES_PER_PAGE) throw new ApiResponseError("INVALID_INPUT");
+    let state: VaultRescanState;
     if (input.cursor === null) {
-      if (this.sessions.size >= MAX_ACTIVE_SCANS) throw new ApiResponseError("DRIVE_UNAVAILABLE");
-      const baseIndex = await this.options.indexStore.read();
-      session = {
-        expiresAt: this.now() + SCAN_TTL_MS,
-        baseIndex,
-        queue: [{
-          folderId: this.options.notesFolderId,
-          path: "Notes",
-          depth: 0,
-          seenPageTokens: new Set()
-        }],
-        records: [],
-        seenDriveIds: new Set(),
-        seenNoteIds: new Set()
-      };
+      state = await this.startScan();
     } else {
-      if (input.cursor.length > MAX_CURSOR_LENGTH) throw new ApiResponseError("INVALID_INPUT");
-      const found = this.sessions.get(input.cursor);
-      if (found === undefined || found.expiresAt <= this.now()) throw new ApiResponseError("INVALID_INPUT");
-      session = found;
-      this.sessions.delete(input.cursor);
-      session.expiresAt = this.now() + SCAN_TTL_MS;
+      state = await this.resumeScan(input.cursor);
     }
 
+    const priorPosition = state.position;
+    const priorNonce = state.nonce;
+    const committedIndex = (await this.options.indexStore.read()).value;
     const pageRecords: RescanRecord[] = [];
-    const recoveries: RescanRecovery[] = [];
+    let responseBytes = 0;
+    let operations = 0;
+    let listedEntries = 0;
     let processed = 0;
-    try {
-      while (processed < input.limit && session.queue.length > 0) {
-        const current = session.queue[0] as QueueItem;
-        const pageSize = input.limit - processed;
-        const page = await this.options.storage.listChildren({
-          parentId: current.folderId,
-          pageSize,
-          ...(current.pageToken === undefined ? {} : { pageToken: current.pageToken })
-        }).catch((error) => { throw preserveApiError(error, "DRIVE_UNAVAILABLE"); });
-        processed += page.files.length;
-        if (page.nextPageToken === undefined) {
-          session.queue.shift();
-        } else {
-          if (current.seenPageTokens.has(page.nextPageToken)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
-          current.seenPageTokens.add(page.nextPageToken);
-          current.pageToken = page.nextPageToken;
-        }
-        for (const file of page.files) {
-          if (session.seenDriveIds.has(file.id)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
-          session.seenDriveIds.add(file.id);
-          const path = `${current.path}/${file.name}`;
-          if (file.mimeType === FOLDER_MIME_TYPE) {
-            if (file.name === "_assets") continue;
-            if (current.depth + 1 > MAX_FOLDER_DEPTH) throw new ApiResponseError("UNSAFE_FILE");
-            session.queue.push({
-              folderId: file.id,
-              path,
-              depth: current.depth + 1,
-              seenPageTokens: new Set()
-            });
-            continue;
-          }
-          if (!file.name.toLocaleLowerCase("en-US").endsWith(".md")) continue;
-          let readback;
-          try {
-            readback = await this.options.storage.readText(file.id);
-          } catch (error) {
-            throw preserveApiError(error, "DRIVE_UNAVAILABLE");
-          }
-          try {
-            const note = parseNote(readback.text);
-            if (session.seenNoteIds.has(note.frontmatter.id)) throw new ApiResponseError("CONFLICT");
-            session.seenNoteIds.add(note.frontmatter.id);
-            const attachments = attachmentsFor(session.baseIndex.value, note.frontmatter.id);
-            session.records.push({
-              source: readback.text,
-              driveId: readback.file.id,
-              path,
-              driveVersion: readback.file.version,
-              attachments
-            });
-            pageRecords.push({
-              noteId: note.frontmatter.id,
-              title: note.frontmatter.title,
-              path,
-              version: readback.file.version
-            });
-          } catch (error) {
-            if (error instanceof ApiResponseError) throw error;
-            recoveries.push({ path, rawSource: readback.text, error: "Invalid Markdown frontmatter." });
-          }
-        }
-        if (page.files.length === 0 && page.nextPageToken !== undefined) {
-          throw new ApiResponseError("DRIVE_UNAVAILABLE");
-        }
-      }
 
-      if (session.queue.length === 0) {
-        let index: VaultIndex;
+    while (state.queue.length > 0 && operations < MAX_OPERATIONS_PER_PAGE) {
+      const current = state.queue[0];
+      if (current === undefined) break;
+      if (current.kind === "read") {
+        if (pageRecords.length >= MAX_ENTRIES_PER_PAGE) break;
+        state.queue.shift();
+        operations += 1;
+        const readback = await this.options.storage.readText(current.driveId).catch((error) => { throw preserveApiError(error, "DRIVE_UNAVAILABLE"); });
+        if (readback.file.trashed || !readback.file.name.toLocaleLowerCase("en-US").endsWith(".md")) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+        if (new TextEncoder().encode(readback.text).byteLength > MAX_NOTE_SOURCE_BYTES) throw new ApiResponseError("TOO_LARGE");
         try {
-          index = deriveIndex(session.records);
+          const note = parseNote(readback.text);
+          if (state.seenNoteIds.includes(note.frontmatter.id)) throw new ApiResponseError("CONFLICT");
+          state.seenNoteIds.push(note.frontmatter.id);
+          state.records.push({
+            source: readback.text,
+            driveId: readback.file.id,
+            path: current.path,
+            driveVersion: readback.file.version,
+            attachments: attachmentsFor(committedIndex, note.frontmatter.id)
+          });
+          const responseRecord = { noteId: note.frontmatter.id, title: note.frontmatter.title, path: current.path, version: readback.file.version };
+          const recordBytes = new TextEncoder().encode(JSON.stringify(responseRecord)).byteLength;
+          if (responseBytes + recordBytes <= MAX_RECORD_RESPONSE_BYTES) {
+            pageRecords.push(responseRecord);
+            responseBytes += recordBytes;
+          }
         } catch (error) {
-          throw error instanceof ApiResponseError ? error : new ApiResponseError("CONFLICT");
+          if (error instanceof ApiResponseError) throw error;
+          state.recoveries.push({ path: current.path, rawSource: readback.text, error: "Invalid Markdown frontmatter." });
         }
-        await this.options.indexStore.update(index, session.baseIndex.file.version);
-        return { cursor: null, processed, complete: true, records: pageRecords, recoveries };
+        continue;
       }
-      const cursor = this.createCursor();
-      this.sessions.set(cursor, session);
-      return { cursor, processed, complete: false, records: pageRecords, recoveries };
-    } catch (error) {
-      if (previousCursor !== null) this.sessions.delete(previousCursor);
-      throw preserveApiError(error, "DRIVE_UNAVAILABLE");
+
+      const remaining = Math.min(input.limit - listedEntries, MAX_ENTRIES_PER_PAGE - listedEntries);
+      if (remaining <= 0) break;
+      operations += 1;
+      const page = await this.options.storage.listChildren({
+        parentId: current.folderId,
+        pageSize: remaining,
+        ...(current.pageToken === undefined ? {} : { pageToken: current.pageToken })
+      }).catch((error) => { throw preserveApiError(error, "DRIVE_UNAVAILABLE"); });
+      listedEntries += page.files.length;
+      processed += page.files.length;
+      state.queue.shift();
+      let continuation: typeof current | undefined;
+      if (page.nextPageToken !== undefined) {
+        if (current.seenPageTokens.includes(page.nextPageToken)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+        continuation = {
+          ...current,
+          pageToken: page.nextPageToken,
+          seenPageTokens: [...current.seenPageTokens, page.nextPageToken]
+        };
+      }
+      for (const file of page.files) {
+        if (state.seenDriveIds.includes(file.id)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+        state.seenDriveIds.push(file.id);
+        const path = `${current.path}/${file.name}`;
+        if (file.mimeType === FOLDER_MIME_TYPE) {
+          if (file.name === "_assets") continue;
+          if (current.depth + 1 > MAX_FOLDER_DEPTH) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+          state.queue.push({ kind: "list", folderId: file.id, path, depth: current.depth + 1, seenPageTokens: [] });
+        } else if (file.name.toLocaleLowerCase("en-US").endsWith(".md")) {
+          state.queue.push({ kind: "read", driveId: file.id, path, driveVersion: file.version });
+        }
+      }
+      if (continuation !== undefined) state.queue.push(continuation);
+      if (page.files.length === 0 && page.nextPageToken !== undefined) throw new ApiResponseError("DRIVE_UNAVAILABLE");
     }
+
+    const recoveries: RescanRecovery[] = [];
+    let recoveryBytes = 0;
+    while (state.deliveredRecoveryCount < state.recoveries.length && recoveries.length < MAX_ENTRIES_PER_PAGE) {
+      const recovery = state.recoveries[state.deliveredRecoveryCount];
+      if (recovery === undefined) break;
+      const bytes = new TextEncoder().encode(JSON.stringify(recovery)).byteLength;
+      if (recoveries.length > 0 && responseBytes + recoveryBytes + bytes > MAX_TOTAL_RESPONSE_BYTES) break;
+      recoveries.push(recovery);
+      recoveryBytes += bytes;
+      state.deliveredRecoveryCount += 1;
+    }
+
+    const complete = state.queue.length === 0 && state.deliveredRecoveryCount === state.recoveries.length;
+    if (complete) {
+      await this.completeScan(state, priorPosition, priorNonce);
+      return { cursor: null, processed, complete: true, records: pageRecords, recoveries };
+    }
+    state = await this.persistProgress(state, priorPosition, priorNonce);
+    return { cursor: this.signCursor(state), processed, complete: false, records: pageRecords, recoveries };
   }
 
-  private createCursor(): string {
-    const nonce = randomBytes(18).toString("base64url");
-    const signature = createHmac("sha256", this.options.cursorSecret).update(nonce).digest("base64url");
-    return `${nonce}.${signature}`;
-  }
-
-  private pruneExpiredSessions(): void {
+  private async startScan(): Promise<VaultRescanState> {
     const now = this.now();
-    for (const [cursor, session] of this.sessions) {
-      if (session.expiresAt <= now) this.sessions.delete(cursor);
-    }
+    let created!: VaultRescanState;
+    await this.options.indexStore.compareAndSet((index) => {
+      if (index.pendingMutations.length > 0) throw new ApiResponseError("CONFLICT");
+      if (index.rescanState !== null && Date.parse(index.rescanState.expiresAt) > now.getTime()) throw new ApiResponseError("CONFLICT");
+      created = {
+        scanId: randomUUID(),
+        baseGeneration: index.generation,
+        position: 0,
+        nonce: randomBytes(16).toString("base64url"),
+        startedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + SCAN_TTL_MS).toISOString(),
+        queue: [{ kind: "list", folderId: this.options.notesFolderId, path: "Notes", depth: 0, seenPageTokens: [] }],
+        records: [],
+        seenDriveIds: [],
+        seenNoteIds: [],
+        recoveries: [],
+        deliveredRecoveryCount: 0
+      };
+      return { ...index, rescanState: created };
+    });
+    return structuredClone(created);
   }
 
-  private now(): number {
-    return (this.options.now?.() ?? new Date()).getTime();
+  private async resumeScan(cursor: string): Promise<VaultRescanState> {
+    const payload = this.verifyCursor(cursor);
+    const snapshot = await this.options.indexStore.read();
+    const state = snapshot.value.rescanState;
+    if (state === null || Date.parse(state.expiresAt) <= this.now().getTime()) throw new ApiResponseError("CONFLICT");
+    if (
+      payload.scanId !== state.scanId || payload.generation !== state.baseGeneration || payload.position !== state.position ||
+      payload.nonce !== state.nonce || payload.expiresAt !== state.expiresAt
+    ) throw new ApiResponseError("CONFLICT");
+    return structuredClone(state);
   }
+
+  private async persistProgress(state: VaultRescanState, priorPosition: number, priorNonce: string): Promise<VaultRescanState> {
+    state.position += 1;
+    state.nonce = randomBytes(16).toString("base64url");
+    state.expiresAt = new Date(this.now().getTime() + SCAN_TTL_MS).toISOString();
+    await this.options.indexStore.compareAndSet((index) => {
+      const current = index.rescanState;
+      if (current === null || current.scanId !== state.scanId || current.position !== priorPosition || current.nonce !== priorNonce) throw new ApiResponseError("CONFLICT");
+      return { ...index, rescanState: state };
+    });
+    return state;
+  }
+
+  private async completeScan(state: VaultRescanState, priorPosition: number, priorNonce: string): Promise<void> {
+    let entries: VaultIndex["entries"];
+    try { entries = deriveIndex(state.records).entries; } catch { throw new ApiResponseError("CONFLICT"); }
+    await this.options.indexStore.compareAndSet((index) => {
+      const current = index.rescanState;
+      if (current === null || current.scanId !== state.scanId || current.position !== priorPosition || current.nonce !== priorNonce) throw new ApiResponseError("CONFLICT");
+      return { ...index, generation: index.generation + 1, entries, rescanState: null };
+    });
+  }
+
+  private signCursor(state: VaultRescanState): string {
+    const payload: CursorPayload = {
+      scanId: state.scanId,
+      generation: state.baseGeneration,
+      position: state.position,
+      nonce: state.nonce,
+      expiresAt: state.expiresAt
+    };
+    const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+    const signature = createHmac("sha256", this.options.cursorSecret).update(encoded).digest("base64url");
+    return `s1.${encoded}.${signature}`;
+  }
+
+  private verifyCursor(cursor: string): CursorPayload {
+    const match = CURSOR.exec(cursor);
+    if (match === null) throw new ApiResponseError("INVALID_INPUT");
+    const encoded = match[1] as string;
+    const signature = match[2] as string;
+    const expected = createHmac("sha256", this.options.cursorSecret).update(encoded).digest("base64url");
+    if (!timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) throw new ApiResponseError("INVALID_INPUT");
+    let parsed: unknown;
+    try { parsed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as unknown; } catch { throw new ApiResponseError("INVALID_INPUT"); }
+    if (!isCursorPayload(parsed)) throw new ApiResponseError("INVALID_INPUT");
+    return parsed;
+  }
+
+  private now(): Date { return this.options.now?.() ?? new Date(); }
 }
 
 const attachmentsFor = (index: VaultIndex, noteId: string): VaultAttachment[] =>
   index.entries.find((entry) => entry.id === noteId)?.attachments.map((attachment) => ({ ...attachment })) ?? [];
+
+const isCursorPayload = (value: unknown): value is CursorPayload => {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || Object.keys(value).length !== 5) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.scanId === "string" && typeof record.generation === "number" && Number.isSafeInteger(record.generation) &&
+    typeof record.position === "number" && Number.isSafeInteger(record.position) && typeof record.nonce === "string" &&
+    /^[A-Za-z0-9_-]{22}$/u.test(record.nonce) && typeof record.expiresAt === "string" && Number.isFinite(Date.parse(record.expiresAt));
+};

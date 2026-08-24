@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   ApiErrorSchema,
+  ConfirmationTokenSchema,
+  FolderResponseSchema,
   NoteDocumentSchema,
   NoteFrontmatterSchema,
+  NoteResponseSchema,
   PreferencesSchema,
+  PreferencesResponseSchema,
   PublicationManifestSchema,
+  RescanVaultResponseSchema,
+  UpdateFolderRequestSchema,
+  UpdateNoteRequestSchema,
+  VaultResponseSchema,
   VaultIndexSchema
 } from "../src/index.js";
 
@@ -119,4 +127,86 @@ it("exposes redacted typed API errors", () => {
     }).error.code
   ).toBe("CONFLICT");
   expect(() => ApiErrorSchema.parse({ error: { code: "TOKEN", message: "bad", requestId: "req-123" } })).toThrow();
+});
+
+it("defines strict Drive-ID-free private response contracts", () => {
+  const safeEntry = {
+    id: "018f47d2-6a34-7b2a-9f21-8a7034963aef",
+    title: "Plan",
+    aliases: [],
+    path: "Notes/Plan.md",
+    created: "2026-08-23T12:00:00.000Z",
+    updated: "2026-08-23T12:00:00.000Z",
+    driveVersion: "4",
+    tags: [],
+    searchText: "plan",
+    excerpt: "",
+    outboundNoteIds: [],
+    unresolvedWikiTargets: [],
+    attachments: [{ name: "x.png", mimeType: "image/png", size: 1 }],
+    backlinks: []
+  };
+  const preferences = { schemaVersion: 1 as const, favorites: [], recent: [], theme: "system" as const };
+  const confirmation = {
+    descendantCount: 1,
+    treeVersion: "a".repeat(64),
+    expiresAt: "2026-08-23T12:05:00.000Z",
+    confirmationToken: `c1.${"a".repeat(120)}.${"b".repeat(43)}`
+  };
+  const folder = {
+    id: `v1.${"a".repeat(16)}.${"b".repeat(8)}.${"c".repeat(22)}`,
+    name: "Project",
+    path: "Notes/Project",
+    version: "2",
+    protected: false,
+    deleteConfirmation: confirmation
+  };
+  expect(VaultResponseSchema.parse({
+    entries: [safeEntry],
+    preferences,
+    folders: [folder],
+    treeVersion: "a".repeat(64),
+    cursor: null,
+    complete: true
+  }).folders[0]?.deleteConfirmation).toEqual(confirmation);
+  expect(FolderResponseSchema.parse(folder).id).toBe(folder.id);
+  expect(PreferencesResponseSchema.parse(preferences)).toEqual(preferences);
+  expect(RescanVaultResponseSchema.parse({
+    cursor: null,
+    processed: 1,
+    complete: true,
+    records: [{ noteId: safeEntry.id, title: "Plan", path: "Notes/Plan.md", version: "4" }],
+    recoveries: []
+  }).records).toHaveLength(1);
+  expect(NoteResponseSchema.parse({
+    note: {
+      frontmatter: {
+        id: safeEntry.id,
+        title: "Plan",
+        created: safeEntry.created,
+        updated: safeEntry.updated,
+        tags: [],
+        aliases: []
+      },
+      body: "# Plan\n"
+    },
+    source: "# Plan\n",
+    version: "4",
+    path: "Notes/Plan.md",
+    checksum: "a".repeat(64)
+  }).path).toBe("Notes/Plan.md");
+  expect(() => VaultResponseSchema.parse({ entries: [{ ...safeEntry, driveId: "raw" }], preferences, folders: [], treeVersion: "a".repeat(64), cursor: null, complete: true })).toThrow();
+  expect(() => NoteResponseSchema.parse({ note: {}, driveId: "raw", version: "1", path: "Notes/x.md" })).toThrow();
+});
+
+it("bounds note source bytes and validates safe folder mutation and confirmation tokens", () => {
+  expect(() => UpdateNoteRequestSchema.parse({ expectedVersion: "1", source: "x".repeat(300_000) })).toThrow();
+  expect(UpdateFolderRequestSchema.parse({
+    expectedVersion: "1",
+    name: "Renamed",
+    parentId: `v1.${"a".repeat(16)}.${"b".repeat(8)}.${"c".repeat(22)}`
+  })).toMatchObject({ name: "Renamed" });
+  expect(() => UpdateFolderRequestSchema.parse({ expectedVersion: "1" })).toThrow();
+  expect(ConfirmationTokenSchema.parse(`c1.${"a".repeat(120)}.${"b".repeat(43)}`)).toContain("c1.");
+  expect(() => ConfirmationTokenSchema.parse("raw-folder-id.secret")).toThrow();
 });

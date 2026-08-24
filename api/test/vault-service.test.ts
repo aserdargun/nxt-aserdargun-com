@@ -245,7 +245,10 @@ describe("VaultService notes", () => {
       guarded.updateNote({ noteId, expectedVersion: created.version, source: sourceFor("Quick note", "# Local\n") })
     ).rejects.toMatchObject({ code: "CONFLICT" });
     expect(maximum).toBe(1);
-    expect((await raw.readText(ids.index.id)).text).toBe(indexBefore.text);
+    const beforeValue = JSON.parse(indexBefore.text);
+    const afterValue = (await indexStore.read()).value;
+    expect(afterValue.entries).toEqual(beforeValue.entries);
+    expect(afterValue.pendingMutations).toHaveLength(1);
   });
 
   it("sanitizes collision-prone names, preserves the UUID, adds aliases, and recalculates attachment links on move", async () => {
@@ -309,6 +312,36 @@ describe("VaultService notes", () => {
     expect(renamed.note.frontmatter.title).toBe("PLAN");
     expect(renamed.note.frontmatter.aliases).toContain("Plan");
     expect(renamed.note.path).toBe("Notes/Inbox/PLAN.md");
+  });
+
+  it("classifies note dependency outages and stored corruption as redacted 503 failures", async () => {
+    let outage = false;
+    let corrupt = false;
+    const { service, ids } = await setup((storage) => ({
+      ...storage,
+      get: storage.get.bind(storage),
+      listChildren: storage.listChildren.bind(storage),
+      readText: async (fileId) => {
+        const readback = await storage.readText(fileId);
+        if (readback.file.mimeType !== "text/markdown") return readback;
+        if (outage) throw new Error("injected credential-bearing outage");
+        return corrupt ? { ...readback, text: "not portable markdown" } : readback;
+      },
+      readBytes: storage.readBytes.bind(storage),
+      createFolder: storage.createFolder.bind(storage),
+      createText: storage.createText.bind(storage),
+      createBytes: storage.createBytes.bind(storage),
+      updateText: storage.updateText.bind(storage),
+      move: storage.move.bind(storage),
+      trash: storage.trash.bind(storage),
+      listRevisions: storage.listRevisions.bind(storage)
+    }));
+    await service.createNote({ title: "Probe", body: "body", folderId: ids.inbox.id });
+    outage = true;
+    await expect(service.getNote(noteId)).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE", status: 503 });
+    outage = false;
+    corrupt = true;
+    await expect(service.getNote(noteId)).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE", status: 503 });
   });
 });
 

@@ -1,5 +1,6 @@
 import type { HttpRequest, HttpResponseInit } from "@azure/functions";
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { MAX_NOTE_SOURCE_BYTES } from "@nxt/contracts";
 import type { OwnerIdentity } from "../auth/require-owner.js";
 import { ownerFromRequest } from "./session.js";
 import { ApiResponseError, errorResponse } from "../http/api-response.js";
@@ -29,8 +30,14 @@ export interface PrivateHandlerDependencies {
 
 export const defaultPrivateHandlerDependencies = (): PrivateHandlerDependencies => ({
   authorize: ownerFromRequest,
-  resolveServices: resolveTask7Services,
-  idCodec: runtimeIdCodec()
+  resolveServices: () => {
+    runtimeIdCodec();
+    return resolveTask7Services();
+  },
+  idCodec: {
+    encode: (value) => runtimeIdCodec().encode(value),
+    decode: (value) => runtimeIdCodec().decode(value)
+  }
 });
 
 export class OpaqueIdCodec implements IdCodec {
@@ -98,10 +105,18 @@ export const parseBody = async <T>(request: HttpRequest, schema: { parse(value: 
   let value: unknown;
   try {
     value = await request.json();
-    return schema.parse(value);
   } catch {
     throw new ApiResponseError("INVALID_INPUT");
   }
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    for (const key of ["source", "body"] as const) {
+      const candidate = (value as Record<string, unknown>)[key];
+      if (typeof candidate === "string" && new TextEncoder().encode(candidate).byteLength > MAX_NOTE_SOURCE_BYTES) {
+        throw new ApiResponseError("TOO_LARGE");
+      }
+    }
+  }
+  try { return schema.parse(value); } catch { throw new ApiResponseError("INVALID_INPUT"); }
 };
 
 export const pathValue = (request: HttpRequest, key: string, schema: { parse(value: unknown): string }): string => {
@@ -115,11 +130,12 @@ export const pathValue = (request: HttpRequest, key: string, schema: { parse(val
 let cachedCodec: OpaqueIdCodec | undefined;
 const runtimeIdCodec = (): OpaqueIdCodec => {
   if (cachedCodec !== undefined) return cachedCodec;
-  const secret = `${process.env.GOOGLE_CLIENT_SECRET ?? ""}\0${process.env.GOOGLE_REFRESH_TOKEN ?? ""}`;
-  if (secret.replace("\0", "").length < 32) {
-    // Construction remains lazy enough for registration tests, but production fails closed.
-    return new OpaqueIdCodec("unconfigured-runtime-id-codec-fails-before-storage");
-  }
-  cachedCodec = new OpaqueIdCodec(secret);
+  cachedCodec = createRuntimeOpaqueIdCodec(process.env.GOOGLE_CLIENT_SECRET, process.env.GOOGLE_REFRESH_TOKEN);
   return cachedCodec;
+};
+
+export const createRuntimeOpaqueIdCodec = (clientSecret: string | undefined, refreshToken: string | undefined): OpaqueIdCodec => {
+  const secret = `${clientSecret ?? ""}\0${refreshToken ?? ""}`;
+  if (secret.replace("\0", "").length < 32) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+  return new OpaqueIdCodec(secret);
 };

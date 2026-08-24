@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { setTimeout as sleepTimer } from "node:timers/promises";
+import { StorageVersionConflictError } from "./storage-port.js";
 const FILE_FIELDS = "id,name,mimeType,parents,version,modifiedTime,size,trashed,md5Checksum";
 const LIST_FIELDS = `nextPageToken,files(${FILE_FIELDS})`;
 const REVISION_FIELDS = "nextPageToken,revisions(id,modifiedTime)";
@@ -124,7 +125,7 @@ export class GoogleDriveAdapter {
         assertWritableContent(before);
         assertSingleParent(before, "Google Drive upload verification failed.");
         if (before.version !== input.expectedVersion)
-            throw new DriveContractError("version conflict");
+            throw new StorageVersionConflictError();
         const bytes = new TextEncoder().encode(input.text);
         let response;
         try {

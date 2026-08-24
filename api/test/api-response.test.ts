@@ -62,6 +62,11 @@ describe("json", () => {
     }
   });
 
+  it("keeps confirmation tokens redacted on the general untyped response path", () => {
+    const response = json({ confirmationToken: `c1.${"a".repeat(120)}.${"b".repeat(43)}`, safe: "visible" });
+    expect(response.jsonBody).toEqual({ safe: "visible" });
+  });
+
   it("serializes hostile proxy, bigint, and undefined values to safe JSON data", () => {
     const hostile = new Proxy(
       {},

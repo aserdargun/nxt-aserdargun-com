@@ -7,6 +7,9 @@ export declare class ApiResponseError extends Error {
     constructor(code: ApiErrorCode);
 }
 export declare const json: (value: unknown, status?: number) => HttpResponseInit;
+export declare const typedJson: <T>(value: unknown, schema: {
+    parse(input: unknown): T;
+}, status?: number) => HttpResponseInit;
 export declare const errorResponse: (error: unknown, suppliedRequestId?: string) => HttpResponseInit;
 export {};
 //# sourceMappingURL=api-response.d.ts.map

@@ -1,4 +1,4 @@
-import type { StoragePort, StoredFile } from "./storage-port.js";
+import { type StoragePort, type StoredFile } from "./storage-port.js";
 export type LocalDriveAdapterOptions = {
     beforeMetadataWrite?: () => void | Promise<void>;
     beforeMetadataRollbackWrite?: () => void | Promise<void>;

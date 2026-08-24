@@ -6,7 +6,7 @@ import type {
   GoogleDriveCreateInput,
   GoogleDriveUpdateInput
 } from "./google-drive-client.js";
-import type { StoragePort, StoredFile } from "./storage-port.js";
+import { StorageVersionConflictError, type StoragePort, type StoredFile } from "./storage-port.js";
 
 const FILE_FIELDS =
   "id,name,mimeType,parents,version,modifiedTime,size,trashed,md5Checksum";
@@ -184,7 +184,7 @@ export class GoogleDriveAdapter implements StoragePort {
     assertWritableContent(before);
     assertSingleParent(before, "Google Drive upload verification failed.");
     if (before.version !== input.expectedVersion)
-      throw new DriveContractError("version conflict");
+      throw new StorageVersionConflictError();
     const bytes = new TextEncoder().encode(input.text);
     let response;
     try {

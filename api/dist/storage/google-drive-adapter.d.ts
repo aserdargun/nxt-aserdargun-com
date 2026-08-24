@@ -1,5 +1,5 @@
 import type { GoogleDriveClient } from "./google-drive-client.js";
-import type { StoragePort, StoredFile } from "./storage-port.js";
+import { type StoragePort, type StoredFile } from "./storage-port.js";
 export interface GoogleDriveAdapterOptions {
     sleep?: (milliseconds: number) => Promise<void>;
     random?: () => number;

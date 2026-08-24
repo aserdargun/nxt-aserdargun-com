@@ -1,5 +1,5 @@
-import { type CreateFolderRequest, type CreateNoteRequest, type NoteDocument, type VaultIndex } from "@nxt/contracts";
-import type { StoragePort, StoredFile } from "../storage/storage-port.js";
+import { type NoteDocument, type Preferences, type VaultIndex } from "@nxt/contracts";
+import { type StoragePort, type StoredFile } from "../storage/storage-port.js";
 import { type SystemFileSnapshot, type SystemFileStore } from "./system-file-store.js";
 export type VaultNote = NoteDocument & {
     path: string;
@@ -19,6 +19,20 @@ type Folders = {
     archiveId: string;
     assetsId: string;
 };
+type Confirmation = {
+    descendantCount: number;
+    treeVersion: string;
+    expiresAt: string;
+    confirmationToken: string;
+};
+type FolderTreeRecord = {
+    id: string;
+    name: string;
+    path: string;
+    version: string;
+    protected: boolean;
+    deleteConfirmation?: Confirmation;
+};
 export declare class VaultService {
     private readonly options;
     private readonly noteOperations;
@@ -30,9 +44,14 @@ export declare class VaultService {
         now?: () => Date;
         createId?: () => string;
         confirmationSecret: string;
+        preferencesStore?: SystemFileStore<Preferences>;
     });
     readIndex(): Promise<SystemFileSnapshot<VaultIndex>>;
-    createNote(input: CreateNoteRequest): Promise<VaultNoteResult>;
+    createNote(input: {
+        title: string;
+        body: string;
+        folderId: string;
+    }): Promise<VaultNoteResult>;
     getNote(noteId: string): Promise<VaultNoteResult>;
     updateNote(input: {
         noteId: string;
@@ -59,7 +78,10 @@ export declare class VaultService {
     }): Promise<{
         trashed: true;
     }>;
-    createFolder(input: CreateFolderRequest): Promise<StoredFile>;
+    createFolder(input: {
+        parentId: string;
+        name: string;
+    }): Promise<StoredFile>;
     renameFolder(input: {
         folderId: string;
         expectedVersion: string;
@@ -70,12 +92,7 @@ export declare class VaultService {
         expectedVersion: string;
         parentId: string;
     }): Promise<StoredFile>;
-    issueFolderDeleteConfirmation(folderId: string): Promise<{
-        descendantCount: number;
-        treeVersion: string;
-        expiresAt: string;
-        confirmationToken: string;
-    }>;
+    issueFolderDeleteConfirmation(folderId: string): Promise<Confirmation>;
     trashFolder(input: {
         folderId: string;
         expectedTreeVersion: string;
@@ -85,22 +102,28 @@ export declare class VaultService {
     }>;
     vaultTree(): Promise<{
         treeVersion: string;
-        folders: Array<{
-            id: string;
-            name: string;
-            path: string;
-            version: string;
-            protected: boolean;
-        }>;
+        folders: FolderTreeRecord[];
     }>;
     private updateNoteUnserialized;
     private moveNoteUnserialized;
+    private reserve;
+    private finalizeEntry;
+    private finalize;
+    private cancel;
+    private clearMutation;
+    private expire;
+    private reconcileExpiredMutations;
+    private prunePreferences;
+    private reconcile;
+    private newMutation;
     private findEntry;
-    private rebuildIndex;
     private verifyNoteReadback;
+    private readNote;
     private preflight;
     private parseOwnedNote;
     private result;
+    private noteTitle;
+    private assertSourceSize;
     private assertMarkdownFile;
     private assertFolder;
     private assertFolderDestination;

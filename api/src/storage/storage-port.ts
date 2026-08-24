@@ -9,6 +9,13 @@ export interface StoredFile {
   trashed: boolean;
 }
 
+export class StorageVersionConflictError extends Error {
+  public constructor() {
+    super("storage version conflict");
+    this.name = "StorageVersionConflictError";
+  }
+}
+
 export interface StoragePort {
   get(fileId: string): Promise<StoredFile>;
   listChildren(input: {

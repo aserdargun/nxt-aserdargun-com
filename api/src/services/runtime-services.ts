@@ -54,7 +54,8 @@ export const resolveTask7Services = (): Task7Services => {
       archiveId: env("NXT_ARCHIVE_DRIVE_FOLDER_ID"),
       assetsId: env("NXT_ASSETS_DRIVE_FOLDER_ID")
     },
-    confirmationSecret: tokenSecret
+    confirmationSecret: tokenSecret,
+    preferencesStore
   });
   cached = {
     vault,

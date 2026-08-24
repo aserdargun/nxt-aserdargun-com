@@ -1,5 +1,5 @@
 import { ApiResponseError } from "../http/api-response.js";
-import type { StoragePort, StoredFile } from "../storage/storage-port.js";
+import { type StoragePort, type StoredFile } from "../storage/storage-port.js";
 export interface RuntimeSchema<T> {
     parse(value: unknown): T;
 }
@@ -20,6 +20,9 @@ export declare class SystemFileStore<T> {
     });
     read(): Promise<SystemFileSnapshot<T>>;
     update(value: T, expectedVersion?: string): Promise<SystemFileSnapshot<T>>;
+    compareAndSet(transform: (current: T) => T, options?: {
+        attempts?: number;
+    }): Promise<SystemFileSnapshot<T>>;
     private assertPinnedFile;
     private assertChecksum;
 }

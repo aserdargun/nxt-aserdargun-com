@@ -130,8 +130,7 @@ describe("RescanService", () => {
   it("rejects tampered cursors and preserves the prior valid index when final update fails", async () => {
     const { raw, ids } = await setup();
     await raw.createText({ parentId: ids.plans.id, name: "External.md", mimeType: "text/markdown", text: validSource });
-    const previous = await raw.readText(ids.privateFile.id);
-    let failIndexWrite = true;
+    let failFinalIndexWrite = true;
     const storage: StoragePort = {
       ...raw,
       get: raw.get.bind(raw),
@@ -142,7 +141,12 @@ describe("RescanService", () => {
       createText: raw.createText.bind(raw),
       createBytes: raw.createBytes.bind(raw),
       updateText: async (input) => {
-        if (failIndexWrite && input.fileId === ids.privateFile.id) throw new Error("injected partial write failure");
+        if (
+          failFinalIndexWrite &&
+          input.fileId === ids.privateFile.id &&
+          JSON.parse(input.text).rescanState === null &&
+          JSON.parse(input.text).entries.length > 0
+        ) throw new Error("injected partial write failure");
         return raw.updateText(input);
       },
       move: raw.move.bind(raw),
@@ -172,10 +176,10 @@ describe("RescanService", () => {
     await expect(async () => {
       while (!page.complete) page = await rescan.scanPage({ cursor: page.cursor, limit: 100 });
     }).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
-    expect((await raw.readText(ids.privateFile.id)).text).toBe(previous.text);
+    expect((await indexStore.read()).value.entries).toEqual([]);
+    expect((await indexStore.read()).value.rescanState).not.toBeNull();
 
-    failIndexWrite = false;
-    page = await rescan.scanPage({ cursor: null, limit: 100 });
+    failFinalIndexWrite = false;
     while (!page.complete) page = await rescan.scanPage({ cursor: page.cursor, limit: 100 });
     expect((await rescan.readIndex()).value.entries).toHaveLength(1);
   });

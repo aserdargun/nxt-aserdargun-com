@@ -81,6 +81,16 @@ describe("PreferencesService", () => {
     });
     expect((await storage.get(note.id)).version).toBe(noteBefore.version);
     expect(PreferencesSchema.parse(JSON.parse((await storage.readText(preferencesFile.id)).text))).toEqual(result.value);
+
+    const currentIndex = await storage.get(indexFile.id);
+    await storage.updateText({
+      fileId: indexFile.id,
+      expectedVersion: currentIndex.version,
+      mimeType: "application/json",
+      text: '{"schemaVersion":1,"entries":[]}\n'
+    });
+    expect((await service.read()).value).toMatchObject({ favorites: [], recent: [] });
+    expect((await storage.get(note.id)).version).toBe(noteBefore.version);
   });
 
   it("rejects invalid preference shapes before writing", async () => {

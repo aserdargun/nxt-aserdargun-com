@@ -32,4 +32,5 @@ export declare const parseBody: <T>(request: HttpRequest, schema: {
 export declare const pathValue: (request: HttpRequest, key: string, schema: {
     parse(value: unknown): string;
 }) => string;
+export declare const createRuntimeOpaqueIdCodec: (clientSecret: string | undefined, refreshToken: string | undefined) => OpaqueIdCodec;
 //# sourceMappingURL=private-api.d.ts.map

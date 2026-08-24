@@ -68,6 +68,30 @@ export const json = (value: unknown, status = 200): HttpResponseInit => ({
   jsonBody: safelySanitize(value)
 });
 
+export const typedJson = <T>(value: unknown, schema: { parse(input: unknown): T }, status = 200): HttpResponseInit => {
+  let unvalidatedSource: string;
+  try {
+    unvalidatedSource = JSON.stringify(value);
+  } catch {
+    throw new ApiResponseError("DRIVE_UNAVAILABLE");
+  }
+  if (new TextEncoder().encode(unvalidatedSource).byteLength > MAX_SANITIZATION_OUTPUT_BYTES) throw new ApiResponseError("TOO_LARGE");
+  let parsed: T;
+  try {
+    parsed = schema.parse(value);
+  } catch {
+    throw new ApiResponseError("DRIVE_UNAVAILABLE");
+  }
+  let source: string;
+  try {
+    source = JSON.stringify(parsed);
+  } catch {
+    throw new ApiResponseError("DRIVE_UNAVAILABLE");
+  }
+  if (new TextEncoder().encode(source).byteLength > MAX_SANITIZATION_OUTPUT_BYTES) throw new ApiResponseError("TOO_LARGE");
+  return { status, headers: JSON_HEADERS, jsonBody: parsed };
+};
+
 export const errorResponse = (error: unknown, suppliedRequestId?: string): HttpResponseInit => {
   const code = extractErrorCode(error) ?? "DRIVE_UNAVAILABLE";
   const definition = ERROR_DEFINITIONS[code];

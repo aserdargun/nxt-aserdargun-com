@@ -3,10 +3,12 @@ import {
   ArchiveNoteRequestSchema,
   CreateNoteRequestSchema,
   MoveNoteRequestSchema,
+  NoteResponseSchema,
   NoteIdSchema,
+  TrashResponseSchema,
   UpdateNoteRequestSchema
 } from "@nxt/contracts";
-import { json } from "../http/api-response.js";
+import { typedJson } from "../http/api-response.js";
 import type { VaultNoteResult } from "../services/vault-service.js";
 import {
   assertNoQuery,
@@ -30,24 +32,24 @@ export const createNoteHandlers = (dependencies: PrivateHandlerDependencies = de
     assertNoQuery(request);
     const body = await parseBody(request, CreateNoteRequestSchema);
     const result = await services.vault.createNote({ ...body, folderId: dependencies.idCodec.decode(body.folderId) });
-    return json(responseNote(result), 201);
+    return typedJson(responseNote(result), NoteResponseSchema, 201);
   }),
   getNote: (request: HttpRequest): Promise<HttpResponseInit> => handlePrivate(request, dependencies, async (services) => {
     assertNoQuery(request);
     const noteId = pathValue(request, "noteId", NoteIdSchema);
-    return json(responseNote(await services.vault.getNote(noteId)));
+    return typedJson(responseNote(await services.vault.getNote(noteId)), NoteResponseSchema);
   }),
   updateNote: (request: HttpRequest): Promise<HttpResponseInit> => handlePrivate(request, dependencies, async (services) => {
     assertNoQuery(request);
     const noteId = pathValue(request, "noteId", NoteIdSchema);
     const body = await parseBody(request, UpdateNoteRequestSchema);
-    return json(responseNote(await services.vault.updateNote({ noteId, ...body })));
+    return typedJson(responseNote(await services.vault.updateNote({ noteId, ...body })), NoteResponseSchema);
   }),
   trashNote: (request: HttpRequest): Promise<HttpResponseInit> => handlePrivate(request, dependencies, async (services) => {
     assertNoQuery(request);
     const noteId = pathValue(request, "noteId", NoteIdSchema);
     const body = await parseBody(request, ArchiveNoteRequestSchema);
-    return json(await services.vault.trashNote({ noteId, ...body }));
+    return typedJson(await services.vault.trashNote({ noteId, ...body }), TrashResponseSchema);
   }),
   moveNote: (request: HttpRequest): Promise<HttpResponseInit> => handlePrivate(request, dependencies, async (services) => {
     assertNoQuery(request);
@@ -58,13 +60,13 @@ export const createNoteHandlers = (dependencies: PrivateHandlerDependencies = de
       expectedVersion: body.expectedVersion,
       folderId: dependencies.idCodec.decode(body.folderId)
     });
-    return json(responseNote(result));
+    return typedJson(responseNote(result), NoteResponseSchema);
   }),
   archiveNote: (request: HttpRequest): Promise<HttpResponseInit> => handlePrivate(request, dependencies, async (services) => {
     assertNoQuery(request);
     const noteId = pathValue(request, "noteId", NoteIdSchema);
     const body = await parseBody(request, ArchiveNoteRequestSchema);
-    return json(responseNote(await services.vault.archiveNote({ noteId, ...body })));
+    return typedJson(responseNote(await services.vault.archiveNote({ noteId, ...body })), NoteResponseSchema);
   })
 });
 

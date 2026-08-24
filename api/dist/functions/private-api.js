@@ -1,12 +1,19 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { MAX_NOTE_SOURCE_BYTES } from "@nxt/contracts";
 import { ownerFromRequest } from "./session.js";
 import { ApiResponseError, errorResponse } from "../http/api-response.js";
 import { resolveTask7Services } from "../services/runtime-services.js";
 const OPAQUE_ID_PATTERN = /^v1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/u;
 export const defaultPrivateHandlerDependencies = () => ({
     authorize: ownerFromRequest,
-    resolveServices: resolveTask7Services,
-    idCodec: runtimeIdCodec()
+    resolveServices: () => {
+        runtimeIdCodec();
+        return resolveTask7Services();
+    },
+    idCodec: {
+        encode: (value) => runtimeIdCodec().encode(value),
+        decode: (value) => runtimeIdCodec().decode(value)
+    }
 });
 export class OpaqueIdCodec {
     key;
@@ -74,6 +81,19 @@ export const parseBody = async (request, schema) => {
     let value;
     try {
         value = await request.json();
+    }
+    catch {
+        throw new ApiResponseError("INVALID_INPUT");
+    }
+    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const key of ["source", "body"]) {
+            const candidate = value[key];
+            if (typeof candidate === "string" && new TextEncoder().encode(candidate).byteLength > MAX_NOTE_SOURCE_BYTES) {
+                throw new ApiResponseError("TOO_LARGE");
+            }
+        }
+    }
+    try {
         return schema.parse(value);
     }
     catch {
@@ -92,12 +112,13 @@ let cachedCodec;
 const runtimeIdCodec = () => {
     if (cachedCodec !== undefined)
         return cachedCodec;
-    const secret = `${process.env.GOOGLE_CLIENT_SECRET ?? ""}\0${process.env.GOOGLE_REFRESH_TOKEN ?? ""}`;
-    if (secret.replace("\0", "").length < 32) {
-        // Construction remains lazy enough for registration tests, but production fails closed.
-        return new OpaqueIdCodec("unconfigured-runtime-id-codec-fails-before-storage");
-    }
-    cachedCodec = new OpaqueIdCodec(secret);
+    cachedCodec = createRuntimeOpaqueIdCodec(process.env.GOOGLE_CLIENT_SECRET, process.env.GOOGLE_REFRESH_TOKEN);
     return cachedCodec;
+};
+export const createRuntimeOpaqueIdCodec = (clientSecret, refreshToken) => {
+    const secret = `${clientSecret ?? ""}\0${refreshToken ?? ""}`;
+    if (secret.replace("\0", "").length < 32)
+        throw new ApiResponseError("DRIVE_UNAVAILABLE");
+    return new OpaqueIdCodec(secret);
 };
 //# sourceMappingURL=private-api.js.map
