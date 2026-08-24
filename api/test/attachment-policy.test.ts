@@ -11,11 +11,15 @@ import {
 
 const validPng = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=", "base64"));
 const validGif = Uint8Array.from(Buffer.from("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==", "base64"));
-// A minimal lossless 1×1 VP8L RIFF container.  The policy intentionally
-// validates the image frame rather than accepting a VP8X metadata shell.
+// A bounded VP8 key-frame container. The policy intentionally validates an
+// image payload rather than accepting a VP8X/VP8L metadata shell.
 const validWebp = Uint8Array.from([
-  ...new TextEncoder().encode("RIFF"), 18, 0, 0, 0, ...new TextEncoder().encode("WEBPVP8L"),
-  5, 0, 0, 0, 0x2f, 0, 0, 0, 0, 0
+  ...new TextEncoder().encode("RIFF"), 24, 0, 0, 0, ...new TextEncoder().encode("WEBPVP8 "),
+  11, 0, 0, 0, 0, 0, 0, 0x9d, 0x01, 0x2a, 1, 0, 1, 0, 0, 0
+]);
+const minimalJpeg = Uint8Array.from([
+  0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 1, 0, 1, 1, 1, 0x11, 0,
+  0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0, 0, 0xff, 0xd9
 ]);
 const classicPdf = (): Uint8Array => {
   const header = "%PDF-1.4\n";
@@ -60,12 +64,22 @@ describe("attachment policy", () => {
     const metadataOnlyWebp = Uint8Array.from([...new TextEncoder().encode("RIFF\u0012\u0000\u0000\u0000WEBPVP8X\n\u0000\u0000\u0000"), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     const gifWithoutImage = Uint8Array.from([...validGif.slice(0, 13), 0x3b]);
     const tokenPdf = new TextEncoder().encode("%PDF-1.4\nxref\ntrailer\n<< /Root 1 0 R >>\nstartxref\n0\n%%EOF\n");
+    const vp8lHeaderOnly = Uint8Array.from([...new TextEncoder().encode("RIFF\u0012\u0000\u0000\u0000WEBPVP8L"), 5, 0, 0, 0, 0x2f, 0, 0, 0, 0, 0]);
+    const invalidLzw = Uint8Array.from(validGif);
+    invalidLzw[invalidLzw.length - 5] = 255;
+    const classic = new TextDecoder().decode(classicPdf());
+    const injectedPdf = new TextEncoder().encode(classic.replace("\nstartxref", "\n<script>polyglot</script>\nstartxref"));
     await expect(detectAttachment({ name: "image.webp", declaredMime: "image/webp", bytes: validWebp })).resolves.toMatchObject({ disposition: "inline" });
     await expect(detectAttachment({ name: "image.webp", declaredMime: "image/webp", bytes: metadataOnlyWebp })).resolves.toMatchObject({ disposition: "download" });
+    await expect(detectAttachment({ name: "image.webp", declaredMime: "image/webp", bytes: vp8lHeaderOnly })).resolves.toMatchObject({ disposition: "download" });
     await expect(detectAttachment({ name: "image.gif", declaredMime: "image/gif", bytes: validGif })).resolves.toMatchObject({ disposition: "inline" });
     await expect(detectAttachment({ name: "image.gif", declaredMime: "image/gif", bytes: gifWithoutImage })).resolves.toMatchObject({ disposition: "download" });
+    await expect(detectAttachment({ name: "image.gif", declaredMime: "image/gif", bytes: invalidLzw })).resolves.toMatchObject({ disposition: "download" });
     await expect(detectAttachment({ name: "file.pdf", declaredMime: "application/pdf", bytes: classicPdf() })).resolves.toMatchObject({ disposition: "inline" });
     await expect(detectAttachment({ name: "file.pdf", declaredMime: "application/pdf", bytes: tokenPdf })).resolves.toMatchObject({ disposition: "download" });
+    await expect(detectAttachment({ name: "file.pdf", declaredMime: "application/pdf", bytes: injectedPdf })).resolves.toMatchObject({ disposition: "download" });
+    await expect(detectAttachment({ name: "image.jpg", declaredMime: "image/jpeg", bytes: minimalJpeg })).resolves.toMatchObject({ disposition: "inline" });
+    await expect(detectAttachment({ name: "image.jpg", declaredMime: "image/jpeg", bytes: minimalJpeg.slice(0, -1) })).resolves.toMatchObject({ disposition: "download" });
   });
 
   it("only labels valid UTF-8 as text when the final extension is safe", async () => {

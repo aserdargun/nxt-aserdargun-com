@@ -142,6 +142,19 @@ describe("SystemFileStore", () => {
 });
 
 describe("VaultService notes", () => {
+  it("keeps the Task 7 folder bound at 255 Unicode code points", async () => {
+    const { service, ids } = await setup();
+    const name200 = "🙂".repeat(200);
+    const name255 = "🙂".repeat(255);
+    const created = await service.createFolder({ parentId: ids.plans.id, name: name200 });
+    expect(created.name).toBe(name200);
+
+    const renamed = await service.updateFolder({ folderId: created.id, expectedVersion: created.version, name: name255 });
+    expect(renamed.name).toBe(name255);
+    await expect(service.createFolder({ parentId: ids.plans.id, name: "🙂".repeat(256) }))
+      .rejects.toMatchObject({ code: "INVALID_INPUT" });
+  });
+
   it("creates portable notes in Inbox and indexes only after full source readback", async () => {
     let readbackObserved = false;
     let indexWriteObservedAfterReadback = false;

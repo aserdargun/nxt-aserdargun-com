@@ -264,9 +264,9 @@ describe("persisted vault mutation coordination", () => {
     const released = new Promise<void>((resolve) => { release = resolve; });
     const didEnter = new Promise<void>((resolve) => { entered = resolve; });
     const gated = delegate(fixture.storage, {
-      trash: async (fileId) => {
-        if (fileId === created.driveId) { entered(); await released; }
-        return fixture.storage.trash(fileId);
+      trash: async (input) => {
+        if (input.fileId === created.driveId) { entered(); await released; }
+        return fixture.storage.trash(input);
       }
     });
     const first = fixture.serviceFor(randomUUID(), gated).trashNote({ noteId: created.note.frontmatter.id, expectedVersion: created.version });
@@ -537,6 +537,25 @@ describe("persisted vault mutation coordination", () => {
     expect((await fixture.preferencesStoreFor().read()).value).toMatchObject({ favorites: [], recent: [] });
   });
 
+  it("re-resolves descendant attachment projections when a folder changes depth", async () => {
+    const fixture = await setup();
+    const service = fixture.serviceFor(randomUUID());
+    const source = await service.createFolder({ parentId: fixture.folders.plansId, name: "Source" });
+    const note = await service.createNote({
+      title: "Nested",
+      body: `![asset](../../../_assets/018f47d2-6a34-7b2a-9f21-8a7034963aef/image.png)`,
+      folderId: source.id
+    });
+    const destinationAncestor = await service.createFolder({ parentId: fixture.folders.inboxId, name: "Destination" });
+    const destination = await service.createFolder({ parentId: destinationAncestor.id, name: "Leaf" });
+    const before = (await fixture.storeFor().read()).value.entries.find((entry) => entry.id === note.note.frontmatter.id);
+    expect(before?.attachmentReferences).toEqual(["_assets/018f47d2-6a34-7b2a-9f21-8a7034963aef/image.png"]);
+
+    await service.updateFolder({ folderId: source.id, expectedVersion: source.version, name: "Moved", parentId: destination.id });
+    const after = (await fixture.storeFor().read()).value.entries.find((entry) => entry.id === note.note.frontmatter.id);
+    expect(after?.attachmentReferences).toEqual([]);
+  });
+
   it.each([
     ["external rename", async (fixture: Awaited<ReturnType<typeof setup>>, folderId: string, version: string) => {
       await fixture.storage.move({
@@ -761,7 +780,7 @@ describe("persisted vault mutation coordination", () => {
     const interleaved = interleaveAfterReservation(
       fixture.storeFor(counted),
       (mutation) => mutation.folderId === source.id,
-      async () => { await fixture.storage.trash(destinationAncestor.id); }
+      async () => { await fixture.storage.trash({ fileId: destinationAncestor.id, expectedVersion: destinationAncestor.version }); }
     );
 
     await expect(fixture.serviceFor(randomUUID(), counted, interleaved.store).updateFolder({

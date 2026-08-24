@@ -71,7 +71,10 @@ export declare class LocalDriveAdapter implements StoragePort {
         expectedVersion: string;
         newName?: string;
     }, context?: StorageOperationContext): Promise<StoredFile>;
-    trash(fileId: string, context?: StorageOperationContext, expectedVersion?: string): Promise<StoredFile>;
+    trash(input: {
+        fileId: string;
+        expectedVersion: string;
+    }, context?: StorageOperationContext): Promise<StoredFile>;
     listRevisions(fileId: string, context?: StorageOperationContext): Promise<Array<{
         id: string;
         modifiedTime: string;

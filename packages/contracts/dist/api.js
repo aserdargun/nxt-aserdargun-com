@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { AttachmentNameSchema } from "./attachment.js";
+import { AttachmentNameSchema, FolderNameSchema } from "./attachment.js";
 import { NoteDocumentSchema, NoteIdSchema, NoteTitleSchema, TimestampSchema } from "./note.js";
 import { PublicIdSchema } from "./publication.js";
 import { PreferencesPanelStateSchema, PreferencesSchema, RescanRecoveryErrorSchema, VaultIndexEntrySchema } from "./vault.js";
@@ -33,7 +33,7 @@ export const FolderDeleteConfirmationSchema = z.object({
 }).strict();
 export const FolderResponseSchema = z.object({
     id: OpaqueIdSchema,
-    name: z.string().trim().min(1).max(255),
+    name: FolderNameSchema,
     path: PathSchema,
     version: VersionSchema,
     protected: z.boolean(),
@@ -106,13 +106,13 @@ export const ArchiveNoteRequestSchema = z
 export const CreateFolderRequestSchema = z
     .object({
     parentId: OpaqueIdSchema,
-    name: z.string().trim().min(1).max(255)
+    name: FolderNameSchema
 })
     .strict();
 export const UpdateFolderRequestSchema = z
     .object({
     expectedVersion: VersionSchema,
-    name: z.string().trim().min(1).max(255).optional(),
+    name: FolderNameSchema.optional(),
     parentId: OpaqueIdSchema.optional()
 })
     .strict()

@@ -47,6 +47,12 @@ export interface StorageOperationContext {
   allowTrashed?: boolean;
 }
 
+/** Trash is always conditional: callers must bind the exact version observed. */
+export interface StorageTrashInput {
+  fileId: string;
+  expectedVersion: string;
+}
+
 export const assertStorageVersion: (value: unknown) => asserts value is string = (value) => {
   if (
     typeof value !== "string" ||
@@ -94,6 +100,6 @@ export interface StoragePort {
   createBytes(input: { parentId: string; name: string; mimeType: string; bytes: Uint8Array; appProperties?: Record<string, string> }, context?: StorageOperationContext): Promise<StoredFile>;
   updateText(input: { fileId: string; expectedVersion: string; mimeType: string; text: string }, context?: StorageOperationContext): Promise<StoredFile>;
   move(input: { fileId: string; fromParentId: string; toParentId: string; expectedVersion: string; newName?: string }, context?: StorageOperationContext): Promise<StoredFile>;
-  trash(fileId: string, context?: StorageOperationContext, expectedVersion?: string): Promise<StoredFile>;
+  trash(input: StorageTrashInput, context?: StorageOperationContext): Promise<StoredFile>;
   listRevisions(fileId: string, context?: StorageOperationContext): Promise<Array<{ id: string; modifiedTime: string }>>;
 }

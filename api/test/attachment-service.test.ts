@@ -231,8 +231,8 @@ describe("AttachmentService", () => {
     const storage: StoragePort = {
       get: raw.get.bind(raw), listChildren: raw.listChildren.bind(raw), readText: raw.readText.bind(raw), readBytes: raw.readBytes.bind(raw),
       createFolder: raw.createFolder.bind(raw), createText: raw.createText.bind(raw), createBytes: raw.createBytes.bind(raw), updateText: raw.updateText.bind(raw), move: raw.move.bind(raw),
-      trash: async (fileId) => {
-        const trashed = await raw.trash(fileId);
+      trash: async (input) => {
+        const trashed = await raw.trash(input);
         throw new StorageMutationOutcomeUnknownError(trashed.id);
       },
       listRevisions: raw.listRevisions.bind(raw)
@@ -376,6 +376,69 @@ describe("AttachmentService", () => {
     await expect(service.trash({ assetId: uploaded.driveId })).rejects.toMatchObject({ code: "CONFLICT" });
     expect((await raw.get(uploaded.driveId)).trashed).toBe(false);
     expect((await indexStore.read()).value.pendingMutations).toHaveLength(0);
+  });
+
+  it("serializes Trash behind even conflicted note and folder path mutations", async () => {
+    const { service, indexStore, raw } = await setup();
+    const uploaded = await service.upload({ noteId, name: "serialized.png", declaredMime: "image/png", bytes: png });
+    const current = await indexStore.read();
+    const base = {
+      ownerId: noteId,
+      fence: 1,
+      createdAt: "2026-08-23T12:00:00.000Z",
+      expiresAt: "2026-08-23T12:15:00.000Z",
+      phase: "conflicted" as const
+    };
+    await indexStore.update({
+      ...current.value,
+      pendingMutations: [{
+        ...base,
+        id: "018f47d2-6a34-7b2a-9f21-8a7034963af1",
+        operation: "update-note",
+        noteId,
+        driveId: current.value.entries[0]!.driveId,
+        parentId: "folder",
+        targetName: "Plan.md"
+      }]
+    });
+    await expect(service.trash({ assetId: uploaded.driveId })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await raw.get(uploaded.driveId)).trashed).toBe(false);
+
+    await indexStore.update({ ...current.value, pendingMutations: [{
+      ...base,
+      id: "018f47d2-6a34-7b2a-9f21-8a7034963af2",
+      operation: "move-folder",
+      folderId: "folder",
+      oldPath: "Notes/Inbox",
+      newPath: "Notes/Archive"
+    }] });
+    await expect(service.trash({ assetId: uploaded.driveId })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await raw.get(uploaded.driveId)).trashed).toBe(false);
+  });
+
+  it("never retries Trash after an external version drift", async () => {
+    const { raw, indexStore, vault, ids } = await setup();
+    let rawTrashCalls = 0;
+    const storage: StoragePort = {
+      get: raw.get.bind(raw), listChildren: raw.listChildren.bind(raw), readText: raw.readText.bind(raw), readBytes: raw.readBytes.bind(raw),
+      createFolder: raw.createFolder.bind(raw), createText: raw.createText.bind(raw), createBytes: raw.createBytes.bind(raw), updateText: raw.updateText.bind(raw),
+      move: raw.move.bind(raw), listRevisions: raw.listRevisions.bind(raw),
+      trash: async (input, context) => {
+        rawTrashCalls += 1;
+        const before = await raw.get(input.fileId, context);
+        await raw.move({ fileId: before.id, fromParentId: before.parentIds[0]!, toParentId: before.parentIds[0]!, expectedVersion: before.version, newName: "drifted.png" }, context);
+        return raw.trash(input, context);
+      }
+    };
+    const service = new AttachmentService({ storage, indexStore, vault, assetsRootId: ids.assets.id });
+    const uploaded = await service.upload({ noteId, name: "drift.png", declaredMime: "image/png", bytes: png });
+
+    await expect(service.trash({ assetId: uploaded.driveId })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(new AttachmentService({ storage: raw, indexStore, vault, assetsRootId: ids.assets.id }).read(uploaded.driveId))
+      .rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+    expect(rawTrashCalls).toBe(1);
+    expect((await raw.get(uploaded.driveId)).trashed).toBe(false);
+    expect((await indexStore.read()).value.pendingMutations[0]).toMatchObject({ phase: "conflicted" });
   });
 });
 

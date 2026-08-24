@@ -26,7 +26,7 @@ describe("LocalDriveAdapter", () => {
     expect((await storage.readText(file.id)).text).toBe("two");
     expect((await storage.listRevisions(file.id)).map((revision) => revision.id)).toEqual(["1", "2"]);
 
-    await storage.trash(file.id);
+    await storage.trash({ fileId: file.id, expectedVersion: updated.version });
     expect((await storage.get(file.id)).trashed).toBe(true);
     await expect(storage.readText(file.id)).rejects.toThrow("trashed");
     expect(await readFile(join(root, ".trash", file.id), "utf8")).toBe("two");
@@ -268,7 +268,7 @@ describe("LocalDriveAdapter", () => {
     const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
     await mkdir(join(root, ".trash", file.id));
 
-    await expect(storage.trash(file.id)).rejects.toThrow("trash destination already exists");
+    await expect(storage.trash({ fileId: file.id, expectedVersion: file.version })).rejects.toThrow("trash destination already exists");
     expect((await storage.get(file.id)).trashed).toBe(false);
     await expect(storage.readText(file.id)).resolves.toMatchObject({ text: "one" });
     await expect(access(join(root, ".content", file.id))).resolves.toBeUndefined();
@@ -336,7 +336,7 @@ describe("LocalDriveAdapter", () => {
     const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
     await mkdir(join(root, ".trash", file.id));
 
-    await expect(storage.trash(file.id)).rejects.toThrow("injected rollback metadata failure");
+    await expect(storage.trash({ fileId: file.id, expectedVersion: file.version })).rejects.toThrow("injected rollback metadata failure");
     expect(rollbackAttempted).toBe(true);
 
     const recovered = await LocalDriveAdapter.create(root);
@@ -410,7 +410,7 @@ describe("LocalDriveAdapter", () => {
     const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "authoritative" });
     await writeFile(join(root, ".content", file.id), "tampered cache");
 
-    await storage.trash(file.id);
+    await storage.trash({ fileId: file.id, expectedVersion: file.version });
 
     expect(await readFile(join(root, ".trash", file.id), "utf8")).toBe("authoritative");
     expect(await readFile(join(root, ".revisions", file.id, "1"), "utf8")).toBe("authoritative");
@@ -512,7 +512,7 @@ describe("LocalDriveAdapter", () => {
     const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "authoritative" });
     await rename(join(root, ".content", file.id), join(root, "withheld-cache"));
 
-    await storage.trash(file.id);
+    await storage.trash({ fileId: file.id, expectedVersion: file.version });
 
     expect(await readFile(join(root, ".trash", file.id), "utf8")).toBe("authoritative");
     expect(await readFile(join(root, ".revisions", file.id, "1"), "utf8")).toBe("authoritative");
@@ -525,7 +525,7 @@ describe("LocalDriveAdapter", () => {
     await rename(join(root, ".content", file.id), join(root, "original-cache"));
     await mkdir(join(root, ".content", file.id));
 
-    await storage.trash(file.id);
+    await storage.trash({ fileId: file.id, expectedVersion: file.version });
 
     expect(await readFile(join(root, ".trash", file.id), "utf8")).toBe("authoritative");
     expect(await readFile(join(root, ".revisions", file.id, "1"), "utf8")).toBe("authoritative");
@@ -536,7 +536,7 @@ describe("LocalDriveAdapter", () => {
     const storage = await LocalDriveAdapter.create(root);
     const file = await storage.createText({ parentId: "vault", name: "note.md", mimeType: "text/markdown", text: "one" });
 
-    await storage.trash(file.id);
+    await storage.trash({ fileId: file.id, expectedVersion: file.version });
 
     const stateEntries = await readdir(join(root, ".transaction-state-history"));
     const preservedStates = await Promise.all(

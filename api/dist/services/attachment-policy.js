@@ -189,7 +189,9 @@ const validJpeg = (bytes) => {
         offset += length;
         if (marker !== 0xda)
             continue;
-        while (offset < bytes.length - 2) {
+        // Leave room for the marker byte and its following marker code; the EOI
+        // marker itself occupies the final two bytes and is a valid end point.
+        while (offset < bytes.length - 1) {
             if (bytes[offset++] !== 0xff)
                 continue;
             const next = bytes[offset++];
@@ -223,17 +225,17 @@ const validWebp = (bytes) => {
     return sawImage && offset === bytes.length;
 };
 const validVp8 = (bytes) => {
-    if (bytes.length < 10 || (bytes[0] & 1) !== 0 || !equal(bytes, 3, [0x9d, 0x01, 0x2a]))
+    if (bytes.length < 11 || (bytes[0] & 1) !== 0 || !equal(bytes, 3, [0x9d, 0x01, 0x2a]))
         return false;
     const width = (bytes[6] | ((bytes[7] & 0x3f) << 8));
     const height = (bytes[8] | ((bytes[9] & 0x3f) << 8));
     return width > 0 && height > 0;
 };
 const validVp8l = (bytes) => {
-    if (bytes.length < 5 || bytes[0] !== 0x2f)
-        return false;
-    const bits = (bytes[1] | (bytes[2] << 8) | (bytes[3] << 16) | (bytes[4] << 24)) >>> 0;
-    return (bits & 0x3fff) + 1 > 0 && ((bits >>> 14) & 0x3fff) + 1 > 0;
+    // A five-byte VP8L prefix contains dimensions but no decodable lossless
+    // image stream. Until a bounded full VP8L parser exists, keep it download.
+    void bytes;
+    return false;
 };
 const validGif = (bytes) => {
     if (bytes.length < 14 || (ascii(bytes, 0, 6) !== "GIF87a" && ascii(bytes, 0, 6) !== "GIF89a"))
@@ -269,7 +271,10 @@ const validGif = (bytes) => {
                     return false;
                 offset += tableLength;
             }
-            if (offset >= bytes.length || bytes[offset++] < 2)
+            if (offset >= bytes.length)
+                return false;
+            const minimumCodeSize = bytes[offset++];
+            if (minimumCodeSize < 2 || minimumCodeSize > 8)
                 return false;
             const end = skipGifSubBlocks(bytes, offset, true);
             if (end === false)
@@ -334,6 +339,9 @@ const validPdf = (bytes) => {
         return false;
     const trailerEnd = text.indexOf(">>", cursor + 7);
     if (trailerEnd === -1)
+        return false;
+    const beforeStartXref = text.slice(trailerEnd + 2, terminal.index);
+    if (!/^(?:[\t \r\n]|%[^\r\n]*(?:\r?\n|\r))*$/u.test(beforeStartXref))
         return false;
     const root = /\/Root\s+(\d+)\s+(\d+)\s+R/u.exec(text.slice(cursor, trailerEnd + 2));
     if (root === null)

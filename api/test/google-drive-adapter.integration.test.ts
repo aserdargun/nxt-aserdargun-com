@@ -91,7 +91,10 @@ liveDescribe("GoogleDriveAdapter live integration", () => {
       }
       expect((await storage.listRevisions(fileId)).length).toBeGreaterThan(0);
     } finally {
-      if (fileId !== undefined) await storage.trash(fileId);
+      if (fileId !== undefined) {
+        const file = await storage.get(fileId);
+        await storage.trash({ fileId, expectedVersion: file.version });
+      }
     }
   });
 });

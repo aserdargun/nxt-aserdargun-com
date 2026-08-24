@@ -29,6 +29,11 @@ export interface StorageOperationContext {
     /** Recovery-only metadata reconciliation may inspect, but never expose, trashed files. */
     allowTrashed?: boolean;
 }
+/** Trash is always conditional: callers must bind the exact version observed. */
+export interface StorageTrashInput {
+    fileId: string;
+    expectedVersion: string;
+}
 export declare const assertStorageVersion: (value: unknown) => asserts value is string;
 /** A storage mutation was rejected before it could reach the backing store. */
 export declare class StorageMutationNotAppliedError extends Error {
@@ -89,7 +94,7 @@ export interface StoragePort {
         expectedVersion: string;
         newName?: string;
     }, context?: StorageOperationContext): Promise<StoredFile>;
-    trash(fileId: string, context?: StorageOperationContext, expectedVersion?: string): Promise<StoredFile>;
+    trash(input: StorageTrashInput, context?: StorageOperationContext): Promise<StoredFile>;
     listRevisions(fileId: string, context?: StorageOperationContext): Promise<Array<{
         id: string;
         modifiedTime: string;

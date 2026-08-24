@@ -316,8 +316,11 @@ export class GoogleDriveAdapter implements StoragePort {
     }
   }
 
-  public async trash(fileId: string, context?: StorageOperationContext, expectedVersion?: string): Promise<StoredFile> {
+  public async trash(input: { fileId: string; expectedVersion: string }, context?: StorageOperationContext): Promise<StoredFile> {
+    const { fileId, expectedVersion } = input;
     assertFileId(fileId);
+    assertStorageVersion(expectedVersion);
+    assertVersion(expectedVersion);
     if (fileId === this.rootId)
       throw new DriveContractError("cannot trash configured root");
     let before: StoredFile;
@@ -330,7 +333,7 @@ export class GoogleDriveAdapter implements StoragePort {
       throw preserveSafeError(error, "Google Drive read failed.");
     }
     assertActiveNonShortcut(before);
-    if (expectedVersion !== undefined && before.version !== expectedVersion) throw new StorageVersionConflictError();
+    if (before.version !== expectedVersion) throw new StorageVersionConflictError();
     assertSingleParent(before, "Google Drive Trash verification failed.");
     let response;
     context?.operationBudget?.consume();
@@ -705,8 +708,8 @@ const assertFileId = (value: string): void => {
 const assertName = (value: string): void => {
   if (
     typeof value !== "string" ||
-    value.length === 0 ||
-    value.length > 255 ||
+    [...value.normalize("NFC")].length === 0 ||
+    [...value.normalize("NFC")].length > 255 ||
     /[\r\n\0]/u.test(value)
   ) {
     throw new DriveContractError("Invalid Google Drive item name.");

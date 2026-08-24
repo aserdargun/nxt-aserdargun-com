@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ApiErrorSchema,
   ConfirmationTokenSchema,
+  CreateFolderRequestSchema,
   FolderResponseSchema,
   NoteDocumentSchema,
   NoteFrontmatterSchema,
@@ -236,4 +237,11 @@ it("keeps folder pending names at 255 and attachment pending names at 180 code p
   expect(VaultPendingMutationSchema.safeParse({ ...base, targetName: "f".repeat(255) }).success).toBe(true);
   expect(VaultPendingMutationSchema.safeParse({ ...base, targetName: "f".repeat(256) }).success).toBe(false);
   expect(VaultPendingMutationSchema.safeParse({ ...base, operation: "create-attachment", targetName: "a".repeat(181) }).success).toBe(false);
+});
+
+it("uses NFC Unicode code points, not UTF-16 units, for every folder name boundary", () => {
+  const name = "🙂".repeat(255);
+  expect(CreateFolderRequestSchema.safeParse({ parentId: `v1.${"a".repeat(16)}.${"b".repeat(8)}.${"c".repeat(22)}`, name }).success).toBe(true);
+  expect(UpdateFolderRequestSchema.safeParse({ expectedVersion: "1", name }).success).toBe(true);
+  expect(CreateFolderRequestSchema.safeParse({ parentId: `v1.${"a".repeat(16)}.${"b".repeat(8)}.${"c".repeat(22)}`, name: "🙂".repeat(256) }).success).toBe(false);
 });

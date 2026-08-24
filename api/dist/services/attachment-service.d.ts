@@ -96,6 +96,11 @@ export declare class AttachmentService {
     private serialize;
     private assertNoteId;
     private now;
+    /** A recovery record with malformed timestamps is terminal, never hot-looped. */
+    private hasValidRecoveryTimes;
+    private recoveryDueAt;
+    private hasLiveLease;
+    private terminalizeMalformedRecovery;
 }
 export {};
 //# sourceMappingURL=attachment-service.d.ts.map

@@ -370,7 +370,7 @@ describe("GoogleDriveAdapter", () => {
         })
       })
     );
-    const trashed = await adapter.trash("file-id");
+    const trashed = await adapter.trash({ fileId: "file-id", expectedVersion: "1" });
 
     expect(calls).toEqual([
       { fileId: "file-id", requestBody: { trashed: true }, fields: "id" }
@@ -390,7 +390,7 @@ describe("GoogleDriveAdapter", () => {
       { rootId: "vault" }
     );
 
-    await expect(adapter.trash("vault")).rejects.toThrow(
+    await expect(adapter.trash({ fileId: "vault", expectedVersion: "1" })).rejects.toThrow(
       "cannot trash configured root"
     );
     expect(updateCalls).toBe(0);
@@ -968,7 +968,7 @@ describe("GoogleDriveAdapter", () => {
           })
         })
       );
-      await expect(adapter.trash("file-id")).rejects.toThrow(
+      await expect(adapter.trash({ fileId: "file-id", expectedVersion: "1" })).rejects.toThrow(
         "Trash verification failed"
       );
     }
@@ -983,7 +983,7 @@ describe("GoogleDriveAdapter", () => {
         }
       })
     );
-    await expect(alreadyTrashed.trash("file-id")).rejects.toThrow("trashed");
+    await expect(alreadyTrashed.trash({ fileId: "file-id", expectedVersion: "1" })).rejects.toThrow("trashed");
     expect(updateCalls).toBe(0);
   });
 

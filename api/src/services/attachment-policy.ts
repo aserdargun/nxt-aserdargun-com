@@ -184,7 +184,9 @@ const validJpeg = (bytes: Uint8Array): boolean => {
     if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) || (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) sawFrame = true;
     offset += length;
     if (marker !== 0xda) continue;
-    while (offset < bytes.length - 2) {
+    // Leave room for the marker byte and its following marker code; the EOI
+    // marker itself occupies the final two bytes and is a valid end point.
+    while (offset < bytes.length - 1) {
       if (bytes[offset++] !== 0xff) continue;
       const next = bytes[offset++];
       if (next === 0x00 || (next !== undefined && next >= 0xd0 && next <= 0xd7)) continue;
@@ -213,16 +215,17 @@ const validWebp = (bytes: Uint8Array): boolean => {
 };
 
 const validVp8 = (bytes: Uint8Array): boolean => {
-  if (bytes.length < 10 || (bytes[0]! & 1) !== 0 || !equal(bytes, 3, [0x9d, 0x01, 0x2a])) return false;
+  if (bytes.length < 11 || (bytes[0]! & 1) !== 0 || !equal(bytes, 3, [0x9d, 0x01, 0x2a])) return false;
   const width = (bytes[6]! | ((bytes[7]! & 0x3f) << 8));
   const height = (bytes[8]! | ((bytes[9]! & 0x3f) << 8));
   return width > 0 && height > 0;
 };
 
 const validVp8l = (bytes: Uint8Array): boolean => {
-  if (bytes.length < 5 || bytes[0] !== 0x2f) return false;
-  const bits = (bytes[1]! | (bytes[2]! << 8) | (bytes[3]! << 16) | (bytes[4]! << 24)) >>> 0;
-  return (bits & 0x3fff) + 1 > 0 && ((bits >>> 14) & 0x3fff) + 1 > 0;
+  // A five-byte VP8L prefix contains dimensions but no decodable lossless
+  // image stream. Until a bounded full VP8L parser exists, keep it download.
+  void bytes;
+  return false;
 };
 
 const validGif = (bytes: Uint8Array): boolean => {
@@ -252,7 +255,9 @@ const validGif = (bytes: Uint8Array): boolean => {
         if (offset + tableLength > bytes.length) return false;
         offset += tableLength;
       }
-      if (offset >= bytes.length || bytes[offset++]! < 2) return false;
+      if (offset >= bytes.length) return false;
+      const minimumCodeSize = bytes[offset++] as number;
+      if (minimumCodeSize < 2 || minimumCodeSize > 8) return false;
       const end = skipGifSubBlocks(bytes, offset, true);
       if (end === false) return false;
       offset = end;
@@ -305,6 +310,8 @@ const validPdf = (bytes: Uint8Array): boolean => {
   if (!text.startsWith("trailer", cursor)) return false;
   const trailerEnd = text.indexOf(">>", cursor + 7);
   if (trailerEnd === -1) return false;
+  const beforeStartXref = text.slice(trailerEnd + 2, terminal.index);
+  if (!/^(?:[\t \r\n]|%[^\r\n]*(?:\r?\n|\r))*$/u.test(beforeStartXref)) return false;
   const root = /\/Root\s+(\d+)\s+(\d+)\s+R/u.exec(text.slice(cursor, trailerEnd + 2));
   if (root === null) return false;
   const objectNumber = Number(root[1]);

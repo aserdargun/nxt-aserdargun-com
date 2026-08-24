@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { NoteIdSchema, NoteTitleSchema, TimestampSchema } from "./note.js";
-import { AttachmentNameSchema } from "./attachment.js";
+import { AttachmentNameSchema, FolderNameSchema } from "./attachment.js";
 export const DriveIdSchema = z.string().min(1).max(512);
 /** Internal, random, non-user-controlled proof that an artifact came from one attachment intent. */
 export const AttachmentMutationMarkerSchema = z.string().regex(/^am1\.[A-Za-z0-9_-]{22}$/u);
@@ -60,7 +60,7 @@ export const VaultMutationPhaseSchema = z.enum([
 ]);
 export const VaultMutationDestinationAncestorSchema = z.object({
     id: DriveIdSchema,
-    name: z.string().trim().min(1).max(255),
+    name: FolderNameSchema,
     parentId: DriveIdSchema,
     version: z.string().min(1).max(512)
 }).strict();
@@ -76,7 +76,7 @@ export const VaultPendingMutationSchema = z
     // Folder operations retain the Drive-compatible 255-character request
     // limit. Attachment operations apply their stricter Unicode-safe bound
     // below, rather than accidentally tightening every Task 7 mutation.
-    targetName: z.string().trim().min(1).max(255).optional(),
+    targetName: FolderNameSchema.optional(),
     oldPath: z.string().trim().min(1).max(4096).optional(),
     newPath: z.string().trim().min(1).max(4096).optional(),
     preflightGeneration: z.number().int().nonnegative().optional(),

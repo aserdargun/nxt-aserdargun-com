@@ -45,6 +45,7 @@ export declare class RootBoundaryStorage implements StoragePort {
         name: string;
         mimeType: string;
         bytes: Uint8Array;
+        appProperties?: Record<string, string>;
     }, context?: StorageOperationContext): Promise<StoredFile>;
     updateText(input: {
         fileId: string;
@@ -59,7 +60,10 @@ export declare class RootBoundaryStorage implements StoragePort {
         expectedVersion: string;
         newName?: string;
     }, context?: StorageOperationContext): Promise<StoredFile>;
-    trash(fileId: string, context?: StorageOperationContext): Promise<StoredFile>;
+    trash(input: {
+        fileId: string;
+        expectedVersion: string;
+    }, context?: StorageOperationContext): Promise<StoredFile>;
     listRevisions(fileId: string, context?: StorageOperationContext): Promise<Array<{
         id: string;
         modifiedTime: string;

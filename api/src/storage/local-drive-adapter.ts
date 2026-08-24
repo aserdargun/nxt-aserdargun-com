@@ -211,11 +211,13 @@ export class LocalDriveAdapter implements StoragePort {
     });
   }
 
-  public trash(fileId: string, context?: StorageOperationContext, expectedVersion?: string): Promise<StoredFile> {
+  public trash(input: { fileId: string; expectedVersion: string }, context?: StorageOperationContext): Promise<StoredFile> {
+    assertOpaqueFileId(input.fileId);
+    assertStorageVersion(input.expectedVersion);
     context?.operationBudget?.consume();
     return this.mutate(async (metadata) => {
-      const file = this.getActiveFile(metadata, fileId);
-      if (expectedVersion !== undefined && file.version !== expectedVersion) throw new StorageVersionConflictError();
+      const file = this.getActiveFile(metadata, input.fileId);
+      if (file.version !== input.expectedVersion) throw new StorageVersionConflictError();
       if (file.kind === "root") {
         throw new Error("cannot trash configured root");
       }
@@ -1134,7 +1136,7 @@ const isExactRoot = (value: unknown, id: "vault" | "private"): boolean => isReco
 
 const isSafeFileId = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= MAX_FILE_ID_LENGTH && (value === "vault" || value === "private" || GENERATED_ID.test(value));
 
-const isSafeName = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= MAX_NAME_LENGTH && value !== "." && value !== ".." && !/[\\/\0]/u.test(value);
+const isSafeName = (value: unknown): value is string => typeof value === "string" && [...value.normalize("NFC")].length > 0 && [...value.normalize("NFC")].length <= MAX_NAME_LENGTH && value !== "." && value !== ".." && !/[\\/\0]/u.test(value);
 
 const isSafeMimeType = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 255 && !/[\0\r\n]/u.test(value);
 
@@ -1149,7 +1151,7 @@ const assertOpaqueFileId = (fileId: string): void => {
 };
 
 const assertName = (name: string): void => {
-  if (typeof name !== "string" || name.length === 0 || name.length > MAX_NAME_LENGTH || name === "." || name === ".." || /[\\/\0]/u.test(name)) {
+  if (typeof name !== "string" || [...name.normalize("NFC")].length === 0 || [...name.normalize("NFC")].length > MAX_NAME_LENGTH || name === "." || name === ".." || /[\\/\0]/u.test(name)) {
     throw new Error("invalid name");
   }
 };

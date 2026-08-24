@@ -142,7 +142,7 @@ export class RootBoundaryStorage implements StoragePort {
     return file;
   }
 
-  public async createBytes(input: { parentId: string; name: string; mimeType: string; bytes: Uint8Array }, context?: StorageOperationContext): Promise<StoredFile> {
+  public async createBytes(input: { parentId: string; name: string; mimeType: string; bytes: Uint8Array; appProperties?: Record<string, string> }, context?: StorageOperationContext): Promise<StoredFile> {
     await this.assertInside(input.parentId, context);
     const file = await this.storage.createBytes(input, context);
     await this.assertInside(file.id, context);
@@ -171,9 +171,13 @@ export class RootBoundaryStorage implements StoragePort {
     return file;
   }
 
-  public async trash(fileId: string, context?: StorageOperationContext): Promise<StoredFile> {
-    await this.assertInside(fileId, context);
-    return this.storage.trash(fileId, context);
+  public async trash(input: { fileId: string; expectedVersion: string }, context?: StorageOperationContext): Promise<StoredFile> {
+    assertStorageVersion(input.expectedVersion);
+    await this.assertInside(input.fileId, context);
+    const file = await this.storage.trash(input, context);
+    if (file.id !== input.fileId || !file.trashed) throw new Error("Trash return does not match request");
+    await this.assertReturnedInside(file, { ...context, allowTrashed: true });
+    return file;
   }
 
   public async listRevisions(fileId: string, context?: StorageOperationContext): Promise<Array<{ id: string; modifiedTime: string }>> {

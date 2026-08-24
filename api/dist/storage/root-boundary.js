@@ -148,9 +148,14 @@ export class RootBoundaryStorage {
         await this.assertInside(file.id, context);
         return file;
     }
-    async trash(fileId, context) {
-        await this.assertInside(fileId, context);
-        return this.storage.trash(fileId, context);
+    async trash(input, context) {
+        assertStorageVersion(input.expectedVersion);
+        await this.assertInside(input.fileId, context);
+        const file = await this.storage.trash(input, context);
+        if (file.id !== input.fileId || !file.trashed)
+            throw new Error("Trash return does not match request");
+        await this.assertReturnedInside(file, { ...context, allowTrashed: true });
+        return file;
     }
     async listRevisions(fileId, context) {
         await this.assertInside(fileId, context);

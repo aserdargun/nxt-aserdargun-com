@@ -163,11 +163,13 @@ export class LocalDriveAdapter {
             return this.toStoredFile(file);
         });
     }
-    trash(fileId, context, expectedVersion) {
+    trash(input, context) {
+        assertOpaqueFileId(input.fileId);
+        assertStorageVersion(input.expectedVersion);
         context?.operationBudget?.consume();
         return this.mutate(async (metadata) => {
-            const file = this.getActiveFile(metadata, fileId);
-            if (expectedVersion !== undefined && file.version !== expectedVersion)
+            const file = this.getActiveFile(metadata, input.fileId);
+            if (file.version !== input.expectedVersion)
                 throw new StorageVersionConflictError();
             if (file.kind === "root") {
                 throw new Error("cannot trash configured root");
@@ -1034,7 +1036,7 @@ const isValidAppProperties = (value) => {
 };
 const isExactRoot = (value, id) => isRecord(value) && value.id === id && value.name === id && value.mimeType === FOLDER_MIME_TYPE && Array.isArray(value.parentIds) && value.parentIds.length === 0 && value.version === "1" && value.modifiedTime === "1970-01-01T00:00:00.000Z" && value.size === 0 && value.trashed === false && value.kind === "root" && value.contentRevision === undefined;
 const isSafeFileId = (value) => typeof value === "string" && value.length > 0 && value.length <= MAX_FILE_ID_LENGTH && (value === "vault" || value === "private" || GENERATED_ID.test(value));
-const isSafeName = (value) => typeof value === "string" && value.length > 0 && value.length <= MAX_NAME_LENGTH && value !== "." && value !== ".." && !/[\\/\0]/u.test(value);
+const isSafeName = (value) => typeof value === "string" && [...value.normalize("NFC")].length > 0 && [...value.normalize("NFC")].length <= MAX_NAME_LENGTH && value !== "." && value !== ".." && !/[\\/\0]/u.test(value);
 const isSafeMimeType = (value) => typeof value === "string" && value.length > 0 && value.length <= 255 && !/[\0\r\n]/u.test(value);
 const isPositiveDecimal = (value) => typeof value === "string" && /^(?:[1-9][0-9]*)$/u.test(value);
 const isValidTimestamp = (value) => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value) && Number.isFinite(Date.parse(value));
@@ -1044,7 +1046,7 @@ const assertOpaqueFileId = (fileId) => {
     }
 };
 const assertName = (name) => {
-    if (typeof name !== "string" || name.length === 0 || name.length > MAX_NAME_LENGTH || name === "." || name === ".." || /[\\/\0]/u.test(name)) {
+    if (typeof name !== "string" || [...name.normalize("NFC")].length === 0 || [...name.normalize("NFC")].length > MAX_NAME_LENGTH || name === "." || name === ".." || /[\\/\0]/u.test(name)) {
         throw new Error("invalid name");
     }
 };

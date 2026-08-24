@@ -228,8 +228,11 @@ export class GoogleDriveAdapter {
             throw mutationOutcomeUnknown(error, input.fileId, "Google Drive move verification failed.");
         }
     }
-    async trash(fileId, context, expectedVersion) {
+    async trash(input, context) {
+        const { fileId, expectedVersion } = input;
         assertFileId(fileId);
+        assertStorageVersion(expectedVersion);
+        assertVersion(expectedVersion);
         if (fileId === this.rootId)
             throw new DriveContractError("cannot trash configured root");
         let before;
@@ -243,7 +246,7 @@ export class GoogleDriveAdapter {
             throw preserveSafeError(error, "Google Drive read failed.");
         }
         assertActiveNonShortcut(before);
-        if (expectedVersion !== undefined && before.version !== expectedVersion)
+        if (before.version !== expectedVersion)
             throw new StorageVersionConflictError();
         assertSingleParent(before, "Google Drive Trash verification failed.");
         let response;
@@ -559,8 +562,8 @@ const assertFileId = (value) => {
 };
 const assertName = (value) => {
     if (typeof value !== "string" ||
-        value.length === 0 ||
-        value.length > 255 ||
+        [...value.normalize("NFC")].length === 0 ||
+        [...value.normalize("NFC")].length > 255 ||
         /[\r\n\0]/u.test(value)) {
         throw new DriveContractError("Invalid Google Drive item name.");
     }

@@ -144,7 +144,7 @@ export class VaultService {
             await this.reserve(mutation);
             try {
                 await this.beginDriveMutation(mutation.id);
-                const trashed = await this.options.storage.trash(file.id);
+                const trashed = await this.options.storage.trash({ fileId: file.id, expectedVersion: file.version });
                 if (!trashed.trashed)
                     throw new ApiResponseError("DRIVE_UNAVAILABLE");
                 await this.markDriveApplied(mutation.id, trashed.id);
@@ -306,11 +306,11 @@ export class VaultService {
                 throw new ApiResponseError("CONFLICT");
             this.verifyConfirmation(input.folderId, input.confirmationToken, confirmation);
         }
-        const mutation = this.newMutation({ operation: "trash-folder", folderId: input.folderId, oldPath: folder.path });
+        const mutation = this.newMutation({ operation: "trash-folder", folderId: input.folderId, oldPath: folder.path, expectedVersion: folder.version });
         await this.reserve(mutation);
         try {
             await this.beginDriveMutation(mutation.id);
-            const trashed = await this.options.storage.trash(input.folderId);
+            const trashed = await this.options.storage.trash({ fileId: input.folderId, expectedVersion: folder.version });
             if (!trashed.trashed)
                 throw new ApiResponseError("DRIVE_UNAVAILABLE");
             await this.markDriveApplied(mutation.id, trashed.id);
@@ -525,7 +525,11 @@ export class VaultService {
             }
             if (index.rescanState !== null)
                 throw new ApiResponseError("CONFLICT");
-            if (isSourceMutation(mutation) && index.pendingMutations.some((pending) => pending.operation === "trash-attachment" && pending.phase !== "conflicted")) {
+            // An attachment deletion is a global reference fence.  A pending or
+            // terminal source/path mutation can change the meaning of a relative
+            // attachment URL, so neither side is allowed to pass it until recovery
+            // (or the deliberately requested rescan) has resolved the index.
+            if (isSourceMutation(mutation) && index.pendingMutations.some((pending) => pending.operation === "trash-attachment")) {
                 throw new ApiResponseError("CONFLICT");
             }
             if (index.entries.some((entry) => mutation.noteId !== undefined && entry.id === mutation.noteId && mutation.operation === "create-note"))
@@ -1177,8 +1181,29 @@ const removeEntries = (index, removed) => ({
 const removePathPrefix = (index, prefix) => removeEntries(index, new Set(index.entries.filter((entry) => entry.path.startsWith(`${prefix}/`)).map((entry) => entry.id)));
 const replacePathPrefix = (index, oldPrefix, newPrefix) => ({
     ...index,
-    entries: index.entries.map((entry) => entry.path.startsWith(`${oldPrefix}/`) ? { ...entry, path: `${newPrefix}${entry.path.slice(oldPrefix.length)}` } : entry)
+    entries: index.entries.map((entry) => {
+        if (!entry.path.startsWith(`${oldPrefix}/`))
+            return entry;
+        const nextPath = `${newPrefix}${entry.path.slice(oldPrefix.length)}`;
+        return {
+            ...entry,
+            path: nextPath,
+            // Projections hold canonical resolved targets. Reconstruct the original
+            // relative relationship from the old note path, then resolve it at the
+            // new path; opaque /api URLs are absolute identities and stay intact.
+            attachmentReferences: entry.attachmentReferences.flatMap((reference) => {
+                const rebased = rebaseAttachmentReference(reference, entry.path, nextPath);
+                return rebased.startsWith("_assets/") || rebased.startsWith("/api/private/attachments/") ? [rebased] : [];
+            })
+        };
+    })
 });
+const rebaseAttachmentReference = (reference, oldNotePath, newNotePath) => {
+    if (!reference.startsWith("_assets/"))
+        return reference;
+    const relative = posix.relative(posix.dirname(oldNotePath), reference);
+    return posix.normalize(posix.join(posix.dirname(newNotePath), relative)).normalize("NFC");
+};
 const sanitizeName = (value) => {
     const withoutMarkdown = value.normalize("NFKC").trim().replace(/\.md$/iu, "");
     const sanitized = [...withoutMarkdown].map((character) => {
@@ -1187,7 +1212,12 @@ const sanitizeName = (value) => {
     }).join("").replace(/[\\/:*?"<>|]/gu, " - ").replace(/\s+/gu, " ").replace(/(?:\s*-\s*)+/gu, " - ").replace(/[. ]+$/gu, "").trim();
     if (sanitized.length === 0 || sanitized === "." || sanitized === "..")
         throw new ApiResponseError("INVALID_INPUT");
-    return [...sanitized].slice(0, 240).join("");
+    // Drive folder operations retain Task 7's portable 255 Unicode code-point
+    // bound.  Do not silently truncate: a caller must not receive a different
+    // folder name than it requested, and emoji are two UTF-16 units each.
+    if ([...sanitized.normalize("NFC")].length > 255)
+        throw new ApiResponseError("INVALID_INPUT");
+    return sanitized;
 };
 const uniqueFolded = (values) => {
     const seen = new Set();
@@ -1210,7 +1240,8 @@ const mutationsOverlap = (first, second) => (first.noteId !== undefined && first
     pathsOverlap(first.oldPath, second.newPath) ||
     pathsOverlap(first.newPath, second.oldPath) ||
     pathsOverlap(first.newPath, second.newPath);
-const isSourceMutation = (mutation) => mutation.operation === "create-note" || mutation.operation === "update-note" || mutation.operation === "move-note";
+const isSourceMutation = (mutation) => mutation.operation === "create-note" || mutation.operation === "update-note" || mutation.operation === "move-note" || mutation.operation === "trash-note" ||
+    mutation.operation === "create-folder" || mutation.operation === "rename-folder" || mutation.operation === "move-folder" || mutation.operation === "update-folder" || mutation.operation === "trash-folder";
 const recalculateAttachmentLinks = (source, noteId, oldPath, newPath) => {
     const rewrite = (rawUrl) => {
         const wrapped = rawUrl.startsWith("<") && rawUrl.endsWith(">");

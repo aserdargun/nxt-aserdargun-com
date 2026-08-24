@@ -124,10 +124,28 @@ describe("RootBoundaryStorage", () => {
         text: "next"
       })
     ).resolves.toMatchObject({ id: "note", parentIds: ["vault"] });
-    await expect(bounded.trash("note")).resolves.toMatchObject({
+    await expect(bounded.trash({ fileId: "note", expectedVersion: "2" })).resolves.toMatchObject({
       id: "note",
       trashed: true
     });
+  });
+
+  it("forwards a structurally required conditional Trash version to the inner storage", async () => {
+    const file: StoredFile = {
+      id: "note", name: "note.md", mimeType: "text/markdown", parentIds: ["vault"],
+      version: "7", modifiedTime: "2026-08-23T00:00:00.000Z", size: 4, trashed: false
+    };
+    const seen: Array<{ fileId: string; expectedVersion: string }> = [];
+    const inner: StoragePort = {
+      get: async (id) => id === "vault" ? { ...file, id: "vault", name: "vault", mimeType: FOLDER_MIME_TYPE, parentIds: [], size: 0 } : file,
+      listChildren: async () => ({ files: [] }), readText: async () => { throw new Error("unused"); }, readBytes: async () => { throw new Error("unused"); },
+      createFolder: async () => { throw new Error("unused"); }, createText: async () => { throw new Error("unused"); }, createBytes: async () => { throw new Error("unused"); },
+      updateText: async () => { throw new Error("unused"); }, move: async () => { throw new Error("unused"); },
+      trash: async (input) => { seen.push(input); return { ...file, trashed: true, version: "8" }; }, listRevisions: async () => []
+    };
+    const bounded = new RootBoundaryStorage(inner, "vault");
+    await expect(bounded.trash({ fileId: "note", expectedVersion: "7" })).resolves.toMatchObject({ trashed: true });
+    expect(seen).toEqual([{ fileId: "note", expectedVersion: "7" }]);
   });
 });
 
