@@ -555,3 +555,121 @@ None blocking. VP8L, VP8X, and PDFs containing streams intentionally remain down
 ## External state
 
 No live Google Drive, OAuth, credentials, `.env.local`, cloud resource, DNS, Azure, GitHub, deployment, remote repository, or other external mutable state was read or changed. All behavior tests used local/fake adapters, the live Drive integration remained skipped, and no commit was pushed.
+
+# Fix round 5/5
+
+## Status
+
+DONE
+
+## Files
+
+- `api/src/services/rescan-service.ts` and `packages/contracts/src/vault.ts`: bind a scan to its unchanged index generation and the exact ID plus SHA-256 fingerprint of every captured terminal conflict; reject every added, live, newly terminal, changed, or reused pending mutation before swapping entries; restart stale scans only through a fresh generation binding; and restore the prior exact index after an accepted final write loses its mandatory readback.
+- `api/src/services/attachment-service.ts`: reject a 257th pending attachment reservation as a trusted capacity conflict.
+- `api/src/services/attachment-policy.ts`: keep the brief's pure WebP/PDF allowlist mapping while a separate production structural-proof gate forces every detected WebP and PDF to download. PNG, JPEG, and GIF remain eligible for structurally proven inline delivery.
+- `api/test/{rescan-service,rescan-persistence,attachment-service,attachment-policy}.test.ts`: cover live attachment and Task 7 intents during scan finalization, later terminal conflicts, changed/reused terminal identities, accepted-write readback rollback, 256 simultaneous real attachment recovery lifecycles, the 257th capacity failure, fresh-instance paginated rebuild, the real low-level stale claimant update, and the WebP/PDF reviewer probes.
+- Generated API and contract artifacts were rebuilt from the verified sources.
+
+## RED evidence
+
+WebP/PDF production downgrade:
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/api exec vitest run test/attachment-policy.test.ts
+```
+
+```text
+Test Files 1 failed (1)
+Tests 2 failed | 20 passed (22)
+FAIL known-valid and positive-partition WebP reached inline instead of download.
+FAIL known-valid classic-xref PDF reached inline instead of download.
+Exit status 1
+```
+
+Fail-closed rescan finalization:
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/api exec vitest run test/rescan-service.test.ts
+```
+
+```text
+Test Files 1 failed (1)
+Tests 5 failed | 3 passed (8)
+FAIL live attachment and Task 7 intents were silently preserved while staged entries swapped.
+FAIL a later terminal conflict was preserved while the captured conflict was cleared.
+FAIL changed-fingerprint and reused-ID conflicts were accepted by ID alone.
+Exit status 1
+```
+
+Real 256-conflict lifecycle and final readback rollback:
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/api exec vitest run test/rescan-persistence.test.ts -t "reclaims exactly 256"
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/api exec vitest run test/rescan-persistence.test.ts -t "rolls back an accepted final swap"
+```
+
+```text
+Capacity: 1 failed; the 257th production reservation returned DRIVE_UNAVAILABLE instead of the trusted CONFLICT capacity result.
+Readback: 1 failed; an accepted final swap remained visible after its injected readback loss instead of restoring the old index and rescan state.
+Exit status 1 for each RED command
+```
+
+## GREEN evidence
+
+Focused policy, recovery, lifecycle, and rescan validation:
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm --filter @nxt/api exec vitest run test/attachment-policy.test.ts test/attachment-service.test.ts test/rescan-service.test.ts test/rescan-persistence.test.ts
+```
+
+```text
+Test Files 4 passed (4)
+Tests 74 passed (74)
+Exit status 0
+```
+
+The corrected claimant test pauses after the real `SystemFileStore` read/updater and update pre-read, immediately before the low-level conditional update. A second store renews the lease; the released stale update conflicts, retries its updater at least twice, returns no claim, and performs no recovery action. Existing same-service and cross-service exclusive-claim and fresh-side-effect assertions remain green.
+
+## Root gates
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH node --version
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm lint
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm typecheck
+env -u GOOGLE_CLIENT_ID -u GOOGLE_CLIENT_SECRET -u GOOGLE_REFRESH_TOKEN -u NXT_VAULT_DRIVE_FOLDER_ID -u NXT_PRIVATE_DRIVE_FOLDER_ID -u NXT_VAULT_INDEX_DRIVE_FILE_ID -u NXT_PREFERENCES_DRIVE_FILE_ID -u NXT_NOTES_DRIVE_FOLDER_ID -u NXT_INBOX_DRIVE_FOLDER_ID -u NXT_PLANS_DRIVE_FOLDER_ID -u NXT_ARCHIVE_DRIVE_FOLDER_ID -u NXT_ASSETS_DRIVE_FOLDER_ID -u RUN_GOOGLE_DRIVE_INTEGRATION PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm test
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm build
+git diff --check
+```
+
+```text
+v22.23.1
+eslint .: exit status 0
+packages/contracts/domain/api typecheck: Done
+packages/contracts: 1 file passed, 11 tests passed
+packages/domain: 4 files passed, 19 tests passed
+api: 16 files passed, 1 skipped; 341 tests passed, 1 skipped
+packages/contracts/domain/api build: Done
+git diff --check: exit status 0
+```
+
+## Root verification and self-review
+
+- Finalization requires the unchanged captured generation, the same number of pending mutations, unique captured IDs/fingerprints, terminal phase for every current mutation, and an exact canonical fingerprint match. No live/current projection is rebased over staged data; only the 256 exact captured terminal records are cleared after the actual Drive-derived index succeeds.
+- A mutation that begins and later resolves still advances generation, so the old cursor remains rejected. A new `cursor: null` request replaces that stale staging state and performs a fresh scan; tests prove both attachment and Task 7 paths keep the prior committed index and untouched intent on rejection.
+- A final write/readback ambiguity is compensated only when the observed index exactly equals this caller's proposed completion. The prior exact staged index is conditionally restored and read back; unknown or later state is never overwritten.
+- The capacity test invokes real `AttachmentService.upload` ambiguous outcomes and three bounded production recovery horizons for all 256 simultaneous records. Every record is exactly attempt 1, then 2, then terminal attempt 3, with no premature conflict. The 257th reservation is rejected, fresh `RescanService` instances return bounded path-only recovery pages, the actual 257-note Drive tree rebuild clears all 256 captured records, and a real subsequent upload succeeds.
+- `classifyAttachment("image/webp")` and `classifyAttachment("application/pdf")` remain `inline` as specified, but `detectAttachment` cannot inline either MIME without a complete proof gate. Known-valid files plus positive-partition VP8, invalid PDF free-list, missing Pages graph, injected pre-xref/script, impossible xref, and trailing polyglot probes all download. Proven PNG/JPEG/GIF and their malformed boundaries remain covered.
+- The approved three Task 8 routes and existing twelve Task 7 routes are unchanged. Claim-token exclusivity, conditional Trash, reference/folder serialization, Unicode/base64 handling, renderer/auth/opaque-ID boundaries, system-file pinning, `file-type@22.0.2`, headers, and status invariants remain covered by the full suite.
+
+## Commits
+
+- Implementation: `482d04054a433db5beb668d563546d21e4a85079` (`fix: fail closed attachment rescan finalization`).
+- Report: this separate documentation commit (its final hash is included in the task handoff).
+
+## Concerns
+
+None blocking. WebP and PDF intentionally remain download-only until a complete decoder/parser can provide the same bounded structural proof as the eligible raster formats.
+
+## External state
+
+No live Google Drive, OAuth, credentials, `.env.local`, cloud resource, DNS, Azure, GitHub, deployment, remote repository, or other external mutable state was read or changed. All behavior tests used local or deterministic in-memory fake adapters, live Drive integration remained skipped, no commit was pushed, and no external state was mutated.
