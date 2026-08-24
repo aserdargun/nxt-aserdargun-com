@@ -1,6 +1,7 @@
 import { z } from "zod";
 export declare const MAX_NOTE_SOURCE_BYTES = 100000;
 export declare const OpaqueIdSchema: z.ZodString;
+export declare const isOpaqueId: (value: unknown) => value is string;
 export declare const ConfirmationTokenSchema: z.ZodString;
 export declare const ScanCursorSchema: z.ZodString;
 export declare const SafeVaultAttachmentSchema: z.ZodObject<{

@@ -41,6 +41,8 @@ export class StorageOperationBudget {
 
 export interface StorageOperationContext {
   operationBudget?: StorageOperationBudget;
+  /** Recovery-only metadata reconciliation may inspect, but never expose, trashed files. */
+  allowTrashed?: boolean;
 }
 
 export const assertStorageVersion: (value: unknown) => asserts value is string = (value) => {

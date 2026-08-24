@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AttachmentNameSchema } from "./attachment.js";
 import { NoteDocumentSchema, NoteIdSchema, NoteTitleSchema, TimestampSchema } from "./note.js";
 import { PublicIdSchema } from "./publication.js";
 import { PreferencesPanelStateSchema, PreferencesSchema, RescanRecoveryErrorSchema, VaultIndexEntrySchema } from "./vault.js";
@@ -9,15 +10,16 @@ const VersionSchema = z.string().min(1).max(512);
 const ChecksumSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const TreeVersionSchema = ChecksumSchema;
 export const OpaqueIdSchema = z.string().max(512).regex(/^v1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{1,450}\.[A-Za-z0-9_-]{22}$/u);
+export const isOpaqueId = (value) => OpaqueIdSchema.safeParse(value).success;
 export const ConfirmationTokenSchema = z.string().max(512).regex(/^c1\.[A-Za-z0-9_-]{16,430}\.[A-Za-z0-9_-]{43}$/u);
 export const ScanCursorSchema = z.string().max(512).regex(/^s1\.[A-Za-z0-9_-]{16,430}\.[A-Za-z0-9_-]{43}$/u);
 export const SafeVaultAttachmentSchema = z.object({
-    name: z.string().trim().min(1).max(512),
+    name: AttachmentNameSchema,
     mimeType: z.string().trim().min(1).max(256),
     size: z.number().int().nonnegative(),
     disposition: z.enum(["inline", "download"]).optional()
 }).strict();
-export const SafeVaultIndexEntrySchema = VaultIndexEntrySchema.omit({ driveId: true, attachments: true }).extend({
+export const SafeVaultIndexEntrySchema = VaultIndexEntrySchema.omit({ driveId: true, attachments: true, attachmentReferences: true }).extend({
     outboundNoteIds: z.array(NoteIdSchema).max(100),
     unresolvedWikiTargets: z.array(z.string().trim().min(1).max(160)).max(100),
     attachments: z.array(SafeVaultAttachmentSchema).max(100),

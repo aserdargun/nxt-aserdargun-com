@@ -1,4 +1,5 @@
 import { defaultSchema } from "rehype-sanitize";
+import { isOpaqueId } from "@nxt/contracts";
 import rehypeHighlight from "rehype-highlight";
 import rehypeSanitize from "rehype-sanitize";
 import rehypeStringify from "rehype-stringify";
@@ -51,7 +52,6 @@ function textFromHast(tree) {
     visit(tree);
     return parts.join(" ").replace(/\s+/gu, " ").trim();
 }
-const PRIVATE_ATTACHMENT_PATH = /^\/api\/private\/attachments\/[A-Za-z0-9_-]+$/u;
 const PUBLIC_ATTACHMENT_PATH = /^\/api\/public\/assets\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+$/u;
 const APPLICATION_ORIGIN = "https://nxt.invalid";
 function isApplicationAttachmentUrl(value) {
@@ -61,7 +61,8 @@ function isApplicationAttachmentUrl(value) {
         const url = new URL(value, APPLICATION_ORIGIN);
         if (url.origin !== APPLICATION_ORIGIN || url.search.length > 0 || url.hash.length > 0 || url.pathname !== value)
             return false;
-        return PRIVATE_ATTACHMENT_PATH.test(url.pathname) || PUBLIC_ATTACHMENT_PATH.test(url.pathname);
+        const privatePrefix = "/api/private/attachments/";
+        return (url.pathname.startsWith(privatePrefix) && isOpaqueId(url.pathname.slice(privatePrefix.length))) || PUBLIC_ATTACHMENT_PATH.test(url.pathname);
     }
     catch {
         return false;

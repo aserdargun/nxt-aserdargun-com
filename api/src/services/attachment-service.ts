@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { posix } from "node:path";
 import { NoteIdSchema, type VaultAttachment, type VaultIndex, type VaultPendingMutation } from "@nxt/contracts";
+import { attachmentIsReferenced, projectionReferencesAttachment } from "@nxt/domain";
 import { ApiResponseError } from "../http/api-response.js";
 import {
   StorageMutationNotAppliedError,
@@ -16,6 +16,7 @@ import { preserveApiError, type SystemFileStore } from "./system-file-store.js";
 import type { VaultNoteResult, VaultService } from "./vault-service.js";
 import {
   MAX_ATTACHMENT_BYTES,
+  assertAttachmentDeclaration,
   detectAttachment,
   normalizeAttachmentName,
   resolveAttachmentName,
@@ -26,6 +27,7 @@ const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const SHORTCUT_MIME_TYPE = "application/vnd.google-apps.shortcut";
 const MAX_LIST_PAGES = 20;
 const MAX_DRIVE_OPERATIONS = 80;
+const MAX_RECOVERY_MUTATIONS = 8;
 const MUTATION_TTL_MS = 15 * 60 * 1_000;
 
 export interface AttachmentRecord {
@@ -82,6 +84,7 @@ export class AttachmentService {
     this.assertNoteId(input.noteId);
     if (!(input.bytes instanceof Uint8Array)) throw new ApiResponseError("INVALID_INPUT");
     if (input.bytes.byteLength > MAX_ATTACHMENT_BYTES) throw new ApiResponseError("TOO_LARGE");
+    assertAttachmentDeclaration(input.declaredMime);
     await this.reconcileRecoverableMutations();
     const context = this.context();
     const owner = await this.getOwnedNote(input.noteId);
@@ -93,7 +96,10 @@ export class AttachmentService {
       noteId: input.noteId,
       parentId: folder.id,
       targetName: name,
-      expectedChecksum: checksum(input.bytes)
+      expectedChecksum: checksum(input.bytes),
+      attachmentMimeType: detected.mimeType,
+      attachmentSize: input.bytes.byteLength,
+      attachmentDisposition: detected.disposition
     });
     await this.reserve(mutation);
     let createdId: string | undefined;
@@ -120,7 +126,7 @@ export class AttachmentService {
       await this.finalizeUpload(mutation.id, input.noteId, result, owner.driveId);
       return result;
     } catch (error) {
-      await this.handleFailure(mutation.id, error, createdId);
+      await this.handleFailure(mutation.id, error, createdId, createdId === undefined);
       throw toApiError(error);
     }
   }
@@ -155,10 +161,15 @@ export class AttachmentService {
       const current = await this.findAttachment(input.assetId);
       const owner = await this.getOwnedNote(current.noteId);
       const record = this.toRecord(current.attachment);
-      if (isAttachmentReferenced(owner, record.name, input.referenceId)) throw new ApiResponseError("CONFLICT");
+      const preflight = await this.assertAttachmentUnreferenced({
+        noteId: current.noteId,
+        name: record.name,
+        ...(input.referenceId === undefined ? {} : { opaqueId: input.referenceId }),
+        owner
+      });
       const context = this.context();
       const folder = await this.assetFolder(current.noteId, context);
-      await this.verifyReadback({ driveId: input.assetId, noteId: current.noteId, folderId: folder.id, attachment: record, context });
+      const readback = await this.verifyReadback({ driveId: input.assetId, noteId: current.noteId, folderId: folder.id, attachment: record, context });
       const mutation = this.newMutation({
         operation: "trash-attachment",
         noteId: current.noteId,
@@ -166,15 +177,21 @@ export class AttachmentService {
         parentId: folder.id,
         targetName: record.name,
         expectedChecksum: record.checksum,
-        originalChecksum: owner.checksum
+        originalChecksum: owner.checksum,
+        oldPath: owner.path,
+        expectedVersion: readback.file.version,
+        preflightGeneration: preflight.generation,
+        attachmentMimeType: record.mimeType,
+        attachmentSize: record.size,
+        attachmentDisposition: record.disposition,
+        attachmentReferenceId: input.referenceId
       });
       await this.reserve(mutation);
+      let driveStarted = false;
       try {
-        const recheckedOwner = await this.getOwnedNote(current.noteId);
-        if (recheckedOwner.checksum !== owner.checksum || isAttachmentReferenced(recheckedOwner, record.name, input.referenceId)) {
-          throw new ApiResponseError("CONFLICT");
-        }
+        await this.assertTrashReservationCurrent(mutation, record, input.referenceId);
         await this.beginDriveMutation(mutation.id);
+        driveStarted = true;
         const trashed = await this.options.storage.trash(input.assetId, context);
         if (
           trashed.id !== input.assetId || !trashed.trashed || trashed.name !== record.name ||
@@ -185,7 +202,7 @@ export class AttachmentService {
         await this.clearMutation(mutation.id);
         return { trashed: true };
       } catch (error) {
-        await this.handleFailure(mutation.id, error, input.assetId);
+        await this.handleFailure(mutation.id, error, input.assetId, !driveStarted);
         throw toApiError(error);
       }
     });
@@ -215,6 +232,39 @@ export class AttachmentService {
     }
   }
 
+  private async assertAttachmentUnreferenced(input: {
+    noteId: string;
+    name: string;
+    opaqueId?: string;
+    owner: VaultNoteResult;
+  }): Promise<{ generation: number }> {
+    const index = await this.options.indexStore.read();
+    if (this.indexReferencesAttachment(index.value, input.noteId, input.name, input.opaqueId) || attachmentIsReferenced({
+      source: input.owner.source,
+      notePath: input.owner.path,
+      noteId: input.noteId,
+      name: input.name,
+      ...(input.opaqueId === undefined ? {} : { opaqueId: input.opaqueId })
+    })) throw new ApiResponseError("CONFLICT");
+    return { generation: index.value.generation };
+  }
+
+  private indexReferencesAttachment(index: VaultIndex, noteId: string, name: string, opaqueId?: string): boolean {
+    return index.entries.some((entry) => entry.id !== noteId && projectionReferencesAttachment(entry.attachmentReferences, { noteId, name, ...(opaqueId === undefined ? {} : { opaqueId }) }));
+  }
+
+  private async assertTrashReservationCurrent(mutation: VaultPendingMutation, record: AttachmentRecord, opaqueId?: string): Promise<void> {
+    const owner = await this.getOwnedNote(mutation.noteId as string);
+    if (owner.checksum !== mutation.originalChecksum || owner.path !== mutation.oldPath) throw new ApiResponseError("CONFLICT");
+    const index = await this.options.indexStore.read();
+    const reservation = index.value.pendingMutations.find((candidate) => candidate.id === mutation.id);
+    if (
+      reservation === undefined || reservation.ownerId !== this.ownerId || reservation.fence !== mutation.fence ||
+      reservation.phase !== "reserved" || this.indexReferencesAttachment(index.value, mutation.noteId as string, record.name, opaqueId) ||
+      attachmentIsReferenced({ source: owner.source, notePath: owner.path, noteId: mutation.noteId as string, name: record.name, ...(opaqueId === undefined ? {} : { opaqueId }) })
+    ) throw new ApiResponseError("CONFLICT");
+  }
+
   private async assetFolder(noteId: string, context: StorageOperationContext): Promise<StoredFile> {
     const root = await this.getActiveFolder(this.options.assetsRootId, context);
     if (root.name !== "_assets" || root.parentIds.length !== 1) throw new ApiResponseError("DRIVE_UNAVAILABLE");
@@ -238,6 +288,17 @@ export class AttachmentService {
     } catch (error) {
       throw preserveApiError(error, "DRIVE_UNAVAILABLE");
     }
+  }
+
+  /** Recovery must never recreate a parent while deciding an old mutation. */
+  private async existingAssetFolder(noteId: string, context: StorageOperationContext): Promise<StoredFile> {
+    const root = await this.getActiveFolder(this.options.assetsRootId, context);
+    if (root.name !== "_assets" || root.parentIds.length !== 1) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+    const matching = (await this.listAll(root.id, context)).filter((file) => !file.trashed && sameName(file.name, noteId));
+    if (matching.length !== 1) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+    const folder = matching[0] as StoredFile;
+    this.assertExactChildFolder(folder, root.id, noteId);
+    return folder;
   }
 
   private async getActiveFolder(fileId: string, context: StorageOperationContext): Promise<StoredFile> {
@@ -293,7 +354,7 @@ export class AttachmentService {
     return { ...attachment, checksum: attachment.checksum, disposition: attachment.disposition };
   }
 
-  private newMutation(changes: Pick<VaultPendingMutation, "operation" | "noteId" | "driveId" | "parentId" | "targetName" | "expectedChecksum" | "originalChecksum">): VaultPendingMutation {
+  private newMutation(changes: Pick<VaultPendingMutation, "operation" | "noteId" | "driveId" | "parentId" | "targetName" | "expectedChecksum" | "originalChecksum" | "oldPath" | "expectedVersion" | "preflightGeneration" | "attachmentMimeType" | "attachmentSize" | "attachmentDisposition" | "attachmentReferenceId">): VaultPendingMutation {
     const now = this.now();
     return {
       id: this.options.createId?.() ?? randomUUID(),
@@ -309,6 +370,11 @@ export class AttachmentService {
   private async reserve(mutation: VaultPendingMutation): Promise<void> {
     await this.options.indexStore.compareAndSet((index) => {
       if (!index.entries.some((entry) => entry.id === mutation.noteId)) throw new ApiResponseError("NOT_FOUND");
+      if (mutation.operation === "trash-attachment") {
+        if (mutation.preflightGeneration !== index.generation || this.indexReferencesAttachment(index, mutation.noteId as string, mutation.targetName as string, mutation.attachmentReferenceId)) {
+          throw new ApiResponseError("CONFLICT");
+        }
+      }
       if (index.pendingMutations.some((candidate) => candidate.noteId === mutation.noteId || (candidate.parentId === mutation.parentId && candidate.targetName === mutation.targetName))) {
         throw new ApiResponseError("CONFLICT");
       }
@@ -372,7 +438,11 @@ export class AttachmentService {
     }));
   }
 
-  private async handleFailure(mutationId: string, error: unknown, knownDriveId?: string): Promise<void> {
+  private async handleFailure(mutationId: string, error: unknown, knownDriveId?: string, knownNotApplied = false): Promise<void> {
+    if (knownNotApplied && error instanceof ApiResponseError) {
+      await this.clearMutation(mutationId).catch(() => undefined);
+      return;
+    }
     if (error instanceof StorageMutationNotAppliedError) {
       await this.clearMutation(mutationId).catch(() => undefined);
       return;
@@ -395,57 +465,95 @@ export class AttachmentService {
 
   private async reconcileRecoverableMutations(): Promise<void> {
     const snapshot = await this.options.indexStore.read();
-    const mutations = snapshot.value.pendingMutations.filter((mutation) => mutation.operation === "create-attachment" || mutation.operation === "trash-attachment");
-    for (const mutation of mutations) {
+    const now = this.now().getTime();
+    const mutations = snapshot.value.pendingMutations.filter((mutation) => {
+      if (mutation.operation !== "create-attachment" && mutation.operation !== "trash-attachment") return false;
+      if (mutation.phase === "reserved") return Date.parse(mutation.expiresAt) <= now;
+      if (mutation.phase === "drive-inflight") return Date.parse(mutation.reconcileAfter ?? mutation.expiresAt) <= now;
+      return true;
+    }).slice(0, MAX_RECOVERY_MUTATIONS);
+    for (const candidate of mutations) {
+      const mutation = await this.claimRecovery(candidate);
+      if (mutation === undefined) continue;
       if (mutation.operation === "create-attachment") await this.reconcileUpload(mutation);
       else await this.reconcileTrash(mutation);
     }
   }
 
+  private async claimRecovery(candidate: VaultPendingMutation): Promise<VaultPendingMutation | undefined> {
+    let claimed: VaultPendingMutation | undefined;
+    await this.options.indexStore.compareAndSet((index) => {
+      const current = index.pendingMutations.find((mutation) => mutation.id === candidate.id);
+      if (current === undefined || current.fence !== candidate.fence) return index;
+      claimed = {
+        ...current,
+        ownerId: this.ownerId,
+        fence: current.fence + 1,
+        phase: current.phase === "drive-inflight" ? "outcome-unknown" : current.phase,
+        reconcileAfter: this.now().toISOString()
+      };
+      return bump(index, { pendingMutations: index.pendingMutations.map((mutation) => mutation.id === candidate.id ? claimed as VaultPendingMutation : mutation) });
+    }).catch(() => undefined);
+    return claimed;
+  }
+
   private async reconcileUpload(mutation: VaultPendingMutation): Promise<void> {
-    if (mutation.noteId === undefined || mutation.parentId === undefined || mutation.targetName === undefined || mutation.expectedChecksum === undefined) return;
-    let driveId = mutation.driveId;
+    if (!this.hasUploadIdentity(mutation)) return;
     const context = this.context();
-    if (driveId === undefined) {
-      const matches = (await this.listAll(mutation.parentId, context)).filter((file) => sameName(file.name, mutation.targetName as string));
-      if (matches.length !== 1) return;
-      driveId = (matches[0] as StoredFile).id;
-    }
     try {
-      const folder = await this.assetFolder(mutation.noteId, context);
+      const folder = await this.existingAssetFolder(mutation.noteId, context);
       if (folder.id !== mutation.parentId) return;
-      const metadata = await this.options.storage.get(driveId, context);
-      const preliminary: AttachmentRecord = {
-        driveId,
-        name: mutation.targetName,
-        mimeType: metadata.mimeType,
-        size: metadata.size,
-        checksum: mutation.expectedChecksum,
-        disposition: "download"
-      };
-      const verified = await this.verifyReadback({ driveId, noteId: mutation.noteId, folderId: mutation.parentId, attachment: preliminary, context });
-      const recovered: AttachmentRecord = {
-        driveId,
-        name: verified.file.name,
-        mimeType: verified.mimeType,
-        size: verified.file.size,
-        checksum: verified.checksum,
-        disposition: "download"
-      };
-      await this.finalizeRecoveredUpload(mutation.id, mutation.noteId, recovered);
+      const candidates = (await this.listAll(folder.id, context)).filter((file) => !file.trashed && sameName(file.name, mutation.targetName));
+      if (candidates.length === 0) {
+        await this.clearOwnedMutation(mutation);
+        return;
+      }
+      if (mutation.driveId !== undefined && !candidates.some((candidate) => candidate.id === mutation.driveId)) return;
+      const exact: AttachmentRecord[] = [];
+      for (const candidate of candidates) {
+        const record = await this.recoverExactUploadRecord(mutation, candidate.id, folder.id, context);
+        if (record !== undefined) exact.push(record);
+      }
+      if (exact.length === 1 && candidates.length === 1) {
+        const record = exact[0] as AttachmentRecord;
+        const projection = await this.uploadProjectionState(mutation, record);
+        if (projection === "already-applied") {
+          await this.clearOwnedMutation(mutation);
+          return;
+        }
+        if (projection === "name-conflict") {
+          const trashed = await this.options.storage.trash(record.driveId, context);
+          if (trashed.id === record.driveId && trashed.trashed) await this.clearOwnedMutation(mutation);
+          return;
+        }
+        await this.finalizeRecoveredUpload(mutation.id, mutation.noteId, record);
+        return;
+      }
+      // Duplicate matching artifacts are never exposed.  They can only be
+      // quarantined after every candidate proves it is this mutation's exact,
+      // unindexed artifact; unrelated or ambiguous files retain the fence.
+      if (exact.length === candidates.length && exact.length > 1 && await this.areUnindexedArtifacts(mutation, exact)) {
+        for (const record of exact) {
+          const trashed = await this.options.storage.trash(record.driveId, context);
+          if (!trashed.trashed || trashed.id !== record.driveId) return;
+        }
+        await this.clearOwnedMutation(mutation);
+      }
     } catch {
-      // An unknown mutation remains reserved and is never exposed until an exact readback proves it safe.
+      // A dependency outage or uncertain readback keeps the fenced intent for
+      // a later owner-triggered recovery; it is never surfaced as an asset.
     }
   }
 
   private async finalizeRecoveredUpload(mutationId: string, noteId: string, record: AttachmentRecord): Promise<void> {
     await this.options.indexStore.compareAndSet((index) => {
-      const mutation = index.pendingMutations.find((candidate) => candidate.id === mutationId);
+      const mutation = index.pendingMutations.find((candidate) => candidate.id === mutationId && candidate.ownerId === this.ownerId);
       const entry = index.entries.find((candidate) => candidate.id === noteId);
       if (mutation === undefined || entry === undefined) return index;
-      if (entry.attachments.some((attachment) => attachment.driveId === record.driveId || sameName(attachment.name, record.name))) {
+      if (entry.attachments.some((attachment) => attachment.driveId === record.driveId)) {
         return bump(index, { pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutationId) });
       }
+      if (entry.attachments.some((attachment) => sameName(attachment.name, record.name))) return index;
       return bump(index, {
         entries: index.entries.map((candidate) => candidate.id === noteId ? { ...candidate, attachments: [...candidate.attachments, record] } : candidate),
         pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutationId)
@@ -454,8 +562,110 @@ export class AttachmentService {
   }
 
   private async reconcileTrash(mutation: VaultPendingMutation): Promise<void> {
-    if (mutation.phase !== "index-applied") return;
-    await this.clearMutation(mutation.id).catch(() => undefined);
+    if (!this.hasTrashIdentity(mutation)) return;
+    const context = { ...this.context(), allowTrashed: true };
+    try {
+      const attachment = this.recordFromMutation(mutation);
+      const file = await this.verifyTrashReadback(mutation, attachment, context);
+      if (file.trashed) {
+        await this.applyTrashProjection(mutation.id, mutation.noteId, mutation.driveId);
+        await this.clearOwnedMutation(mutation);
+        return;
+      }
+      // The trash did not apply.  Preserve (or restore) the projection and
+      // release the expired reservation so retries cannot exhaust capacity.
+      await this.restoreActiveProjection(mutation, attachment);
+      await this.clearOwnedMutation(mutation);
+    } catch {
+      // Do not guess at a missing/ambiguous file: retain the fenced intent.
+    }
+  }
+
+  private hasUploadIdentity(mutation: VaultPendingMutation): mutation is VaultPendingMutation & { noteId: string; parentId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition } {
+    return mutation.noteId !== undefined && mutation.parentId !== undefined && mutation.targetName !== undefined && mutation.expectedChecksum !== undefined && mutation.attachmentMimeType !== undefined && mutation.attachmentSize !== undefined && mutation.attachmentDisposition !== undefined;
+  }
+
+  private hasTrashIdentity(mutation: VaultPendingMutation): mutation is VaultPendingMutation & { noteId: string; driveId: string; parentId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition } {
+    return mutation.noteId !== undefined && mutation.driveId !== undefined && mutation.parentId !== undefined && mutation.targetName !== undefined && mutation.expectedChecksum !== undefined && mutation.attachmentMimeType !== undefined && mutation.attachmentSize !== undefined && mutation.attachmentDisposition !== undefined;
+  }
+
+  private recordFromMutation(mutation: VaultPendingMutation & { driveId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition }): AttachmentRecord {
+    return { driveId: mutation.driveId, name: mutation.targetName, checksum: mutation.expectedChecksum, mimeType: mutation.attachmentMimeType, size: mutation.attachmentSize, disposition: mutation.attachmentDisposition };
+  }
+
+  private async recoverExactUploadRecord(mutation: VaultPendingMutation & { noteId: string; parentId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition }, driveId: string, folderId: string, context: StorageOperationContext): Promise<AttachmentRecord | undefined> {
+    const record: AttachmentRecord = {
+      driveId,
+      name: mutation.targetName,
+      checksum: mutation.expectedChecksum,
+      mimeType: mutation.attachmentMimeType,
+      size: mutation.attachmentSize,
+      disposition: mutation.attachmentDisposition
+    };
+    try {
+      await this.verifyReadback({ driveId, noteId: mutation.noteId, folderId, attachment: record, context });
+      return record;
+    } catch { return undefined; }
+  }
+
+  private async areUnindexedArtifacts(mutation: VaultPendingMutation, records: readonly AttachmentRecord[]): Promise<boolean> {
+    const index = await this.options.indexStore.read();
+    const owner = index.value.entries.find((entry) => entry.id === mutation.noteId);
+    return owner !== undefined && records.every((record) => !owner.attachments.some((attachment) => attachment.driveId === record.driveId || sameName(attachment.name, record.name)));
+  }
+
+  private async uploadProjectionState(mutation: VaultPendingMutation & { noteId: string }, record: AttachmentRecord): Promise<"absent" | "already-applied" | "name-conflict"> {
+    const index = await this.options.indexStore.read();
+    const entry = index.value.entries.find((candidate) => candidate.id === mutation.noteId);
+    if (entry === undefined) return "name-conflict";
+    if (entry.attachments.some((attachment) => attachment.driveId === record.driveId)) return "already-applied";
+    return entry.attachments.some((attachment) => sameName(attachment.name, record.name)) ? "name-conflict" : "absent";
+  }
+
+  private async restoreActiveProjection(mutation: VaultPendingMutation & { noteId: string }, attachment: AttachmentRecord): Promise<void> {
+    await this.options.indexStore.compareAndSet((index) => {
+      const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id && candidate.ownerId === this.ownerId && candidate.fence === mutation.fence);
+      const entry = index.entries.find((candidate) => candidate.id === mutation.noteId);
+      if (current === undefined || entry === undefined) return index;
+      if (entry.attachments.some((candidate) => candidate.driveId === attachment.driveId || sameName(candidate.name, attachment.name))) return index;
+      return bump(index, { entries: index.entries.map((candidate) => candidate.id === mutation.noteId ? { ...candidate, attachments: [...candidate.attachments, attachment] } : candidate) });
+    });
+  }
+
+  private async verifyTrashReadback(mutation: VaultPendingMutation & { driveId: string; parentId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition }, attachment: AttachmentRecord, context: StorageOperationContext): Promise<StoredFile> {
+    const metadata = await this.options.storage.get(mutation.driveId, context);
+    if (!this.matchesTrashMetadata(mutation, metadata)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+    let readback: Awaited<ReturnType<StoragePort["readBytes"]>>;
+    try { readback = await this.options.storage.readBytes(mutation.driveId, context); }
+    catch (error) {
+      // Drive can make a confirmed trashed object non-downloadable. Its
+      // returned metadata is still the bounded authoritative readback; the
+      // checksum was fenced by the active pre-Drive verification.
+      if (metadata.trashed) return metadata;
+      throw error;
+    }
+    const file = readback.file;
+    if (
+      metadata.id !== file.id || metadata.version !== file.version || file.id !== mutation.driveId ||
+      file.parentIds.length !== 1 || file.parentIds[0] !== mutation.parentId || file.name !== mutation.targetName ||
+      file.mimeType !== mutation.attachmentMimeType || file.size !== mutation.attachmentSize || readback.bytes.byteLength !== mutation.attachmentSize ||
+      readback.checksum !== mutation.expectedChecksum || checksum(readback.bytes) !== mutation.expectedChecksum
+    ) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+    const detected = await detectAttachment({ name: file.name, declaredMime: file.mimeType, bytes: readback.bytes });
+    if (detected.mimeType !== attachment.mimeType || (attachment.disposition === "inline" && detected.disposition !== "inline")) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+    return file;
+  }
+
+  private matchesTrashMetadata(mutation: VaultPendingMutation & { driveId: string; parentId: string; targetName: string; attachmentMimeType: string; attachmentSize: number }, metadata: StoredFile): boolean {
+    return metadata.id === mutation.driveId && metadata.parentIds.length === 1 && metadata.parentIds[0] === mutation.parentId && metadata.name === mutation.targetName && metadata.mimeType === mutation.attachmentMimeType && metadata.size === mutation.attachmentSize;
+  }
+
+  private async clearOwnedMutation(mutation: VaultPendingMutation): Promise<void> {
+    await this.options.indexStore.compareAndSet((index) => {
+      const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id);
+      if (current === undefined || current.ownerId !== this.ownerId || current.fence !== mutation.fence) return index;
+      return bump(index, { pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutation.id) });
+    });
   }
 
   private async listAll(parentId: string, context: StorageOperationContext): Promise<StoredFile[]> {
@@ -508,21 +718,4 @@ const toApiError = (error: unknown): Error => {
   if (error instanceof ApiResponseError || error instanceof StorageOperationBudgetExceededError) return error;
   if (error instanceof StorageVersionConflictError) return new ApiResponseError("CONFLICT");
   return new ApiResponseError("DRIVE_UNAVAILABLE");
-};
-
-const isAttachmentReferenced = (note: VaultNoteResult, name: string, referenceId?: string): boolean => {
-  const assetPath = `_assets/${note.note.frontmatter.id}/${name}`;
-  const urls: string[] = [];
-  const collect = (_full: string, _prefix: string, destination: string): string => {
-    urls.push(destination);
-    return _full;
-  };
-  note.source.replace(/(\]\(\s*)(<[^>\r\n]+>|[^\s)\r\n]+)(?=(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|\([^)\r\n]*\)))?\s*\))/gu, collect);
-  note.source.replace(/^(\s{0,3}\[[^\]\r\n]+\]:\s*)(<[^>\r\n]+>|[^\s\r\n]+)/gmu, collect);
-  return urls.some((raw) => {
-    const url = raw.startsWith("<") && raw.endsWith(">") ? raw.slice(1, -1) : raw;
-    if (referenceId !== undefined && url === `/api/private/attachments/${referenceId}`) return true;
-    if (url.startsWith("/") || /^[a-z][a-z0-9+.-]*:/iu.test(url)) return false;
-    return posix.normalize(posix.join(posix.dirname(note.path), url)) === assetPath;
-  });
 };

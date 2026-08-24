@@ -264,7 +264,7 @@ describe("private vault handlers", () => {
       unresolvedWikiTargets: Array.from({ length: 120 }, (_, index) => `Missing-${index}-${"x".repeat(140)}`),
       attachments: Array.from({ length: 120 }, (_, index) => ({
         driveId: `raw-asset-${index}`,
-        name: `${String(index).padStart(3, "0")}-${"x".repeat(500)}.png`,
+        name: `${String(index).padStart(3, "0")}-${"x".repeat(172)}.png`,
         mimeType: `application/${"x".repeat(244)}`,
         size: index
       })),

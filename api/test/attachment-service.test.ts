@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HttpRequest } from "@azure/functions";
 import { VaultIndexSchema, type VaultIndex } from "@nxt/contracts";
-import { parseNote, serializeNote } from "@nxt/domain";
+import { parseNote, renderMarkdown, serializeNote } from "@nxt/domain";
 import { describe, expect, it, vi } from "vitest";
 import { createAttachmentHandlers } from "../src/functions/attachments.js";
 import { task8Routes } from "../src/functions/index.js";
@@ -20,7 +20,7 @@ import {
 
 const noteId = "018f47d2-6a34-7b2a-9f21-8a7034963aef";
 const otherNoteId = "018f47d2-6a34-7b2a-9f21-8a7034963af0";
-const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+const png = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=", "base64"));
 
 const request = (method: string, url: string, body?: unknown, params: Record<string, string> = {}, headers: Record<string, string> = {}): HttpRequest =>
   new HttpRequest({
@@ -154,13 +154,19 @@ describe("AttachmentService", () => {
 
   it("rejects declared Drive folder and shortcut MIME types before creating an asset", async () => {
     const { service, raw } = await setup();
+    const createFolder = vi.spyOn(raw, "createFolder");
     const createBytes = vi.spyOn(raw, "createBytes");
+    const updateText = vi.spyOn(raw, "updateText");
+    const trash = vi.spyOn(raw, "trash");
 
     await expect(service.upload({ noteId, name: "diagram.png", declaredMime: "application/vnd.google-apps.folder", bytes: png }))
       .rejects.toMatchObject({ code: "UNSAFE_FILE" });
     await expect(service.upload({ noteId, name: "diagram.png", declaredMime: "application/vnd.google-apps.shortcut", bytes: png }))
       .rejects.toMatchObject({ code: "UNSAFE_FILE" });
     expect(createBytes).not.toHaveBeenCalled();
+    expect(createFolder).not.toHaveBeenCalled();
+    expect(updateText).not.toHaveBeenCalled();
+    expect(trash).not.toHaveBeenCalled();
   });
 
   it("rejects an asset that is indexed under the wrong note folder", async () => {
@@ -178,6 +184,28 @@ describe("AttachmentService", () => {
     const source = sourceFor(noteId, "Plan", `![diagram](<../../_assets/${noteId}/diagram.png> "Diagram")\n\n[download]: ../../_assets/${noteId}/diagram.png\n`);
     const { service } = await setup({ source });
     const uploaded = await service.upload({ noteId, name: "diagram.png", declaredMime: "image/png", bytes: png });
+
+    await expect(service.trash({ assetId: uploaded.driveId })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("uses the index reference projection for other notes without rereading every source", async () => {
+    const { service, indexStore } = await setup();
+    const uploaded = await service.upload({ noteId, name: "shared.png", declaredMime: "image/png", bytes: png });
+    const current = await indexStore.read();
+    const owner = current.value.entries[0];
+    if (owner === undefined) throw new Error("missing owner");
+    await indexStore.update({
+      ...current.value,
+      entries: [...current.value.entries, {
+        ...owner,
+        id: otherNoteId,
+        title: "Other",
+        driveId: "other-drive-id",
+        path: "Notes/Inbox/Other.md",
+        attachmentReferences: [`_assets/${noteId}/shared.png`],
+        attachments: []
+      }]
+    });
 
     await expect(service.trash({ assetId: uploaded.driveId })).rejects.toMatchObject({ code: "CONFLICT" });
   });
@@ -208,7 +236,9 @@ describe("AttachmentService", () => {
     await expect(uncertain.trash({ assetId: uploaded.driveId })).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
     expect((await indexStore.read()).value.pendingMutations[0]).toMatchObject({ operation: "trash-attachment", phase: "outcome-unknown" });
     await expect(new AttachmentService({ storage: raw, indexStore, vault, assetsRootId: ids.assets.id }).read(uploaded.driveId))
-      .rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect((await indexStore.read()).value.pendingMutations).toHaveLength(0);
+    expect((await indexStore.read()).value.entries[0]?.attachments).toHaveLength(0);
   });
 
   it("retains a recovery mutation and exposes nothing after an ambiguous upload", async () => {
@@ -256,8 +286,49 @@ describe("AttachmentService", () => {
     if (assetId === undefined) throw new Error("ambiguous upload did not retain its Drive ID");
     const recovered = new AttachmentService({ storage: raw, indexStore, vault, assetsRootId: ids.assets.id });
 
-    await expect(recovered.read(assetId)).resolves.toMatchObject({ name: "recover.png", mimeType: "image/png", disposition: "download" });
+    await expect(recovered.read(assetId)).resolves.toMatchObject({ name: "recover.png", mimeType: "image/png", disposition: "inline" });
   });
+
+  it("quarantines multiple exact unindexed artifacts rather than exposing an ambiguous upload", async () => {
+    const { raw, indexStore, ids, vault } = await setup();
+    const storage: StoragePort = {
+      get: raw.get.bind(raw), listChildren: raw.listChildren.bind(raw), readText: raw.readText.bind(raw), readBytes: raw.readBytes.bind(raw),
+      createFolder: raw.createFolder.bind(raw), createText: raw.createText.bind(raw),
+      createBytes: async (input) => {
+        const created = await raw.createBytes(input);
+        throw new StorageMutationOutcomeUnknownError(created.id);
+      },
+      updateText: raw.updateText.bind(raw), move: raw.move.bind(raw), trash: raw.trash.bind(raw), listRevisions: raw.listRevisions.bind(raw)
+    };
+    const uncertain = new AttachmentService({ storage, indexStore, vault, assetsRootId: ids.assets.id });
+    await expect(uncertain.upload({ noteId, name: "duplicate.png", declaredMime: "image/png", bytes: png })).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+    const mutation = (await indexStore.read()).value.pendingMutations[0];
+    if (mutation?.parentId === undefined || mutation.driveId === undefined) throw new Error("missing ambiguous upload intent");
+    const duplicate = await raw.createBytes({ parentId: mutation.parentId, name: "duplicate.png", mimeType: "image/png", bytes: png });
+    const recovered = new AttachmentService({ storage: raw, indexStore, vault, assetsRootId: ids.assets.id });
+
+    await expect(recovered.read(mutation.driveId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect((await raw.get(mutation.driveId)).trashed).toBe(true);
+    expect((await raw.get(duplicate.id)).trashed).toBe(true);
+    expect((await indexStore.read()).value.pendingMutations).toHaveLength(0);
+  });
+
+  it("reclaims expired un-applied upload fences across more than 256 sequential failures", async () => {
+    const { raw, indexStore, vault, ids } = await setup();
+    const unavailable: StoragePort = {
+      get: raw.get.bind(raw), listChildren: raw.listChildren.bind(raw), readText: raw.readText.bind(raw), readBytes: raw.readBytes.bind(raw),
+      createFolder: raw.createFolder.bind(raw), createText: raw.createText.bind(raw),
+      createBytes: async () => { throw new StorageMutationOutcomeUnknownError(); },
+      updateText: raw.updateText.bind(raw), move: raw.move.bind(raw), trash: raw.trash.bind(raw), listRevisions: raw.listRevisions.bind(raw)
+    };
+    const failing = new AttachmentService({ storage: unavailable, indexStore, vault, assetsRootId: ids.assets.id });
+    for (let index = 0; index < 257; index += 1) {
+      await expect(failing.upload({ noteId, name: `retry-${index}.png`, declaredMime: "image/png", bytes: png })).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+    }
+    const recovered = new AttachmentService({ storage: raw, indexStore, vault, assetsRootId: ids.assets.id });
+    await expect(recovered.upload({ noteId, name: "after-recovery.png", declaredMime: "image/png", bytes: png })).resolves.toMatchObject({ name: "after-recovery.png" });
+    expect((await indexStore.read()).value.pendingMutations).toHaveLength(0);
+  }, 20_000);
 
   it("rejects a readback mismatch without projecting an attachment", async () => {
     const { raw, indexStore, ids, vault } = await setup();
@@ -278,7 +349,7 @@ describe("AttachmentService", () => {
   });
 
   it("rechecks owner Markdown after reserving Trash so a new reference wins the race", async () => {
-    const { service, raw, vault, ids } = await setup();
+    const { service, raw, vault, ids, indexStore } = await setup();
     const uploaded = await service.upload({ noteId, name: "race.png", declaredMime: "image/png", bytes: png });
     let reads = 0;
     vault.getNote.mockImplementation(async () => {
@@ -298,10 +369,19 @@ describe("AttachmentService", () => {
 
     await expect(service.trash({ assetId: uploaded.driveId })).rejects.toMatchObject({ code: "CONFLICT" });
     expect((await raw.get(uploaded.driveId)).trashed).toBe(false);
+    expect((await indexStore.read()).value.pendingMutations).toHaveLength(0);
   });
 });
 
 describe("private attachment handlers", () => {
+  it("keeps a real opaque codec token through the Markdown attachment renderer", async () => {
+    const codec = new OpaqueIdCodec("handler-test-opaque-id-secret-more-than-32-bytes");
+    const assetId = codec.encode("raw-drive-id");
+    const rendered = await renderMarkdown(`![asset](/api/private/attachments/${assetId})`);
+    expect(rendered.html).toContain(`src="/api/private/attachments/${assetId}"`);
+    expect(rendered.html).not.toContain("raw-drive-id");
+  });
+
   it("registers only the approved three attachment routes without changing Task 7 routes", () => {
     expect(task8Routes.map(({ method, route }) => `${method} ${route}`)).toEqual([
       "POST private/attachments",
@@ -370,5 +450,26 @@ describe("private attachment handlers", () => {
     expect(JSON.stringify(response.jsonBody)).not.toContain("raw-drive-id");
     expect(oversized.status).toBe(413);
     expect(upload).toHaveBeenCalledOnce();
+  });
+
+  it("accepts exactly 20 MiB and rejects max-plus-one, missing or lying lengths before service resolution", async () => {
+    const codec = new OpaqueIdCodec("handler-test-opaque-id-secret-more-than-32-bytes");
+    const upload = vi.fn(async () => ({ driveId: "raw-drive-id", name: "boundary.bin", mimeType: "application/octet-stream", size: 20 * 1024 * 1024, checksum: "a".repeat(64), disposition: "download" as const }));
+    const resolveServices = vi.fn(() => ({ attachments: { upload, read: vi.fn(), trash: vi.fn() } }) as never);
+    const handlers = createAttachmentHandlers({
+      authorize: () => ({ provider: "github", userId: "owner", userDetails: "aserdargun" }),
+      resolveServices,
+      idCodec: codec
+    });
+    const exact = Buffer.alloc(20 * 1024 * 1024, 0x61).toString("base64");
+    const over = Buffer.alloc(20 * 1024 * 1024 + 1, 0x61).toString("base64");
+    const body = (bytesBase64: string) => ({ noteId, name: "boundary.bin", declaredMime: "application/octet-stream", bytesBase64 });
+
+    expect((await handlers.create(request("POST", "https://nxt.example/api/private/attachments", body(exact)))).status).toBe(201);
+    expect((await handlers.create(request("POST", "https://nxt.example/api/private/attachments", body(over)))).status).toBe(413);
+    expect((await handlers.create(request("POST", "https://nxt.example/api/private/attachments", body(over), {}, { "content-length": "1" }))).status).toBe(413);
+    expect((await handlers.create(request("POST", "https://nxt.example/api/private/attachments", body("A=AA"), {}, { "content-length": "1, 1" }))).status).toBe(400);
+    expect(upload).toHaveBeenCalledOnce();
+    expect(resolveServices).toHaveBeenCalledOnce();
   });
 });

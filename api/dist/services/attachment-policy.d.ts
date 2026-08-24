@@ -1,10 +1,13 @@
 export declare const MAX_ATTACHMENT_BYTES: number;
+export declare const attachmentNameLength: (value: string) => number;
 export type AttachmentDisposition = "inline" | "download";
 export type DetectedAttachment = {
     mimeType: string;
     disposition: AttachmentDisposition;
 };
 export declare const classifyAttachment: (mimeType: string) => AttachmentDisposition;
+/** Reject Drive container declarations before any storage operation can occur. */
+export declare const assertAttachmentDeclaration: (declaredMime: string) => void;
 export declare const normalizeAttachmentName: (value: string) => string;
 export declare const resolveAttachmentName: (requestedName: string, existingNames: readonly string[]) => string;
 export declare const detectAttachment: (input: {

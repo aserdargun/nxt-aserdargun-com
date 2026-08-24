@@ -2,6 +2,7 @@ import { VaultIndexSchema, type VaultAttachment, type VaultIndex } from "@nxt/co
 import { parseNote } from "./note-codec.js";
 import { deriveMarkdownPlainText } from "./render-markdown.js";
 import { extractWikiLinks, resolveWikiTarget } from "./wiki-links.js";
+import { attachmentReferenceProjection } from "./attachment-references.js";
 
 export interface IndexedSourceNote {
   source: string;
@@ -60,6 +61,7 @@ export function deriveIndex(records: readonly IndexedSourceNote[]): VaultIndex {
       excerpt: bodyText.slice(0, 4_000),
       outboundNoteIds,
       unresolvedWikiTargets,
+      attachmentReferences: attachmentReferenceProjection(record.source, record.path),
       attachments: record.attachments.map((attachment) => ({ ...attachment })),
       backlinks: [] as string[]
     };

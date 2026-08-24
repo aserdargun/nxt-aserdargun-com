@@ -19,10 +19,19 @@ describe("renderMarkdown", () => {
   });
 
   it("keeps only canonical app attachment image routes", async () => {
-    const rendered = await renderMarkdown("![external](https://attacker.example/track.png)\n![encoded](/api%2Fprivate%2Fattachments%2Fasset)\n![protocol-relative](//attacker.example/track.png)\n![private](/api/private/attachments/asset_1)\n![public](/api/public/assets/public-id/asset-id)");
+    const token = "v1.abcdefghijklmnop.asset_1.abcdefghijklmnopqrstuv";
+    const rendered = await renderMarkdown(`![external](https://attacker.example/track.png)\n![encoded](/api%2Fprivate%2Fattachments%2Fasset)\n![protocol-relative](//attacker.example/track.png)\n![private](/api/private/attachments/${token})\n![public](/api/public/assets/public-id/asset-id)`);
     expect(rendered.html).not.toMatch(/attacker\.example|api%2Fprivate/iu);
-    expect(rendered.html).toContain('src="/api/private/attachments/asset_1"');
+    expect(rendered.html).toContain(`src="/api/private/attachments/${token}"`);
     expect(rendered.html).toContain('src="/api/public/assets/public-id/asset-id"');
+  });
+
+  it("keeps the exact opaque attachment token grammar emitted by the private codec", async () => {
+    const token = "v1.abcdefghijklmnop.a_drive_identifier-with-dots.abcdefghijklmnopqrstuv";
+    const rendered = await renderMarkdown(`![asset](/api/private/attachments/${token})\n![raw](/api/private/attachments/raw-drive-id)\n![query](/api/private/attachments/${token}?x=1)`);
+    expect(rendered.html).toContain(`src="/api/private/attachments/${token}"`);
+    expect(rendered.html).not.toContain("raw-drive-id");
+    expect(rendered.html).not.toContain("?x=1");
   });
 
   it("namespaces clobber-prone heading identifiers in the outline and HTML", async () => {

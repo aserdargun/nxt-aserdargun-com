@@ -26,6 +26,7 @@ export declare const VaultIndexEntrySchema: z.ZodObject<{
     excerpt: z.ZodString;
     outboundNoteIds: z.ZodArray<z.ZodUUID>;
     unresolvedWikiTargets: z.ZodArray<z.ZodString>;
+    attachmentReferences: z.ZodDefault<z.ZodArray<z.ZodString>>;
     attachments: z.ZodArray<z.ZodObject<{
         driveId: z.ZodString;
         name: z.ZodString;
@@ -101,6 +102,13 @@ export declare const VaultPendingMutationSchema: z.ZodObject<{
     moveExpectedVersion: z.ZodOptional<z.ZodString>;
     originalChecksum: z.ZodOptional<z.ZodString>;
     expectedChecksum: z.ZodOptional<z.ZodString>;
+    attachmentMimeType: z.ZodOptional<z.ZodString>;
+    attachmentSize: z.ZodOptional<z.ZodNumber>;
+    attachmentDisposition: z.ZodOptional<z.ZodEnum<{
+        inline: "inline";
+        download: "download";
+    }>>;
+    attachmentReferenceId: z.ZodOptional<z.ZodString>;
     source: z.ZodOptional<z.ZodString>;
     ownerId: z.ZodOptional<z.ZodUUID>;
     fence: z.ZodDefault<z.ZodNumber>;
@@ -288,6 +296,7 @@ export declare const VaultIndexSchema: z.ZodObject<{
         excerpt: z.ZodString;
         outboundNoteIds: z.ZodArray<z.ZodUUID>;
         unresolvedWikiTargets: z.ZodArray<z.ZodString>;
+        attachmentReferences: z.ZodDefault<z.ZodArray<z.ZodString>>;
         attachments: z.ZodArray<z.ZodObject<{
             driveId: z.ZodString;
             name: z.ZodString;
@@ -335,6 +344,13 @@ export declare const VaultIndexSchema: z.ZodObject<{
         moveExpectedVersion: z.ZodOptional<z.ZodString>;
         originalChecksum: z.ZodOptional<z.ZodString>;
         expectedChecksum: z.ZodOptional<z.ZodString>;
+        attachmentMimeType: z.ZodOptional<z.ZodString>;
+        attachmentSize: z.ZodOptional<z.ZodNumber>;
+        attachmentDisposition: z.ZodOptional<z.ZodEnum<{
+            inline: "inline";
+            download: "download";
+        }>>;
+        attachmentReferenceId: z.ZodOptional<z.ZodString>;
         source: z.ZodOptional<z.ZodString>;
         ownerId: z.ZodOptional<z.ZodUUID>;
         fence: z.ZodDefault<z.ZodNumber>;

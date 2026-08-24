@@ -1,12 +1,13 @@
 import { z } from "zod";
 import { NoteIdSchema, NoteTitleSchema, TimestampSchema } from "./note.js";
+import { AttachmentNameSchema } from "./attachment.js";
 
 export const DriveIdSchema = z.string().min(1).max(512);
 
 export const VaultAttachmentSchema = z
   .object({
     driveId: DriveIdSchema,
-    name: z.string().trim().min(1).max(512),
+    name: AttachmentNameSchema,
     mimeType: z.string().trim().min(1).max(256),
     size: z.number().int().nonnegative(),
     checksum: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
@@ -31,6 +32,8 @@ export const VaultIndexEntrySchema = z
     excerpt: z.string().max(4_000),
     outboundNoteIds: z.array(NoteIdSchema).max(10_000),
     unresolvedWikiTargets: z.array(z.string().trim().min(1).max(160)).max(10_000),
+    /** Canonical local attachment targets, maintained from the note source. */
+    attachmentReferences: z.array(z.string().trim().min(1).max(4096)).max(10_000).default([]),
     attachments: z.array(VaultAttachmentSchema).max(10_000),
     backlinks: z.array(NoteIdSchema).max(10_000)
   })
@@ -77,7 +80,7 @@ export const VaultPendingMutationSchema = z
     folderId: DriveIdSchema.optional(),
     parentId: DriveIdSchema.optional(),
     targetParentId: DriveIdSchema.optional(),
-    targetName: z.string().trim().min(1).max(255).optional(),
+    targetName: AttachmentNameSchema.optional(),
     oldPath: z.string().trim().min(1).max(4096).optional(),
     newPath: z.string().trim().min(1).max(4096).optional(),
     preflightGeneration: z.number().int().nonnegative().optional(),
@@ -86,6 +89,10 @@ export const VaultPendingMutationSchema = z
     moveExpectedVersion: z.string().min(1).max(512).optional(),
     originalChecksum: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
     expectedChecksum: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+    attachmentMimeType: z.string().trim().min(1).max(256).optional(),
+    attachmentSize: z.number().int().nonnegative().max(20 * 1024 * 1024).optional(),
+    attachmentDisposition: z.enum(["inline", "download"]).optional(),
+    attachmentReferenceId: z.string().max(512).optional(),
     source: z.string().max(100_000).optional(),
     ownerId: NoteIdSchema.optional(),
     fence: z.number().int().positive().default(1),

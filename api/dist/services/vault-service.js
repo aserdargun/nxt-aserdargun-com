@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { posix } from "node:path";
 import { MAX_NOTE_SOURCE_BYTES, NoteIdSchema, NoteTitleSchema } from "@nxt/contracts";
-import { deriveMarkdownPlainText, extractWikiLinks, parseNote, resolveWikiTarget, serializeNote } from "@nxt/domain";
+import { deriveMarkdownPlainText, attachmentReferenceProjection, extractWikiLinks, parseNote, resolveWikiTarget, serializeNote } from "@nxt/domain";
 import { ApiResponseError } from "../http/api-response.js";
 import { StorageMutationNotAppliedError, StorageMutationOutcomeUnknownError, StorageVersionConflictError } from "../storage/storage-port.js";
 import { preserveApiError } from "./system-file-store.js";
@@ -1150,6 +1150,7 @@ const mergeEntry = (index, source, file, path, attachments) => {
         excerpt: bodyText.slice(0, 4_000),
         outboundNoteIds,
         unresolvedWikiTargets,
+        attachmentReferences: attachmentReferenceProjection(source, path),
         attachments: attachments.map((attachment) => ({ ...attachment })),
         backlinks: [...(existing?.backlinks ?? [])]
     };

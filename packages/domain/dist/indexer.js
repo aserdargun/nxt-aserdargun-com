@@ -2,6 +2,7 @@ import { VaultIndexSchema } from "@nxt/contracts";
 import { parseNote } from "./note-codec.js";
 import { deriveMarkdownPlainText } from "./render-markdown.js";
 import { extractWikiLinks, resolveWikiTarget } from "./wiki-links.js";
+import { attachmentReferenceProjection } from "./attachment-references.js";
 const unique = (values) => [...new Set(values)];
 const fold = (value) => value.normalize("NFKC").toLocaleLowerCase("en-US");
 /** Derives the stored index from source notes; backlinks are always recomputed. */
@@ -49,6 +50,7 @@ export function deriveIndex(records) {
             excerpt: bodyText.slice(0, 4_000),
             outboundNoteIds,
             unresolvedWikiTargets,
+            attachmentReferences: attachmentReferenceProjection(record.source, record.path),
             attachments: record.attachments.map((attachment) => ({ ...attachment })),
             backlinks: []
         };

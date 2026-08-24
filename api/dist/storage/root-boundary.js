@@ -68,7 +68,7 @@ export class RootBoundaryStorage {
             if (file.id !== currentId) {
                 throw new Error("file identity does not match ancestry request");
             }
-            if (file.trashed) {
+            if (file.trashed && context?.allowTrashed !== true) {
                 throw new Error("trashed file is outside configured root");
             }
             if (file.mimeType === SHORTCUT_MIME_TYPE) {
@@ -158,7 +158,7 @@ export class RootBoundaryStorage {
     }
     async assertReturnedInside(file, context) {
         assertFileId(file.id);
-        if (file.trashed) {
+        if (file.trashed && context?.allowTrashed !== true) {
             throw new Error("trashed file is outside configured root");
         }
         if (file.mimeType === SHORTCUT_MIME_TYPE) {

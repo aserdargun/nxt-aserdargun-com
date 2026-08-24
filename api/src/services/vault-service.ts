@@ -13,6 +13,7 @@ import {
 } from "@nxt/contracts";
 import {
   deriveMarkdownPlainText,
+  attachmentReferenceProjection,
   extractWikiLinks,
   parseNote,
   resolveWikiTarget,
@@ -1172,6 +1173,7 @@ const mergeEntry = (index: VaultIndex, source: string, file: StoredFile, path: s
     excerpt: bodyText.slice(0, 4_000),
     outboundNoteIds,
     unresolvedWikiTargets,
+    attachmentReferences: attachmentReferenceProjection(source, path),
     attachments: attachments.map((attachment) => ({ ...attachment })),
     backlinks: [...(existing?.backlinks ?? [])]
   };

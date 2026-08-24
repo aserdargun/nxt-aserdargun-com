@@ -52,7 +52,12 @@ export declare class AttachmentService {
     private trashUnserialized;
     private findAttachment;
     private getOwnedNote;
+    private assertAttachmentUnreferenced;
+    private indexReferencesAttachment;
+    private assertTrashReservationCurrent;
     private assetFolder;
+    /** Recovery must never recreate a parent while deciding an old mutation. */
+    private existingAssetFolder;
     private getActiveFolder;
     private assertExactChildFolder;
     private verifyReadback;
@@ -67,9 +72,20 @@ export declare class AttachmentService {
     private clearMutation;
     private handleFailure;
     private reconcileRecoverableMutations;
+    private claimRecovery;
     private reconcileUpload;
     private finalizeRecoveredUpload;
     private reconcileTrash;
+    private hasUploadIdentity;
+    private hasTrashIdentity;
+    private recordFromMutation;
+    private recoverExactUploadRecord;
+    private areUnindexedArtifacts;
+    private uploadProjectionState;
+    private restoreActiveProjection;
+    private verifyTrashReadback;
+    private matchesTrashMetadata;
+    private clearOwnedMutation;
     private listAll;
     private context;
     private serialize;

@@ -24,6 +24,8 @@ export declare class StorageOperationBudget {
 }
 export interface StorageOperationContext {
     operationBudget?: StorageOperationBudget;
+    /** Recovery-only metadata reconciliation may inspect, but never expose, trashed files. */
+    allowTrashed?: boolean;
 }
 export declare const assertStorageVersion: (value: unknown) => asserts value is string;
 /** A storage mutation was rejected before it could reach the backing store. */
