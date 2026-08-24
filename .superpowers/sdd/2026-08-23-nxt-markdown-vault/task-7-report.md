@@ -117,3 +117,158 @@ external-state access occurred.
 - Active mutation leases are 30 seconds. A genuinely abandoned in-flight
   operation remains collision-blocking until expiry, after which reconciliation
   verifies actual Drive state before finalizing or clearing the intent.
+
+# Fix round 2/5
+
+Status: **DONE_WITH_CONCERNS**
+
+Implementation commit: `1a24dd8bfea2c5c2aa78cf3769d799dd0e59c01e`
+
+Implementation tree: `b7f75e833f563d889aead763e2292b938b003bc5`
+
+Dependency pins, `pnpm-lock.yaml`, the 12-route set, the provisioned system-file
+names, and the live-integration boundary are unchanged.
+
+## Round 2 RED evidence
+
+All RED commands used the required Node `v22.23.1` path.
+
+1. `api/test/api-response.test.ts` and `api/test/vault-functions.test.ts`
+
+   Command:
+   `pnpm --filter @nxt/api test -- api/test/api-response.test.ts api/test/vault-functions.test.ts`
+
+   Output: **3 failed, 231 passed, 1 skipped**. The failures proved that plain
+   objects and `Error` instances could spoof trusted status codes, and that the
+   combined folder PUT still invoked separate rename and move operations.
+
+2. `api/test/vault-transactions.test.ts`
+
+   Command:
+   `cd api && pnpm exec vitest run test/vault-transactions.test.ts`
+
+   Output: **4 failed, 9 passed**. The failures reproduced an accepted create
+   with rejected readback becoming an unindexed orphan, reconciliation of a
+   still-live write after 31 seconds, a cross-instance folder/descendant-note
+   race, and a self-descendant folder move reaching the dependency layer.
+
+3. `api/test/rescan-persistence.test.ts` and
+   `api/test/vault-functions.test.ts`
+
+   Command:
+   `cd api && pnpm exec vitest run test/rescan-persistence.test.ts test/vault-functions.test.ts`
+
+   Output: **5 failed, 13 passed**. The failures measured **105** and **107**
+   total list/read calls once private-index reads were counted, demonstrated a
+   cursor that accepted a changed folder tree, showed nested relation and
+   preference collections stopping at 100 of 120, and retained the sequential
+   combined-folder handler failure.
+
+## Round 2 implementation
+
+- Mutation intents in the existing `vault-index.json` now persist owner, fence,
+  phase, old/new path scope, expected source checksum, bounded recovery source,
+  and a reconciliation horizon. A reservation is persisted before a Drive
+  call, moves to `drive-inflight` before the call, and remains recoverable for
+  every ambiguous acknowledgement. Only typed, positively non-applied failures
+  or optimistic version conflicts cancel immediately.
+- A 15-minute in-flight horizon replaces expiry-only 30-second reconciliation.
+  This is longer than the bounded Azure HTTP invocation window; another
+  instance cannot reconcile or reuse the overlapping scope merely because the
+  short reservation lease elapsed. Expired/incomplete intents are claimed by
+  owner/fence CAS before recovery and are reconciled from actual parent, name,
+  note identity, checksum, path, version, and Trash state.
+- Conflict detection compares old/new path prefixes, so folder subtree
+  operations serialize against every descendant note/folder operation while
+  unrelated sibling paths remain concurrent. Create, update, move, Trash,
+  finalize-conflict, delayed-write, subtree-race, combined-update, and restart
+  paths have deterministic two-instance coverage.
+- Folder PUT calls one `updateFolder` service operation. Rename and destination
+  parent are reserved together and sent through one storage move request; the
+  descendant path-prefix index update occurs once. An acknowledged move with a
+  lost readback retains an intent and deterministically finalizes after restart.
+  Self/descendant destinations fail with trusted `INVALID_INPUT` before a Drive
+  mutation.
+- Folder/note Trash applies membership, backlink, and preference changes as one
+  recoverable logical operation. The intent remains `index-applied` until
+  preference pruning and intent clearing succeed; the restart probe recovers an
+  injected pruning failure idempotently.
+- Google Drive mutations classify acknowledgement/readback failures as an
+  internal outcome-unknown error carrying a raw identifier only inside the
+  storage/service boundary. Public typed responses and static errors expose no
+  raw Drive identifier.
+- Vault cursors now bind committed generation and the exact tree version. They
+  carry bounded offsets for entries, folders, every outbound/unresolved/
+  attachment/backlink collection, favorites, and recent items. Size-adaptive
+  pages retrieve all items across cursors; stale/tampered projections fail
+  closed, and a typed success remains below the response byte ceiling.
+- Rescan reserves traversal budget for private-index reads/readbacks and up to
+  three CAS attempts. It performs at most 20 traversal list/read operations per
+  request and returns at most 100 records plus recoveries jointly. Empty-folder,
+  fresh-instance, recovery-heavy, and injected-CAS-retry probes count all
+  adapter list/read calls.
+- Error mapping now requires a module-branded `ApiResponseError`; plain objects,
+  ordinary errors, and prototype spoofs map to the static redacted `503`.
+  Internal index schema failure is `503`, while self/descendant input is the
+  trusted pre-Drive `400` case.
+- The previous report's 30-second in-flight operating note is superseded by the
+  phase/fence plus 15-minute reconciliation horizon described above.
+
+## Covering tests and GREEN evidence
+
+- `packages/contracts/test/contracts.test.ts`
+- `api/test/api-response.test.ts`
+- `api/test/google-drive-adapter.test.ts`
+- `api/test/rescan-persistence.test.ts`
+- `api/test/vault-functions.test.ts`
+- `api/test/vault-service.test.ts`
+- `api/test/vault-transactions.test.ts`
+
+Focused command:
+
+`pnpm --filter @nxt/contracts test && cd api && pnpm exec vitest run test/api-response.test.ts test/google-drive-adapter.test.ts test/rescan-persistence.test.ts test/vault-functions.test.ts test/vault-service.test.ts test/vault-transactions.test.ts`
+
+Output: contracts **8 passed**; focused API **108 passed**.
+
+Large-index measurement command:
+
+`cd api && pnpm exec vitest run test/vault-transactions.test.ts -t "measures every storage" --reporter=verbose`
+
+Output: **1 passed, 14 filtered**. The permanent test counts every storage read
+and every index write byte. A temporary diagnostic assertion run, removed after
+capture, measured a 501-entry seed of **247,763 bytes**, **16** total storage
+reads, **0** vault list calls, **4** full index writes, and **993,720** serialized
+index bytes for one update.
+
+Root command, with live integration unset:
+
+`unset GOOGLE_DRIVE_INTEGRATION; pnpm lint && pnpm typecheck && pnpm test && pnpm build && git diff --check`
+
+Output:
+
+```text
+lint:       PASS
+typecheck:  PASS (contracts, domain, api)
+test:       PASS
+  contracts:   8 passed
+  domain:     15 passed
+  api:       245 passed, 1 live test skipped
+build:      PASS (contracts, domain, api)
+diff check: PASS
+```
+
+No live Google Drive, OAuth, network, credentials, `.env.local`, or external
+state was accessed.
+
+## Concern requiring fresh reviewer verdict
+
+Finding 4's byte/work-independence guarantee cannot be truthfully implemented
+through the approved persistence contract. `StoragePort.updateText` and the
+Google Drive media update replace the entire content of the one pinned
+`vault-index.json`; `SystemFileStore` must serialize that entire file, perform
+the optimistic update, and read the entire file back. With no new private
+system file, no partial/range update primitive, and the committed index required
+to remain the CAS authority, sharding or journaling *inside the same file* still
+rewrites all bytes. The measured probe above confirms bounded call count but
+proportional serialized bytes and transform work. No unsupported partial-write
+or vault-size-independent claim is made.
