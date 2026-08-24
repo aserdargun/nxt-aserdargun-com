@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,7 +39,317 @@ const setup = async () => {
   return { storage, notes, indexFile, indexStore };
 };
 
+type TestCursorPayload = {
+  scanId: string;
+  generation: number;
+  position: number;
+  nonce: string;
+  expiresAt: string;
+};
+
+const decodeCursor = (cursor: string): TestCursorPayload => {
+  const encoded = cursor.split(".")[1];
+  if (encoded === undefined) throw new Error("test cursor is malformed");
+  return JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as TestCursorPayload;
+};
+
+const signCursor = (payload: TestCursorPayload, secret: string): string => {
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const signature = createHmac("sha256", secret).update(encoded).digest("base64url");
+  return `s1.${encoded}.${signature}`;
+};
+
+const seedEmptyFolders = async (fixture: Awaited<ReturnType<typeof setup>>, count: number): Promise<void> => {
+  for (let index = 0; index < count; index += 1) {
+    await fixture.storage.createFolder({
+      parentId: fixture.notes.id,
+      name: `Receipt-${String(index).padStart(3, "0")}`
+    });
+  }
+};
+
+const createOutcomeUnknownStore = (fixture: Awaited<ReturnType<typeof setup>>) => {
+  let armed = false;
+  let failedReadbacks = 0;
+  let traversalCalls = 0;
+  const storage = delegate(fixture.storage, {
+    listChildren: async (input, context) => {
+      traversalCalls += 1;
+      return fixture.storage.listChildren(input, context);
+    },
+    readText: async (fileId, context) => {
+      const result = await fixture.storage.readText(fileId, context);
+      if (fileId === fixture.indexFile.id && failedReadbacks > 0) {
+        failedReadbacks -= 1;
+        throw new Error("injected accepted-write readback loss");
+      }
+      if (fileId !== fixture.indexFile.id) traversalCalls += 1;
+      return result;
+    },
+    updateText: async (input, context) => {
+      const result = await fixture.storage.updateText(input, context);
+      if (input.fileId === fixture.indexFile.id && armed) {
+        armed = false;
+        failedReadbacks = 1;
+      }
+      return result;
+    }
+  });
+  const indexStore = new SystemFileStore({
+    storage,
+    fileId: fixture.indexFile.id,
+    parentId: "private",
+    name: "vault-index.json",
+    schema: VaultIndexSchema
+  });
+  return {
+    storage,
+    indexStore,
+    armAcceptedWriteReadbackLoss: () => { armed = true; },
+    resetTraversalCalls: () => { traversalCalls = 0; },
+    traversalCalls: () => traversalCalls
+  };
+};
+
 describe("persisted rescan staging", () => {
+  it("recovers an accepted progress transition after the prior cursor expires and continues on a fresh instance", async () => {
+    const fixture = await setup();
+    await seedEmptyFolders(fixture, 80);
+    const probe = createOutcomeUnknownStore(fixture);
+    const secret = "progress-receipt-recovery-secret-32-bytes";
+    let clock = Date.parse("2026-08-24T08:00:00.000Z");
+    const service = () => new RescanService({
+      storage: probe.storage,
+      indexStore: probe.indexStore,
+      notesFolderId: fixture.notes.id,
+      cursorSecret: secret,
+      now: () => new Date(clock)
+    });
+
+    const started = await service().scanPage({ cursor: null, limit: 100 });
+    const priorCursor = started.cursor as string;
+    const prior = decodeCursor(priorCursor);
+    clock = Date.parse(prior.expiresAt) - 1_000;
+    probe.armAcceptedWriteReadbackLoss();
+    probe.resetTraversalCalls();
+    await expect(service().scanPage({ cursor: priorCursor, limit: 100 })).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+    expect(probe.traversalCalls()).toBeGreaterThan(0);
+
+    const persisted = (await fixture.indexStore.read()).value.rescanState;
+    const transition = persisted?.lastTransition;
+    expect(persisted).not.toBeNull();
+    expect(transition).not.toBeNull();
+    expect(transition?.recoveryExpiresAt).toBe(persisted?.expiresAt);
+    expect(Date.parse(persisted?.expiresAt ?? "")).toBeGreaterThan(Date.parse(prior.expiresAt));
+
+    clock = Date.parse(prior.expiresAt) + 1_000;
+    probe.resetTraversalCalls();
+    const recovered = await service().scanPage({ cursor: priorCursor, limit: 100 });
+    expect(probe.traversalCalls()).toBe(0);
+    expect(recovered).toEqual({
+      cursor: signCursor({
+        scanId: persisted?.scanId ?? "",
+        generation: persisted?.baseGeneration ?? -1,
+        position: persisted?.position ?? -1,
+        nonce: persisted?.nonce ?? "",
+        expiresAt: persisted?.expiresAt ?? ""
+      }, secret),
+      processed: transition?.processed,
+      complete: false,
+      records: transition?.records,
+      recoveries: transition?.recoveries
+    });
+
+    let page = await service().scanPage({ cursor: recovered.cursor, limit: 100 });
+    while (!page.complete) page = await service().scanPage({ cursor: page.cursor, limit: 100 });
+    expect((await fixture.indexStore.read()).value.rescanState).toBeNull();
+  });
+
+  it("recovers an outcome-unknown final completion after the prior cursor expires", async () => {
+    const fixture = await setup();
+    const probe = createOutcomeUnknownStore(fixture);
+    const secret = "completion-receipt-recovery-secret-32-bytes";
+    let clock = Date.parse("2026-08-24T09:00:00.000Z");
+    const service = () => new RescanService({
+      storage: probe.storage,
+      indexStore: probe.indexStore,
+      notesFolderId: fixture.notes.id,
+      cursorSecret: secret,
+      now: () => new Date(clock)
+    });
+
+    const started = await service().scanPage({ cursor: null, limit: 100 });
+    const priorCursor = started.cursor as string;
+    const prior = decodeCursor(priorCursor);
+    clock = Date.parse(prior.expiresAt) - 1_000;
+    probe.armAcceptedWriteReadbackLoss();
+    await expect(service().scanPage({ cursor: priorCursor, limit: 100 })).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+
+    const completed = (await fixture.indexStore.read()).value.lastCompletedRescan;
+    const recoveryExpiresAt = completed?.recoveryExpiresAt;
+    expect(completed).not.toBeNull();
+    expect(Date.parse(recoveryExpiresAt ?? "")).toBeGreaterThan(Date.parse(prior.expiresAt));
+    expect(Date.parse(recoveryExpiresAt ?? "")).toBeLessThanOrEqual(clock + 10 * 60 * 1_000);
+    if (recoveryExpiresAt === undefined || recoveryExpiresAt === null) throw new Error("completion receipt expiry is missing");
+
+    clock = Date.parse(prior.expiresAt) + 1_000;
+    probe.resetTraversalCalls();
+    const recovered = await service().scanPage({ cursor: priorCursor, limit: 100 });
+    expect(recovered).toEqual({ cursor: null, processed: 0, complete: true, records: [], recoveries: [] });
+    expect(probe.traversalCalls()).toBe(0);
+    const beforeReplay = (await fixture.indexStore.read()).value.lastCompletedRescan;
+    await expect(service().scanPage({ cursor: priorCursor, limit: 100 })).resolves.toEqual(recovered);
+    expect(probe.traversalCalls()).toBe(0);
+    expect((await fixture.indexStore.read()).value.lastCompletedRescan).toEqual(beforeReplay);
+    clock = Date.parse(recoveryExpiresAt);
+    probe.resetTraversalCalls();
+    await expect(service().scanPage({ cursor: priorCursor, limit: 100 })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(probe.traversalCalls()).toBe(0);
+  });
+
+  it("rejects the exact prior cursor once its progress receipt recovery expiry passes", async () => {
+    const fixture = await setup();
+    await seedEmptyFolders(fixture, 50);
+    const probe = createOutcomeUnknownStore(fixture);
+    const secret = "expired-progress-receipt-secret-32-bytes";
+    let clock = Date.parse("2026-08-24T10:00:00.000Z");
+    const service = () => new RescanService({
+      storage: probe.storage,
+      indexStore: probe.indexStore,
+      notesFolderId: fixture.notes.id,
+      cursorSecret: secret,
+      now: () => new Date(clock)
+    });
+
+    const started = await service().scanPage({ cursor: null, limit: 100 });
+    const priorCursor = started.cursor as string;
+    clock = Date.parse(decodeCursor(priorCursor).expiresAt) - 1_000;
+    await service().scanPage({ cursor: priorCursor, limit: 100 });
+    const receipt = (await fixture.indexStore.read()).value.rescanState?.lastTransition;
+    const recoveryExpiresAt = receipt?.recoveryExpiresAt;
+    expect(recoveryExpiresAt).toBeTypeOf("string");
+    if (recoveryExpiresAt === undefined || recoveryExpiresAt === null) throw new Error("progress receipt expiry is missing");
+
+    clock = Date.parse(recoveryExpiresAt);
+    probe.resetTraversalCalls();
+    await expect(service().scanPage({ cursor: priorCursor, limit: 100 })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(probe.traversalCalls()).toBe(0);
+  });
+
+  it("rejects an older cursor after its successor advances", async () => {
+    const fixture = await setup();
+    await seedEmptyFolders(fixture, 100);
+    const secret = "advanced-successor-receipt-secret-32-bytes";
+    const service = () => new RescanService({
+      storage: fixture.storage,
+      indexStore: fixture.indexStore,
+      notesFolderId: fixture.notes.id,
+      cursorSecret: secret,
+      now: () => new Date("2026-08-24T11:00:00.000Z")
+    });
+
+    const started = await service().scanPage({ cursor: null, limit: 100 });
+    const successor = await service().scanPage({ cursor: started.cursor, limit: 100 });
+    expect(successor.complete).toBe(false);
+    const advanced = await service().scanPage({ cursor: successor.cursor, limit: 100 });
+    expect(advanced.cursor).not.toBe(successor.cursor);
+    await expect(service().scanPage({ cursor: started.cursor, limit: 100 })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("rejects tampered, cross-scan, generation, position, nonce, and equivalent re-encoded prior cursors", async () => {
+    const fixture = await setup();
+    await seedEmptyFolders(fixture, 50);
+    const secret = "exact-prior-cursor-binding-secret-32-bytes";
+    const service = () => new RescanService({
+      storage: fixture.storage,
+      indexStore: fixture.indexStore,
+      notesFolderId: fixture.notes.id,
+      cursorSecret: secret,
+      now: () => new Date("2026-08-24T12:00:00.000Z")
+    });
+
+    const started = await service().scanPage({ cursor: null, limit: 100 });
+    const priorCursor = started.cursor as string;
+    await service().scanPage({ cursor: priorCursor, limit: 100 });
+    const payload = decodeCursor(priorCursor);
+    const equivalentReEncoding = signCursor({
+      expiresAt: payload.expiresAt,
+      nonce: payload.nonce,
+      position: payload.position,
+      generation: payload.generation,
+      scanId: payload.scanId
+    }, secret);
+    expect(equivalentReEncoding).not.toBe(priorCursor);
+
+    const tampered = `${priorCursor.slice(0, -1)}${priorCursor.endsWith("A") ? "B" : "A"}`;
+    await expect(service().scanPage({ cursor: tampered, limit: 100 })).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    for (const invalid of [
+      equivalentReEncoding,
+      signCursor({ ...payload, scanId: randomUUID() }, secret),
+      signCursor({ ...payload, generation: payload.generation + 1 }, secret),
+      signCursor({ ...payload, position: payload.position + 1 }, secret),
+      signCursor({ ...payload, nonce: payload.nonce === "A".repeat(22) ? "B".repeat(22) : "A".repeat(22) }, secret)
+    ]) {
+      await expect(service().scanPage({ cursor: invalid, limit: 100 })).rejects.toMatchObject({ code: "CONFLICT" });
+    }
+  });
+
+  it("rejects a persisted receipt whose response and successor cursor state were altered", async () => {
+    const fixture = await setup();
+    await seedEmptyFolders(fixture, 50);
+    const secret = "tampered-persisted-receipt-secret-32-bytes";
+    const service = () => new RescanService({
+      storage: fixture.storage,
+      indexStore: fixture.indexStore,
+      notesFolderId: fixture.notes.id,
+      cursorSecret: secret,
+      now: () => new Date("2026-08-24T12:30:00.000Z")
+    });
+
+    const started = await service().scanPage({ cursor: null, limit: 100 });
+    const priorCursor = started.cursor as string;
+    await service().scanPage({ cursor: priorCursor, limit: 100 });
+    const snapshot = await fixture.indexStore.read();
+    const state = snapshot.value.rescanState;
+    if (state === null || state.lastTransition === null) throw new Error("progress receipt is missing");
+    const tamperedState = structuredClone(state);
+    tamperedState.nonce = tamperedState.nonce === "A".repeat(22) ? "B".repeat(22) : "A".repeat(22);
+    tamperedState.lastTransition.processed += 1;
+    await fixture.indexStore.update({ ...snapshot.value, rescanState: tamperedState }, snapshot.file.version);
+
+    await expect(service().scanPage({ cursor: priorCursor, limit: 100 })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("replays progress without traversal or renewal of the receipt recovery expiry", async () => {
+    const fixture = await setup();
+    await seedEmptyFolders(fixture, 50);
+    const probe = createOutcomeUnknownStore(fixture);
+    const secret = "read-only-progress-replay-secret-32-bytes";
+    let clock = Date.parse("2026-08-24T13:00:00.000Z");
+    const service = () => new RescanService({
+      storage: probe.storage,
+      indexStore: probe.indexStore,
+      notesFolderId: fixture.notes.id,
+      cursorSecret: secret,
+      now: () => new Date(clock)
+    });
+
+    const started = await service().scanPage({ cursor: null, limit: 100 });
+    const priorCursor = started.cursor as string;
+    const accepted = await service().scanPage({ cursor: priorCursor, limit: 100 });
+    const before = (await fixture.indexStore.read()).value.rescanState;
+    const recoveryExpiresAt = before?.lastTransition?.recoveryExpiresAt;
+    expect(recoveryExpiresAt).toBe(before?.expiresAt);
+
+    clock += 60_000;
+    probe.resetTraversalCalls();
+    await expect(service().scanPage({ cursor: priorCursor, limit: 100 })).resolves.toEqual(accepted);
+    clock += 60_000;
+    await expect(service().scanPage({ cursor: priorCursor, limit: 100 })).resolves.toEqual(accepted);
+    expect(probe.traversalCalls()).toBe(0);
+    expect((await fixture.indexStore.read()).value.rescanState).toEqual(before);
+  });
+
   it("survives a fresh service instance, rejects replay/conflicting scans, and clears staging at completion", async () => {
     const fixture = await setup();
     for (let index = 0; index < 150; index += 1) {

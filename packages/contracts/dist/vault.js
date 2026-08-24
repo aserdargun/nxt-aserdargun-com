@@ -122,10 +122,12 @@ export const VaultRescanTransitionSchema = z.object({
     fromPosition: z.number().int().nonnegative(),
     fromNonce: z.string().regex(/^[A-Za-z0-9_-]{22}$/u),
     fromExpiresAt: TimestampSchema,
+    recoveryExpiresAt: TimestampSchema.nullable().default(null),
+    receiptMac: z.string().regex(/^[A-Za-z0-9_-]{43}$/u).nullable().default(null),
     processed: z.number().int().min(0).max(100),
     records: z.array(RescanResponseRecordStateSchema).max(100),
     recoveries: z.array(RescanRecoveryStateSchema).max(100)
-}).strict().refine((value) => value.records.length + value.recoveries.length <= 100, { message: "rescan transition response exceeds 100 items" });
+}).strict().refine((value) => value.records.length + value.recoveries.length <= 100, { message: "rescan transition response exceeds 100 items" }).refine((value) => (value.recoveryExpiresAt === null) === (value.receiptMac === null), { message: "rescan transition receipt is incomplete" });
 export const VaultRescanStateSchema = z.object({
     scanId: NoteIdSchema,
     baseGeneration: z.number().int().nonnegative(),

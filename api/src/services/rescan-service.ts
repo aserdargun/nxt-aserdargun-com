@@ -42,6 +42,7 @@ export interface RescanPage {
 
 type CursorPayload = { scanId: string; generation: number; position: number; nonce: string; expiresAt: string };
 type RescanTransition = NonNullable<VaultRescanState["lastTransition"]>;
+type PendingRescanTransition = Omit<RescanTransition, "receiptMac" | "recoveryExpiresAt">;
 type ResumeResult = { kind: "current"; state: VaultRescanState } | { kind: "replay"; page: RescanPage };
 
 export class RescanService {
@@ -64,10 +65,12 @@ export class RescanService {
     const operationBudget = new StorageOperationBudget(MAX_DRIVE_OPERATIONS_PER_REQUEST);
     const context: StorageOperationContext = { operationBudget };
     let state: VaultRescanState;
+    let priorCursor: string;
     if (input.cursor === null) {
       state = await this.startScan(context);
       return { cursor: this.signCursor(state), processed: 0, complete: false, records: [], recoveries: [] };
     } else {
+      priorCursor = input.cursor;
       const resumed = await this.resumeScan(input.cursor, context);
       if (resumed.kind === "replay") return resumed.page;
       state = resumed.state;
@@ -186,7 +189,7 @@ export class RescanService {
     }
 
     const complete = state.queue.length === 0 && state.deliveredRecoveryCount === state.recoveries.length;
-    const transition: RescanTransition = {
+    const transition: PendingRescanTransition = {
       fromPosition: priorPosition,
       fromNonce: priorNonce,
       fromExpiresAt: priorExpiresAt,
@@ -195,13 +198,13 @@ export class RescanService {
       recoveries: recoveries.map((recovery) => ({ ...recovery }))
     };
     if (complete) {
-      await this.completeScan(state, transition, context);
+      await this.completeScan(state, transition, priorCursor, context);
       return { cursor: null, processed, complete: true, records: pageRecords, recoveries };
     }
     if (operations === 0 && state.deliveredRecoveryCount === priorDeliveredRecoveryCount) {
       return { cursor: this.signCursor(state), processed, complete: false, records: pageRecords, recoveries };
     }
-    state = await this.persistProgress(state, transition, context);
+    state = await this.persistProgress(state, transition, priorCursor, context);
     return { cursor: this.signCursor(state), processed, complete: false, records: pageRecords, recoveries };
   }
 
@@ -244,51 +247,107 @@ export class RescanService {
     const payload = this.verifyCursor(cursor);
     const snapshot = await this.options.indexStore.read(context);
     const state = snapshot.value.rescanState;
-    if (Date.parse(payload.expiresAt) <= this.now().getTime()) throw new ApiResponseError("CONFLICT");
     if (state === null) {
       const completed = snapshot.value.lastCompletedRescan;
+      const matchesCompletion = completed !== null && completed.scanId === payload.scanId &&
+        completed.baseGeneration === payload.generation && transitionMatches(completed, payload);
       if (
-        completed === null || completed.scanId !== payload.scanId || completed.baseGeneration !== payload.generation ||
-        !transitionMatches(completed, payload)
-      ) throw new ApiResponseError("CONFLICT");
-      return { kind: "replay", page: transitionPage(completed, null, true) };
+        matchesCompletion &&
+        this.isLiveReceipt(completed, cursor, payload, completed.scanId, completed.baseGeneration, null, true)
+      ) {
+        return { kind: "replay", page: transitionPage(completed, null, true) };
+      }
+      if (Date.parse(payload.expiresAt) <= this.now().getTime()) throw new ApiResponseError("CONFLICT");
+      if (matchesCompletion && isLegacyReceipt(completed) && cursor === this.canonicalCursor(payload)) {
+        return { kind: "replay", page: transitionPage(completed, null, true) };
+      }
+      throw new ApiResponseError("CONFLICT");
     }
+    const lastTransition = state.lastTransition;
+    const matchesTransition = payload.scanId === state.scanId && payload.generation === state.baseGeneration &&
+      lastTransition !== null && transitionMatches(lastTransition, payload);
+    if (
+      matchesTransition && lastTransition !== null &&
+      this.isLiveReceipt(
+        lastTransition,
+        cursor,
+        payload,
+        state.scanId,
+        state.baseGeneration,
+        this.signCursor(state),
+        false,
+        state.expiresAt
+      )
+    ) return { kind: "replay", page: transitionPage(lastTransition, this.signCursor(state), false) };
+    if (Date.parse(payload.expiresAt) <= this.now().getTime()) throw new ApiResponseError("CONFLICT");
     if (Date.parse(state.expiresAt) <= this.now().getTime()) throw new ApiResponseError("CONFLICT");
     if (
       payload.scanId === state.scanId && payload.generation === state.baseGeneration && payload.position === state.position &&
       payload.nonce === state.nonce && payload.expiresAt === state.expiresAt
     ) return { kind: "current", state: structuredClone(state) };
     if (
-      payload.scanId === state.scanId && payload.generation === state.baseGeneration && state.lastTransition !== null &&
-      transitionMatches(state.lastTransition, payload)
-    ) return { kind: "replay", page: transitionPage(state.lastTransition, this.signCursor(state), false) };
+      matchesTransition && lastTransition !== null && isLegacyReceipt(lastTransition) &&
+      cursor === this.canonicalCursor(payload)
+    ) {
+      return { kind: "replay", page: transitionPage(lastTransition, this.signCursor(state), false) };
+    }
     throw new ApiResponseError("CONFLICT");
   }
 
-  private async persistProgress(state: VaultRescanState, transition: RescanTransition, context: StorageOperationContext): Promise<VaultRescanState> {
+  private async persistProgress(
+    state: VaultRescanState,
+    transition: PendingRescanTransition,
+    priorCursor: string,
+    context: StorageOperationContext
+  ): Promise<VaultRescanState> {
+    const recoveryExpiresAt = new Date(this.now().getTime() + SCAN_TTL_MS).toISOString();
     state.position += 1;
     state.nonce = randomBytes(16).toString("base64url");
-    state.expiresAt = new Date(this.now().getTime() + SCAN_TTL_MS).toISOString();
-    state.lastTransition = transition;
+    state.expiresAt = recoveryExpiresAt;
+    const receipt = this.bindReceipt(
+      transition,
+      priorCursor,
+      state.scanId,
+      state.baseGeneration,
+      recoveryExpiresAt,
+      this.signCursor(state),
+      false
+    );
+    state.lastTransition = receipt;
     await this.options.indexStore.compareAndSet((index) => {
       const current = index.rescanState;
       if (
-        current === null || current.scanId !== state.scanId || current.position !== transition.fromPosition ||
-        current.nonce !== transition.fromNonce || current.expiresAt !== transition.fromExpiresAt
+        current === null || current.scanId !== state.scanId || current.position !== receipt.fromPosition ||
+        current.nonce !== receipt.fromNonce || current.expiresAt !== receipt.fromExpiresAt
       ) throw new ApiResponseError("CONFLICT");
       return { ...index, rescanState: state };
     }, { attempts: MAX_INDEX_CAS_ATTEMPTS, context });
     return state;
   }
 
-  private async completeScan(state: VaultRescanState, transition: RescanTransition, context: StorageOperationContext): Promise<void> {
+  private async completeScan(
+    state: VaultRescanState,
+    transition: PendingRescanTransition,
+    priorCursor: string,
+    context: StorageOperationContext
+  ): Promise<void> {
     let entries: VaultIndex["entries"];
     try { entries = deriveIndex(state.records).entries; } catch { throw new ApiResponseError("CONFLICT"); }
+    const recoveryExpiresAt = new Date(this.now().getTime() + SCAN_TTL_MS).toISOString();
+    const receipt = this.bindReceipt(
+      transition,
+      priorCursor,
+      state.scanId,
+      state.baseGeneration,
+      recoveryExpiresAt,
+      null,
+      true
+    );
     await this.options.indexStore.compareAndSet((index) => {
       const current = index.rescanState;
       if (
-        current === null || current.scanId !== state.scanId || current.position !== transition.fromPosition ||
-        current.nonce !== transition.fromNonce || current.expiresAt !== transition.fromExpiresAt
+        current === null || current.scanId !== state.scanId || current.position !== receipt.fromPosition ||
+        current.nonce !== receipt.fromNonce || current.expiresAt !== receipt.fromExpiresAt
       ) throw new ApiResponseError("CONFLICT");
       const captured = new Set(state.conflictMutationIds);
       if (
@@ -301,20 +360,117 @@ export class RescanService {
         entries,
         pendingMutations: index.pendingMutations.filter((mutation) => !captured.has(mutation.id)),
         rescanState: null,
-        lastCompletedRescan: { scanId: state.scanId, baseGeneration: state.baseGeneration, ...transition }
+        lastCompletedRescan: { scanId: state.scanId, baseGeneration: state.baseGeneration, ...receipt }
       };
     }, { attempts: MAX_INDEX_CAS_ATTEMPTS, context });
   }
 
+  private bindReceipt(
+    transition: PendingRescanTransition,
+    cursor: string,
+    scanId: string,
+    generation: number,
+    recoveryExpiresAt: string,
+    successorCursor: string | null,
+    complete: boolean
+  ): RescanTransition {
+    return {
+      ...transition,
+      recoveryExpiresAt,
+      receiptMac: this.createReceiptMac(
+        cursor,
+        scanId,
+        generation,
+        transition,
+        recoveryExpiresAt,
+        successorCursor,
+        complete
+      )
+    };
+  }
+
+  private isLiveReceipt(
+    receipt: RescanTransition,
+    cursor: string,
+    payload: CursorPayload,
+    scanId: string,
+    generation: number,
+    successorCursor: string | null,
+    complete: boolean,
+    successorExpiresAt?: string
+  ): boolean {
+    if (receipt.recoveryExpiresAt === null || receipt.receiptMac === null) return false;
+    if (payload.scanId !== scanId || payload.generation !== generation || !transitionMatches(receipt, payload)) return false;
+    const recoveryExpiry = Date.parse(receipt.recoveryExpiresAt);
+    if (
+      recoveryExpiry <= this.now().getTime() ||
+      (successorExpiresAt !== undefined && recoveryExpiry > Date.parse(successorExpiresAt))
+    ) return false;
+    const expected = this.createReceiptMac(
+      cursor,
+      scanId,
+      generation,
+      receipt,
+      receipt.recoveryExpiresAt,
+      successorCursor,
+      complete
+    );
+    return timingSafeEqual(Buffer.from(receipt.receiptMac), Buffer.from(expected));
+  }
+
+  private createReceiptMac(
+    cursor: string,
+    scanId: string,
+    generation: number,
+    transition: Pick<
+      RescanTransition,
+      "fromPosition" | "fromNonce" | "fromExpiresAt" | "processed" | "records" | "recoveries"
+    >,
+    recoveryExpiresAt: string,
+    successorCursor: string | null,
+    complete: boolean
+  ): string {
+    const binding = JSON.stringify({
+      cursor,
+      scanId,
+      generation,
+      position: transition.fromPosition,
+      nonce: transition.fromNonce,
+      expiresAt: transition.fromExpiresAt,
+      recoveryExpiresAt,
+      successor: {
+        cursor: successorCursor,
+        processed: transition.processed,
+        complete,
+        records: transition.records,
+        recoveries: transition.recoveries
+      }
+    });
+    return createHmac("sha256", this.options.cursorSecret)
+      .update("nxt-rescan-receipt-v1\0", "utf8")
+      .update(binding, "utf8")
+      .digest("base64url");
+  }
+
   private signCursor(state: VaultRescanState): string {
-    const payload: CursorPayload = {
+    return this.canonicalCursor({
       scanId: state.scanId,
       generation: state.baseGeneration,
       position: state.position,
       nonce: state.nonce,
       expiresAt: state.expiresAt
+    });
+  }
+
+  private canonicalCursor(payload: CursorPayload): string {
+    const canonical: CursorPayload = {
+      scanId: payload.scanId,
+      generation: payload.generation,
+      position: payload.position,
+      nonce: payload.nonce,
+      expiresAt: payload.expiresAt
     };
-    const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+    const encoded = Buffer.from(JSON.stringify(canonical), "utf8").toString("base64url");
     const signature = createHmac("sha256", this.options.cursorSecret).update(encoded).digest("base64url");
     return `s1.${encoded}.${signature}`;
   }
@@ -349,6 +505,9 @@ const isCursorPayload = (value: unknown): value is CursorPayload => {
 const transitionMatches = (transition: RescanTransition, payload: CursorPayload): boolean =>
   transition.fromPosition === payload.position && transition.fromNonce === payload.nonce &&
   transition.fromExpiresAt === payload.expiresAt;
+
+const isLegacyReceipt = (transition: RescanTransition): boolean =>
+  transition.recoveryExpiresAt === null && transition.receiptMac === null;
 
 const transitionPage = (
   transition: RescanTransition,

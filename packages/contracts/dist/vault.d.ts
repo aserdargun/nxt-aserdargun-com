@@ -137,6 +137,8 @@ export declare const VaultRescanTransitionSchema: z.ZodObject<{
     fromPosition: z.ZodNumber;
     fromNonce: z.ZodString;
     fromExpiresAt: z.ZodISODateTime;
+    recoveryExpiresAt: z.ZodDefault<z.ZodNullable<z.ZodISODateTime>>;
+    receiptMac: z.ZodDefault<z.ZodNullable<z.ZodString>>;
     processed: z.ZodNumber;
     records: z.ZodArray<z.ZodObject<{
         noteId: z.ZodUUID;
@@ -201,6 +203,8 @@ export declare const VaultRescanStateSchema: z.ZodObject<{
         fromPosition: z.ZodNumber;
         fromNonce: z.ZodString;
         fromExpiresAt: z.ZodISODateTime;
+        recoveryExpiresAt: z.ZodDefault<z.ZodNullable<z.ZodISODateTime>>;
+        receiptMac: z.ZodDefault<z.ZodNullable<z.ZodString>>;
         processed: z.ZodNumber;
         records: z.ZodArray<z.ZodObject<{
             noteId: z.ZodUUID;
@@ -223,6 +227,8 @@ export declare const VaultCompletedRescanSchema: z.ZodObject<{
     fromPosition: z.ZodNumber;
     fromNonce: z.ZodString;
     fromExpiresAt: z.ZodISODateTime;
+    recoveryExpiresAt: z.ZodDefault<z.ZodNullable<z.ZodISODateTime>>;
+    receiptMac: z.ZodDefault<z.ZodNullable<z.ZodString>>;
     processed: z.ZodNumber;
     records: z.ZodArray<z.ZodObject<{
         noteId: z.ZodUUID;
@@ -361,6 +367,8 @@ export declare const VaultIndexSchema: z.ZodObject<{
             fromPosition: z.ZodNumber;
             fromNonce: z.ZodString;
             fromExpiresAt: z.ZodISODateTime;
+            recoveryExpiresAt: z.ZodDefault<z.ZodNullable<z.ZodISODateTime>>;
+            receiptMac: z.ZodDefault<z.ZodNullable<z.ZodString>>;
             processed: z.ZodNumber;
             records: z.ZodArray<z.ZodObject<{
                 noteId: z.ZodUUID;
@@ -382,6 +390,8 @@ export declare const VaultIndexSchema: z.ZodObject<{
         fromPosition: z.ZodNumber;
         fromNonce: z.ZodString;
         fromExpiresAt: z.ZodISODateTime;
+        recoveryExpiresAt: z.ZodDefault<z.ZodNullable<z.ZodISODateTime>>;
+        receiptMac: z.ZodDefault<z.ZodNullable<z.ZodString>>;
         processed: z.ZodNumber;
         records: z.ZodArray<z.ZodObject<{
             noteId: z.ZodUUID;

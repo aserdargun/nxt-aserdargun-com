@@ -37,7 +37,11 @@ export declare class RescanService {
     private resumeScan;
     private persistProgress;
     private completeScan;
+    private bindReceipt;
+    private isLiveReceipt;
+    private createReceiptMac;
     private signCursor;
+    private canonicalCursor;
     private verifyCursor;
     private now;
 }
