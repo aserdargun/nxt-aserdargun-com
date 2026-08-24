@@ -15,7 +15,24 @@ import {
   Tags,
   Upload
 } from "lucide-react";
-import { useState, useSyncExternalStore, type ComponentType } from "react";
+import type { WikiTargetResolution } from "@nxt/domain";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useState,
+  useSyncExternalStore,
+  type ComponentType
+} from "react";
+import type { NotesClient } from "../api/notes";
+import type { DraftStore } from "../editor/draft-store";
+import type { EditorWorkspaceState } from "../editor/editor-workspace";
+import type { SaveStatus } from "../editor/use-autosave";
+
+const EditorWorkspace = lazy(async () => {
+  const module = await import("../editor/editor-workspace");
+  return { default: module.EditorWorkspace };
+});
 
 type Destination = "files" | "editor" | "preview" | "info";
 
@@ -119,12 +136,14 @@ const DestinationNavigation = ({
   </nav>
 );
 
-const SaveStatus = (): React.JSX.Element => (
-  <output className="save-status" aria-label="Save status" aria-live="polite">
-    <span>Saved</span>
-    <span className="save-icon" aria-hidden>
-      <Check size={13} strokeWidth={2.25} />
-    </span>
+const SaveStatusOutput = ({ status }: { readonly status: SaveStatus }): React.JSX.Element => (
+  <output className={`save-status save-status-${status.toLowerCase().replace(" ", "-")}`} aria-label="Save status" aria-live="polite">
+    <span>{status}</span>
+    {status === "Saved" ? (
+      <span className="save-icon" aria-hidden>
+        <Check size={13} strokeWidth={2.25} />
+      </span>
+    ) : null}
   </output>
 );
 
@@ -146,11 +165,17 @@ const ActiveNotePath = ({
 const ShellHeader = ({
   activeDestination,
   onSelect,
-  showDesktopDestinations
+  showDesktopDestinations,
+  noteTitle,
+  notePath,
+  saveStatus
 }: {
   readonly activeDestination: Destination;
   readonly onSelect: (destination: Destination) => void;
   readonly showDesktopDestinations: boolean;
+  readonly noteTitle: string;
+  readonly notePath: string;
+  readonly saveStatus: SaveStatus;
 }): React.JSX.Element => (
   <header className="shell-header">
     <div className="shell-header-explorer">
@@ -163,7 +188,7 @@ const ShellHeader = ({
         />
       ) : null}
     </div>
-    <span className="mobile-title">{ACTIVE_NOTE.title}</span>
+    <span className="mobile-title">{noteTitle}</span>
     <button className="mobile-more touch-target" type="button" aria-label="Info" onClick={() => onSelect("info")}>
       <MoreVertical size={23} strokeWidth={1.75} aria-hidden />
     </button>
@@ -177,8 +202,8 @@ const ShellHeader = ({
         <span>Publish</span>
       </button>
     </div>
-    <ActiveNotePath className="mobile-path" path={ACTIVE_NOTE.path} withIcon />
-    <SaveStatus />
+    <ActiveNotePath className="mobile-path" path={notePath} withIcon />
+    <SaveStatusOutput status={saveStatus} />
   </header>
 );
 
@@ -277,12 +302,45 @@ const InfoRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Element
   </section>
 );
 
-export const OwnerShell = (): React.JSX.Element => {
+export interface OwnerShellProps {
+  readonly noteId?: string;
+  readonly currentFolderId?: string;
+  readonly notes?: NotesClient;
+  readonly draftStore?: DraftStore;
+  readonly resolveAttachment?: (canonicalReference: string) => string | undefined;
+  readonly resolveWikiLink?: (target: string) => WikiTargetResolution;
+  readonly onWikiNavigate?: (noteId: string) => void;
+  readonly now?: () => Date;
+}
+
+export const OwnerShell = ({
+  noteId,
+  currentFolderId,
+  notes,
+  draftStore,
+  resolveAttachment,
+  resolveWikiLink,
+  onWikiNavigate,
+  now
+}: OwnerShellProps = {}): React.JSX.Element => {
   const [activeDestination, setActiveDestination] = useState<Destination>("editor");
+  const [editorState, setEditorState] = useState<EditorWorkspaceState>({
+    title: noteId === undefined ? ACTIVE_NOTE.title : "",
+    path: noteId === undefined ? ACTIVE_NOTE.path : "",
+    status: noteId === undefined ? "Saved" : "Saving"
+  });
   const isMobileViewport = useMobileViewport();
   const isWideDesktopViewport = useWideDesktopViewport();
   const isHidden = (destination: Destination): boolean =>
     isMobileViewport && activeDestination !== destination;
+
+  useEffect(() => {
+    setEditorState({
+      title: noteId === undefined ? ACTIVE_NOTE.title : "",
+      path: noteId === undefined ? ACTIVE_NOTE.path : "",
+      status: noteId === undefined ? "Saved" : "Saving"
+    });
+  }, [noteId]);
 
   return (
     <div
@@ -294,14 +352,39 @@ export const OwnerShell = (): React.JSX.Element => {
         activeDestination={activeDestination}
         onSelect={setActiveDestination}
         showDesktopDestinations={!isMobileViewport && isWideDesktopViewport}
+        noteTitle={editorState.title}
+        notePath={editorState.path}
+        saveStatus={editorState.status}
       />
       <main className="workspace" aria-label="NXT workspace">
         <ExplorerRegion hidden={isHidden("files")} />
-        <EditorRegion hidden={isHidden("editor")} />
-        <div className="context-column">
-          <PreviewRegion hidden={isHidden("preview")} />
-          <InfoRegion hidden={isHidden("info")} />
-        </div>
+        {noteId === undefined ? (
+          <>
+            <EditorRegion hidden={isHidden("editor")} />
+            <div className="context-column">
+              <PreviewRegion hidden={isHidden("preview")} />
+              <InfoRegion hidden={isHidden("info")} />
+            </div>
+          </>
+        ) : (
+          <Suspense fallback={null}>
+            <EditorWorkspace
+              noteId={noteId}
+              hiddenEditor={isHidden("editor")}
+              hiddenPreview={isHidden("preview")}
+              notes={notes}
+              draftStore={draftStore}
+              currentFolderId={currentFolderId}
+              resolveAttachment={resolveAttachment}
+              resolveWikiLink={resolveWikiLink}
+              onWikiNavigate={onWikiNavigate}
+              now={now}
+              showStatus={false}
+              onStateChange={setEditorState}
+              infoRegion={<InfoRegion hidden={isHidden("info")} />}
+            />
+          </Suspense>
+        )}
       </main>
       <footer className="shell-status" aria-label="Info">
         <span>Files</span>

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Navigate, type RouteObject } from "react-router-dom";
+import { Navigate, useParams, type RouteObject } from "react-router-dom";
 import { ApiClientError } from "../api/client";
 import { getSession } from "../api/session";
 import { LoginPage } from "./login-page";
@@ -17,7 +17,7 @@ const RouteState = ({ children }: { readonly children: React.ReactNode }): React
   </div>
 );
 
-const OwnerGate = (): React.JSX.Element => {
+const OwnerGate = ({ noteId }: { readonly noteId?: string }): React.JSX.Element => {
   const session = useQuery({
     queryKey: ["private-session"],
     queryFn: getSession
@@ -58,12 +58,18 @@ const OwnerGate = (): React.JSX.Element => {
     );
   }
 
-  return <OwnerShell />;
+  return noteId === undefined ? <OwnerShell /> : <OwnerShell noteId={noteId} />;
+};
+
+const OwnerNoteGate = (): React.JSX.Element => {
+  const { noteId } = useParams<{ noteId: string }>();
+  return noteId === undefined ? <NotFoundPage /> : <OwnerGate noteId={noteId} />;
 };
 
 export const appRoutes: RouteObject[] = [
   { path: "/", element: <Navigate to="/login" replace /> },
   { path: "/login", element: <LoginPage /> },
+  { path: "/app/notes/:noteId", element: <OwnerNoteGate /> },
   { path: "/app/*", element: <OwnerGate /> },
   { path: "*", element: <NotFoundPage /> }
 ];

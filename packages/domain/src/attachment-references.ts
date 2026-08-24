@@ -1,7 +1,21 @@
 import { isOpaqueId } from "@nxt/contracts";
-import { posix } from "node:path";
 import { parseMarkdownAst } from "./render-markdown.js";
 import { extractWikiLinks } from "./wiki-links.js";
+
+const resolveRelativePosixPath = (notePath: string, segments: readonly string[]): string => {
+  const resolved: string[] = [];
+  const noteSegments = notePath.split("/").slice(0, -1);
+  for (const segment of [...noteSegments, ...segments]) {
+    if (segment.length === 0 || segment === ".") continue;
+    if (segment === "..") {
+      if (resolved.at(-1) === undefined || resolved.at(-1) === "..") resolved.push(segment);
+      else resolved.pop();
+      continue;
+    }
+    resolved.push(segment);
+  }
+  return resolved.join("/");
+};
 
 /**
  * Derives the deletion fence from the exact same remark parser/plugins used
@@ -72,7 +86,7 @@ export const canonicalAttachmentReference = (raw: string, notePath: string): str
     if (segment.includes("/") || segment.includes("\\") || segment.includes("\u0000")) return undefined;
     segments.push(segment);
   }
-  const resolved = posix.normalize(posix.join(posix.dirname(notePath), ...segments)).normalize("NFC");
+  const resolved = resolveRelativePosixPath(notePath, segments).normalize("NFC");
   return resolved.startsWith("_assets/") ? resolved : undefined;
 };
 

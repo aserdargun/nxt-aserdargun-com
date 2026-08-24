@@ -1,0 +1,944 @@
+import { createHash } from "node:crypto";
+import { MAX_NOTE_SOURCE_BYTES, type CreateNoteRequest, type NoteResponse, type UpdateNoteRequest } from "@nxt/contracts";
+import { redo, undo } from "@codemirror/commands";
+import { syntaxTree } from "@codemirror/language";
+import { QueryClient } from "@tanstack/react-query";
+import { EditorView } from "@uiw/react-codemirror";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within
+} from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { RouterProvider, createMemoryRouter } from "react-router-dom";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiClientError, ApiContractError } from "../api/client";
+import { notesClient, type NotesClient } from "../api/notes";
+import { OwnerShell } from "../app/owner-shell";
+import { AppProviders } from "../app/providers";
+import { appRoutes } from "../app/router";
+import type {
+  DraftStore,
+  LocalDraft,
+  RecoveryCopy,
+  RecoveryInput
+} from "../editor/draft-store";
+import { EditorWorkspace } from "../editor/editor-workspace";
+import { MarkdownEditor } from "../editor/markdown-editor";
+import { MarkdownPreview } from "../editor/markdown-preview";
+
+const NOTE_ID = "018f47d2-6a34-7b2a-9f21-8a7034963aef";
+const OTHER_NOTE_ID = "028f47d2-6a34-7b2a-9f21-8a7034963aef";
+const RECOVERED_NOTE_ID = "038f47d2-6a34-7b2a-9f21-8a7034963aef";
+const FOLDER_ID = "v1.abcdefghijklmnop.folder_1.abcdefghijklmnopqrstuv";
+const ATTACHMENT_ID = "v1.abcdefghijklmnop.asset_1.abcdefghijklmnopqrstuv";
+const REQUEST_ID = "00000000-0000-4000-8000-000000000001";
+
+const source = (
+  body: string,
+  input: { readonly id?: string; readonly title?: string; readonly updated?: string } = {}
+): string => `---
+id: "${input.id ?? NOTE_ID}"
+title: "${input.title ?? "Plan"}"
+created: "2026-08-23T09:00:00.000Z"
+updated: "${input.updated ?? "2026-08-23T09:03:00.000Z"}"
+tags: []
+aliases: []
+---
+
+${body.replace(/\n*$/u, "")}
+`;
+
+const BASE_SOURCE = source("# Drive");
+const LOCAL_SOURCE = source("# Local");
+const NEWER_SOURCE = source("# Newer local");
+const LATEST_DRIVE_SOURCE = source("# Latest Drive", { updated: "2026-08-23T09:15:00.000Z" });
+const MERGED_SOURCE = source("# Merged", { updated: "2026-08-23T09:16:00.000Z" });
+
+const noteDocument = (
+  body: string,
+  input: { readonly id?: string; readonly title?: string; readonly updated?: string } = {}
+): NoteResponse["note"] => ({
+  frontmatter: {
+    id: input.id ?? NOTE_ID,
+    title: input.title ?? "Plan",
+    created: "2026-08-23T09:00:00.000Z",
+    updated: input.updated ?? "2026-08-23T09:03:00.000Z",
+    tags: [],
+    aliases: []
+  },
+  body: `\n${body.replace(/^\n+|\n+$/gu, "")}\n`
+});
+
+const response = (
+  body: string,
+  input: {
+    readonly id?: string;
+    readonly title?: string;
+    readonly updated?: string;
+    readonly version?: string;
+    readonly path?: string;
+  } = {}
+): NoteResponse => {
+  const renderedSource = source(body, input);
+  return {
+    note: noteDocument(body, input),
+    source: renderedSource,
+    version: input.version ?? "7",
+    path: input.path ?? "Notes/Plan.md",
+    checksum: createHash("sha256").update(renderedSource).digest("hex")
+  };
+};
+
+const BASE_RESPONSE = response("# Drive");
+const LOCAL_RESPONSE = response("# Local", { version: "8" });
+const NEWER_RESPONSE = response("# Newer local", { version: "9" });
+const LATEST_DRIVE_RESPONSE = response("# Latest Drive", {
+  updated: "2026-08-23T09:15:00.000Z",
+  version: "8"
+});
+const MERGED_RESPONSE = response("# Merged", {
+  updated: "2026-08-23T09:16:00.000Z",
+  version: "9"
+});
+
+class MemoryDraftStore implements DraftStore {
+  public readonly drafts = new Map<string, LocalDraft>();
+  public readonly recoveries: RecoveryCopy[] = [];
+  public recoveryFailuresRemaining = 0;
+
+  public get(noteId: string): Promise<LocalDraft | null> {
+    return Promise.resolve(this.drafts.get(noteId) ?? null);
+  }
+
+  public put(draft: LocalDraft): Promise<void> {
+    this.drafts.set(draft.noteId, { ...draft });
+    return Promise.resolve();
+  }
+
+  public markConfirmed(input: { readonly noteId: string; readonly source: string }): Promise<void> {
+    const current = this.drafts.get(input.noteId);
+    if (current?.source === input.source) this.drafts.delete(input.noteId);
+    return Promise.resolve();
+  }
+
+  public remove(noteId: string): Promise<void> {
+    this.drafts.delete(noteId);
+    return Promise.resolve();
+  }
+
+  public preserveRecovery(input: RecoveryInput): Promise<void> {
+    if (this.recoveryFailuresRemaining > 0) {
+      this.recoveryFailuresRemaining -= 1;
+      return Promise.reject(new Error("Recovery storage is unavailable."));
+    }
+    this.recoveries.push({ ...input, id: `${input.noteId}:${input.recoveredAt}:${this.recoveries.length}` });
+    if (input.removeMatchingDraft && this.drafts.get(input.noteId)?.source === input.source) {
+      this.drafts.delete(input.noteId);
+    }
+    return Promise.resolve();
+  }
+
+  public listRecoveries(noteId: string): Promise<RecoveryCopy[]> {
+    return Promise.resolve(this.recoveries.filter((copy) => copy.noteId === noteId));
+  }
+}
+
+interface NotesHarness {
+  readonly client: NotesClient;
+  readonly getNote: ReturnType<typeof vi.fn<NotesClient["getNote"]>>;
+  readonly updateNote: ReturnType<typeof vi.fn<NotesClient["updateNote"]>>;
+  readonly createNote: ReturnType<typeof vi.fn<NotesClient["createNote"]>>;
+}
+
+const notesHarness = (initial: NoteResponse = BASE_RESPONSE): NotesHarness => {
+  const getNote = vi.fn<NotesClient["getNote"]>().mockResolvedValue(initial);
+  const updateNote = vi.fn<NotesClient["updateNote"]>().mockResolvedValue(LOCAL_RESPONSE);
+  const createNote = vi.fn<NotesClient["createNote"]>();
+  return { client: { getNote, updateNote, createNote }, getNote, updateNote, createNote };
+};
+
+const deferred = <T,>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly reject: (reason: unknown) => void;
+} => {
+  let resolvePromise!: (value: T) => void;
+  let rejectPromise!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+  return { promise, resolve: resolvePromise, reject: rejectPromise };
+};
+
+const getEditorView = async (): Promise<EditorView> => {
+  const textbox = await screen.findByRole("textbox", { name: "Markdown editor" });
+  const view = EditorView.findFromDOM(textbox);
+  if (view === null) throw new Error("CodeMirror view is unavailable.");
+  return view;
+};
+
+const replaceEditorSource = (view: EditorView, nextSource: string): void => {
+  act(() => {
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: nextSource } });
+  });
+};
+
+const flushMicrotasks = async (): Promise<void> => {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+};
+
+const conflictError = (): ApiClientError =>
+  new ApiClientError(409, {
+    error: { code: "CONFLICT", message: "Version conflict", requestId: REQUEST_ID }
+  });
+
+const driveUnavailable = (): ApiClientError =>
+  new ApiClientError(503, {
+    error: {
+      code: "DRIVE_UNAVAILABLE",
+      message: "The service is temporarily unavailable.",
+      requestId: REQUEST_ID
+    }
+  });
+
+const openConflict = async (input: {
+  readonly store: MemoryDraftStore;
+  readonly notes: NotesHarness;
+  readonly folderId?: string;
+  readonly now?: () => Date;
+}): Promise<EditorView> => {
+  input.notes.getNote
+    .mockResolvedValueOnce(BASE_RESPONSE)
+    .mockResolvedValueOnce(LATEST_DRIVE_RESPONSE);
+  input.notes.updateNote.mockRejectedValueOnce(conflictError());
+  render(
+    <EditorWorkspace
+      noteId={NOTE_ID}
+      hiddenEditor={false}
+      hiddenPreview={false}
+      draftStore={input.store}
+      notes={input.notes.client}
+      currentFolderId={input.folderId}
+      now={input.now ?? (() => new Date("2026-08-23T09:12:00.000Z"))}
+    />
+  );
+  const view = await getEditorView();
+  vi.useFakeTimers();
+  replaceEditorSource(view, LOCAL_SOURCE);
+  await flushMicrotasks();
+  await act(async () => vi.advanceTimersByTimeAsync(1000));
+  await flushMicrotasks();
+  vi.useRealTimers();
+  expect(await screen.findByRole("dialog", { name: "Version conflict" })).toBeVisible();
+  return view;
+};
+
+const responseJson = (body: unknown, status = 200): Response =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" }
+  });
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+describe("production note request boundary", () => {
+  it("uses only same-origin typed GET, PUT, and POST JSON routes", async () => {
+    const created = response("# recovered", {
+      id: RECOVERED_NOTE_ID,
+      title: "Plan Recovered 2026-08-23T12:34:56.789Z",
+      version: "1",
+      path: "Notes/Plan Recovered 2026-08-23T12:34:56.789Z.md"
+    });
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(responseJson(BASE_RESPONSE))
+      .mockResolvedValueOnce(responseJson(LOCAL_RESPONSE))
+      .mockResolvedValueOnce(responseJson(created, 201));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await notesClient.getNote(NOTE_ID);
+    await notesClient.updateNote(NOTE_ID, { expectedVersion: "7", source: LOCAL_SOURCE });
+    await notesClient.createNote({ title: "Recovered", body: "# recovered", folderId: FOLDER_ID });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const [getPath, getInit] = fetchMock.mock.calls[0]!;
+    expect(getPath).toBe(`/api/private/notes/${NOTE_ID}`);
+    expect(getInit).toMatchObject({ method: "GET", credentials: "same-origin" });
+    const [putPath, putInit] = fetchMock.mock.calls[1]!;
+    expect(putPath).toBe(`/api/private/notes/${NOTE_ID}`);
+    expect(putInit).toMatchObject({ method: "PUT", credentials: "same-origin" });
+    expect(new Headers(putInit?.headers).get("accept")).toBe("application/json");
+    expect(new Headers(putInit?.headers).get("content-type")).toBe("application/json");
+    const putBody = putInit?.body;
+    if (typeof putBody !== "string") throw new Error("Expected a serialized PUT body");
+    expect(JSON.parse(putBody) as UpdateNoteRequest).toEqual({
+      expectedVersion: "7",
+      source: LOCAL_SOURCE
+    });
+    const [postPath, postInit] = fetchMock.mock.calls[2]!;
+    expect(postPath).toBe("/api/private/notes");
+    expect(postInit).toMatchObject({ method: "POST", credentials: "same-origin" });
+    const postBody = postInit?.body;
+    if (typeof postBody !== "string") throw new Error("Expected a serialized POST body");
+    expect(JSON.parse(postBody) as CreateNoteRequest).toEqual({
+      title: "Recovered",
+      body: "# recovered",
+      folderId: FOLDER_ID
+    });
+  });
+
+  it("rejects malformed successful note JSON at the shared schema boundary", async () => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(responseJson({ source: "x" })));
+    await expect(notesClient.getNote(NOTE_ID)).rejects.toBeInstanceOf(ApiContractError);
+  });
+});
+
+describe("editor load and durable drafts", () => {
+  it("restores a differing local draft without silently replacing it", async () => {
+    const store = new MemoryDraftStore();
+    await store.put({
+      noteId: NOTE_ID,
+      source: LOCAL_SOURCE,
+      baseVersion: "7",
+      localUpdatedAt: "2026-08-23T12:00:00.000Z",
+      confirmedAt: null
+    });
+    const notes = notesHarness();
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+
+    const view = await getEditorView();
+    expect(view.state.doc.toString()).toBe(LOCAL_SOURCE);
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Offline draft");
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(LOCAL_SOURCE);
+  });
+
+  it("clears a same-source draft after the exact Drive load confirms it", async () => {
+    const store = new MemoryDraftStore();
+    await store.put({
+      noteId: NOTE_ID,
+      source: BASE_SOURCE,
+      baseVersion: "7",
+      localUpdatedAt: "2026-08-23T12:00:00.000Z",
+      confirmedAt: null
+    });
+    const notes = notesHarness();
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+
+    expect((await getEditorView()).state.doc.toString()).toBe(BASE_SOURCE);
+    await waitFor(() => expect(store.drafts.has(NOTE_ID)).toBe(false));
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
+  });
+
+  it("restores a durable draft but reports Error for a malformed Drive readback", async () => {
+    const store = new MemoryDraftStore();
+    await store.put({
+      noteId: NOTE_ID,
+      source: LOCAL_SOURCE,
+      baseVersion: "7",
+      localUpdatedAt: "2026-08-23T12:00:00.000Z",
+      confirmedAt: null
+    });
+    const notes = notesHarness({ ...BASE_RESPONSE, checksum: "f".repeat(64) });
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+
+    expect((await getEditorView()).state.doc.toString()).toBe(LOCAL_SOURCE);
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Error");
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(LOCAL_SOURCE);
+  });
+
+  it("persists every editor change immediately and waits exactly 1000ms before PUT", async () => {
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    const pending = deferred<NoteResponse>();
+    notes.updateNote.mockReturnValueOnce(pending.promise);
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+
+    replaceEditorSource(view, LOCAL_SOURCE);
+    await flushMicrotasks();
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(LOCAL_SOURCE);
+    expect(notes.updateNote).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saving");
+    await act(async () => vi.advanceTimersByTimeAsync(999));
+    expect(notes.updateNote).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(notes.updateNote).toHaveBeenCalledWith(NOTE_ID, {
+      expectedVersion: "7",
+      source: LOCAL_SOURCE
+    });
+    expect(screen.getByLabelText("Save status")).not.toHaveTextContent("Saved");
+
+    pending.resolve(LOCAL_RESPONSE);
+    await flushMicrotasks();
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
+    expect(store.drafts.has(NOTE_ID)).toBe(false);
+  });
+
+  it("fences an in-flight response and resaves the latest generation with the advanced version", async () => {
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    const first = deferred<NoteResponse>();
+    const second = deferred<NoteResponse>();
+    notes.updateNote.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+
+    replaceEditorSource(view, LOCAL_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    replaceEditorSource(view, NEWER_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    expect(notes.updateNote).toHaveBeenCalledTimes(1);
+
+    first.resolve(LOCAL_RESPONSE);
+    await flushMicrotasks();
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saving");
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(NEWER_SOURCE);
+    expect(notes.updateNote).toHaveBeenCalledTimes(2);
+    expect(notes.updateNote).toHaveBeenLastCalledWith(NOTE_ID, {
+      expectedVersion: "8",
+      source: NEWER_SOURCE
+    });
+
+    second.resolve(NEWER_RESPONSE);
+    await flushMicrotasks();
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
+    expect(store.drafts.has(NOTE_ID)).toBe(false);
+  });
+
+  it.each([
+    ["different source", { ...LOCAL_RESPONSE, source: NEWER_SOURCE, checksum: createHash("sha256").update(NEWER_SOURCE).digest("hex") }],
+    ["wrong checksum", { ...LOCAL_RESPONSE, checksum: "f".repeat(64) }],
+    ["wrong note", { ...LOCAL_RESPONSE, note: { ...LOCAL_RESPONSE.note, frontmatter: { ...LOCAL_RESPONSE.note.frontmatter, id: OTHER_NOTE_ID } } }],
+    ["unchanged version", { ...LOCAL_RESPONSE, version: "7" }],
+    ["unrelated path", { ...LOCAL_RESPONSE, path: "Archive/Other.md" }]
+  ] as const)("keeps the draft and reports Error for an exact readback mismatch: %s", async (_label, mismatch) => {
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    notes.updateNote.mockResolvedValueOnce(mismatch);
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, LOCAL_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await flushMicrotasks();
+
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Error");
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(LOCAL_SOURCE);
+  });
+
+  it("rejects a renamed-note readback outside the original parent path", async () => {
+    const renamedSource = source("# Local", { title: "Renamed" });
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    notes.updateNote.mockResolvedValueOnce(response("# Local", {
+      title: "Renamed",
+      version: "8",
+      path: "Archive/Renamed.md"
+    }));
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, renamedSource);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await flushMicrotasks();
+
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Error");
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(renamedSource);
+  });
+
+  it.each([
+    ["offline network", new TypeError("Failed to fetch")],
+    ["Drive unavailable", driveUnavailable()]
+  ])("retains local content as Offline draft after %s", async (_label, failure) => {
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    notes.updateNote.mockRejectedValueOnce(failure);
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, LOCAL_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await flushMicrotasks();
+
+    expect(view.state.doc.toString()).toBe(LOCAL_SOURCE);
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(LOCAL_SOURCE);
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Offline draft");
+  });
+
+  it("fetches the exact latest Drive source after a typed 409 and retains the local draft", async () => {
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    const view = await openConflict({ store, notes });
+
+    expect(notes.getNote).toHaveBeenNthCalledWith(1, NOTE_ID);
+    expect(notes.getNote).toHaveBeenNthCalledWith(2, NOTE_ID);
+    const dialog = screen.getByRole("dialog", { name: "Version conflict" });
+    expect(within(dialog).getByRole("textbox", { name: "Local draft" })).toHaveValue(LOCAL_SOURCE);
+    expect(within(dialog).getByRole("region", { name: "Drive version" })).toHaveTextContent("# Latest Drive");
+    expect(view.state.doc.toString()).toBe(LOCAL_SOURCE);
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(LOCAL_SOURCE);
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Conflict");
+  });
+
+  it("retains the draft and Conflict status when the latest GET after 409 fails", async () => {
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    notes.getNote.mockResolvedValueOnce(BASE_RESPONSE).mockRejectedValueOnce(driveUnavailable());
+    notes.updateNote.mockRejectedValueOnce(conflictError());
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, LOCAL_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await flushMicrotasks();
+
+    expect(notes.getNote).toHaveBeenCalledTimes(2);
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(LOCAL_SOURCE);
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Conflict");
+    expect(screen.queryByRole("dialog", { name: "Version conflict" })).not.toBeInTheDocument();
+  });
+
+  it("cancels a pending debounce on unmount", async () => {
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    const mounted = render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, LOCAL_SOURCE);
+    await flushMicrotasks();
+    mounted.unmount();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+
+    expect(notes.updateNote).not.toHaveBeenCalled();
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(LOCAL_SOURCE);
+  });
+
+  it("cannot let an old note response clear a new note draft after a note switch", async () => {
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    const pending = deferred<NoteResponse>();
+    notes.getNote.mockImplementation((noteId) =>
+      Promise.resolve(
+        noteId === NOTE_ID
+          ? BASE_RESPONSE
+          : response("# Other Drive", { id: OTHER_NOTE_ID, title: "Other", path: "Notes/Other.md" })
+      )
+    );
+    notes.updateNote.mockReturnValueOnce(pending.promise);
+    const mounted = render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, LOCAL_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    vi.useRealTimers();
+    await store.put({
+      noteId: OTHER_NOTE_ID,
+      source: source("# Other local", { id: OTHER_NOTE_ID, title: "Other" }),
+      baseVersion: "7",
+      localUpdatedAt: "2026-08-23T12:01:00.000Z",
+      confirmedAt: null
+    });
+
+    mounted.rerender(
+      <EditorWorkspace
+        noteId={OTHER_NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    pending.resolve(LOCAL_RESPONSE);
+    await flushMicrotasks();
+
+    const nextView = await getEditorView();
+    expect(nextView.state.doc.toString()).toContain("# Other local");
+    expect(store.drafts.get(OTHER_NOTE_ID)?.source).toContain("# Other local");
+  });
+});
+
+describe("conflict recovery outcomes", () => {
+  it("does not display Drive until a named local recovery succeeds, then retries safely", async () => {
+    const user = userEvent.setup();
+    const store = new MemoryDraftStore();
+    store.recoveryFailuresRemaining = 1;
+    const notes = notesHarness();
+    const view = await openConflict({ store, notes });
+    const keep = screen.getByRole("button", { name: "Keep Drive version" });
+
+    await user.click(keep);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Recovery storage is unavailable.");
+    expect(screen.getByRole("dialog", { name: "Version conflict" })).toBeVisible();
+    expect(view.state.doc.toString()).toBe(LOCAL_SOURCE);
+    await user.click(keep);
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Version conflict" })).not.toBeInTheDocument());
+    expect(view.state.doc.toString()).toBe(LATEST_DRIVE_SOURCE);
+    expect(store.drafts.has(NOTE_ID)).toBe(false);
+    expect(store.recoveries).toEqual([
+      expect.objectContaining({
+        name: "Local draft 2026-08-23T09:12:00.000Z",
+        source: LOCAL_SOURCE
+      })
+    ]);
+  });
+
+  it("preserves a recovery and explains the missing injected folder without pretending success", async () => {
+    const user = userEvent.setup();
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    await openConflict({ store, notes });
+
+    await user.click(screen.getByRole("button", { name: "Save local as a new note" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Select a folder before recovering this note.");
+    expect(screen.getByRole("dialog", { name: "Version conflict" })).toBeVisible();
+    expect(notes.createNote).not.toHaveBeenCalled();
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(LOCAL_SOURCE);
+    expect(store.recoveries.at(-1)?.source).toBe(LOCAL_SOURCE);
+  });
+
+  it("uses the canonical UTC recovered-title suffix and clears only after exact create readback", async () => {
+    const user = userEvent.setup();
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    const recoveredTitle = "Plan Recovered 2026-08-23T12:34:56.789Z";
+    const recoveredPath = "Notes/Plan Recovered 2026 - 08 - 23T12 - 34 - 56.789Z.md";
+    const created = response(LOCAL_SOURCE, {
+      id: RECOVERED_NOTE_ID,
+      title: recoveredTitle,
+      version: "1",
+      path: recoveredPath
+    });
+    notes.createNote
+      .mockResolvedValueOnce({ ...created, note: { ...created.note, body: "wrong\n" } })
+      .mockResolvedValueOnce(created);
+    const view = await openConflict({
+      store,
+      notes,
+      folderId: FOLDER_ID,
+      now: () => new Date("2026-08-23T15:34:56.789+03:00")
+    });
+    const saveNew = screen.getByRole("button", { name: "Save local as a new note" });
+
+    await user.click(saveNew);
+    expect(await screen.findByRole("alert")).toHaveTextContent("The recovered note did not match the local draft.");
+    expect(screen.getByRole("dialog", { name: "Version conflict" })).toBeVisible();
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(LOCAL_SOURCE);
+    await user.click(saveNew);
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Version conflict" })).not.toBeInTheDocument());
+    expect(notes.createNote).toHaveBeenNthCalledWith(1, {
+      title: recoveredTitle,
+      body: LOCAL_SOURCE,
+      folderId: FOLDER_ID
+    });
+    expect(notes.createNote).toHaveBeenNthCalledWith(2, {
+      title: recoveredTitle,
+      body: LOCAL_SOURCE,
+      folderId: FOLDER_ID
+    });
+    expect(view.state.doc.toString()).toBe(LATEST_DRIVE_SOURCE);
+    expect(store.drafts.has(NOTE_ID)).toBe(false);
+  });
+
+  it("keeps an editable merged draft through failure and retries PUT against the latest version", async () => {
+    const user = userEvent.setup();
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    notes.updateNote
+      .mockRejectedValueOnce(conflictError())
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(MERGED_RESPONSE);
+    notes.getNote
+      .mockResolvedValueOnce(BASE_RESPONSE)
+      .mockResolvedValueOnce(LATEST_DRIVE_RESPONSE);
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, LOCAL_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await flushMicrotasks();
+    vi.useRealTimers();
+    const mergeEditor = await screen.findByRole("textbox", { name: "Local draft" });
+    fireEvent.change(mergeEditor, { target: { value: MERGED_SOURCE } });
+    await flushMicrotasks();
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(MERGED_SOURCE);
+    const merge = screen.getByRole("button", { name: "Merge versions" });
+
+    await user.click(merge);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Failed to fetch");
+    expect(screen.getByRole("dialog", { name: "Version conflict" })).toBeVisible();
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(MERGED_SOURCE);
+    await user.click(merge);
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Version conflict" })).not.toBeInTheDocument());
+    expect(notes.updateNote).toHaveBeenNthCalledWith(2, NOTE_ID, {
+      expectedVersion: "8",
+      source: MERGED_SOURCE
+    });
+    expect(notes.updateNote).toHaveBeenNthCalledWith(3, NOTE_ID, {
+      expectedVersion: "8",
+      source: MERGED_SOURCE
+    });
+    expect(view.state.doc.toString()).toBe(MERGED_SOURCE);
+    expect(store.drafts.has(NOTE_ID)).toBe(false);
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
+  });
+});
+
+describe("safe Markdown preview", () => {
+  it("sanitizes active content and resolves only canonical application attachments", async () => {
+    const resolver = vi.fn((reference: string) =>
+      reference === `_assets/${NOTE_ID}/diagram.png` ? ATTACHMENT_ID : "https://attacker.example/raw"
+    );
+    render(
+      <MarkdownPreview
+        source={`# Preview\n\n<script>window.__nxtExecuted = true</script>\n\n![diagram](../_assets/${NOTE_ID}/diagram.png)\n![external](https://attacker.example/track.png)`}
+        notePath="Notes/Plan.md"
+        resolveAttachment={resolver}
+      />
+    );
+
+    expect(await screen.findByRole("heading", { name: "Preview" })).toBeVisible();
+    expect(document.querySelector("script")).toBeNull();
+    expect(screen.getByRole("img", { name: "diagram" })).toHaveAttribute(
+      "src",
+      `/api/private/attachments/${ATTACHMENT_ID}`
+    );
+    expect(screen.getByRole("img", { name: "external" })).not.toHaveAttribute("src");
+    expect(document.body.innerHTML).not.toContain("attacker.example");
+    expect(resolver).toHaveBeenCalledWith(`_assets/${NOTE_ID}/diagram.png`);
+  });
+
+  it("navigates resolved wiki links only through the injected note callback and leaves other links inert", async () => {
+    const user = userEvent.setup();
+    const onNavigate = vi.fn();
+    render(
+      <MarkdownPreview
+        source="[[Plan|Open plan]] [[Missing]] [[Tie]] [[Unsafe]]"
+        notePath="Notes/Plan.md"
+        resolveWikiLink={(target) => {
+          if (target === "Plan") return { kind: "resolved", noteId: OTHER_NOTE_ID };
+          if (target === "Tie") return { kind: "ambiguous", candidateIds: [NOTE_ID, OTHER_NOTE_ID] };
+          if (target === "Unsafe") return { kind: "resolved", noteId: "javascript:alert(1)" };
+          return { kind: "unresolved" };
+        }}
+        onWikiNavigate={onNavigate}
+      />
+    );
+
+    const resolved = await screen.findByRole("button", { name: "Open plan" });
+    await user.click(resolved);
+    expect(onNavigate).toHaveBeenCalledWith(OTHER_NOTE_ID);
+    for (const label of ["Missing", "Tie", "Unsafe"]) {
+      expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
+      expect(screen.getByText(label)).toHaveAttribute("aria-disabled", "true");
+    }
+  });
+});
+
+describe("CodeMirror production configuration", () => {
+  it("uses Markdown parsing, line wrapping, bracket matching, history, and keyboard editing without executing code", async () => {
+    const onChange = vi.fn();
+    const editorSource = "# Heading\n\n(pair)\n\n```html\n<script>window.__nxtExecuted = true</script>\n```\n";
+    render(<MarkdownEditor value={editorSource} onChange={onChange} />);
+    const view = await getEditorView();
+
+    expect(view.state.doc.toString()).toBe(editorSource);
+    const cursor = syntaxTree(view.state).cursor();
+    const syntaxNames: string[] = [];
+    do syntaxNames.push(cursor.name); while (cursor.next());
+    expect(syntaxNames).toEqual(expect.arrayContaining([expect.stringMatching(/ATXHeading1|HeaderMark/u), "FencedCode"]));
+    expect(document.querySelector(".cm-lineWrapping")).not.toBeNull();
+    const pairOffset = editorSource.indexOf("(") + 1;
+    act(() => view.dispatch({ selection: { anchor: pairOffset } }));
+    await waitFor(() => expect(document.querySelector(".cm-matchingBracket")).not.toBeNull());
+
+    act(() => view.dispatch({ changes: { from: view.state.doc.length, insert: "edited" } }));
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(editorSource);
+    expect(redo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe(`${editorSource}edited`);
+    expect((globalThis as typeof globalThis & { __nxtExecuted?: boolean }).__nxtExecuted).not.toBe(true);
+  });
+
+  it("blocks an over-contract editor transaction before it reaches drafts or callbacks", async () => {
+    const onChange = vi.fn();
+    const onLimitExceeded = vi.fn();
+    render(
+      <MarkdownEditor
+        value={BASE_SOURCE}
+        onChange={onChange}
+        onLimitExceeded={onLimitExceeded}
+      />
+    );
+    const view = await getEditorView();
+
+    replaceEditorSource(view, "x".repeat(MAX_NOTE_SOURCE_BYTES + 1));
+
+    expect(view.state.doc.toString()).toBe(BASE_SOURCE);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onLimitExceeded).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("owner-shell integration", () => {
+  it("mounts the real editor with actual title, path, preview, and save state", async () => {
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    render(<OwnerShell noteId={NOTE_ID} notes={notes.client} draftStore={store} />);
+
+    expect((await getEditorView()).state.doc.toString()).toBe(BASE_SOURCE);
+    const paths = screen.getAllByLabelText("Active note path: Notes/Plan.md");
+    expect(paths).toHaveLength(2);
+    expect(screen.getByText("Plan", { selector: ".mobile-title" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Preview" })).toHaveTextContent("Drive");
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
+  });
+
+  it("reaches the selected production note through the exact deep owner route", async () => {
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      if (input === "/api/private/session") {
+        return Promise.resolve(responseJson({ user: { userDetails: "owner" } }));
+      }
+      if (input === `/api/private/notes/${NOTE_ID}`) return Promise.resolve(responseJson(BASE_RESPONSE));
+      const requestedPath = typeof input === "string" || input instanceof URL ? input.toString() : input.url;
+      return Promise.reject(new Error(`Unexpected request: ${requestedPath}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const router = createMemoryRouter(appRoutes, { initialEntries: [`/app/notes/${NOTE_ID}`] });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <AppProviders queryClient={queryClient}>
+        <RouterProvider router={router} />
+      </AppProviders>
+    );
+
+    expect((await getEditorView()).state.doc.toString()).toBe(BASE_SOURCE);
+    expect(router.state.location.pathname).toBe(`/app/notes/${NOTE_ID}`);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/private/notes/${NOTE_ID}`,
+      expect.objectContaining({ method: "GET", credentials: "same-origin" })
+    );
+  });
+});
