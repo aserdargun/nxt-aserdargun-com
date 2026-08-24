@@ -1,0 +1,164 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-08-23-nxt-markdown-vault.md
+
+Workspace: `/Users/aserdargun/Documents/ChatGPT/nxt-aserdargun-com/.worktrees/codex-nxt-markdown-vault`
+Branch: `codex/nxt-markdown-vault`
+Merge base: `0b6ffe1`
+Spec: `docs/superpowers/specs/2026-08-23-nxt-markdown-vault-design.md`
+Approved visual spec: `docs/design/NXT_VISUAL_SPEC.md`
+Baseline: clean worktree; no executable project existed before Task 1.
+
+## Pre-flight rulings
+
+- Ruling: `.gitignore` already contains `.worktrees/` because safe worktree creation requires the project-local directory to be ignored. Task 1 must expand that file and still demonstrate RED through missing `package.json` and missing required ignore behaviors — cost if wrong: Task 1's documented empty-file failure wording differs, but its security contract and test-first proof remain intact.
+- Ruling: Task 1 must test ignore behavior with `git check-ignore --no-index` rather than only matching `.gitignore` source lines; package metadata may still be parsed as a declarative interface — cost if wrong: the behavioral test may be slightly more setup-heavy but avoids a tautological source-text test.
+- Ruling: Declarative Azure artifact tests in Task 14 may parse the built `staticwebapp.config.json` because that JSON is the platform-consumed boundary artifact, but they must be paired with local SWA/HTTP behavior tests — cost if wrong: exact platform contract checks can be brittle during a future equivalent config refactor.
+- Ruling: The user-approved `docs/design/NXT_VISUAL_SPEC.md` is a binding extension for Tasks 10–15; exact product copy from the product spec overrides spelling artifacts inside generated pixels — cost if wrong: the implementation is constrained to the approved composition and may require rework if the user later changes visual direction.
+- Ruling: Tasks 17 and 18 remain explicit external-mutation gates. Code Tasks 1–16 run continuously; the controller stops before Drive, GitHub, Azure, secret, push, publish, or deployment mutations for refreshed target authorization — cost if wrong: publication is delayed, but no external user data or resource is changed without a last target check.
+- Ruling: Replace the plan-wide `typescript@7.0.2` pin with `typescript@5.9.3`. Live peer metadata for `typescript-eslint@8.67.0` accepts TypeScript `>=4.8.4 <6.1.0`, so the original pin makes the promised lint command non-executable; update the tracked plan and lockfile consistently — cost if wrong: NXT stays on the last supported TypeScript 5 release instead of the newest major until the lint toolchain supports it.
+- Ruling: Run all project validation with the installed Node 22 runtime at `/Users/aserdargun/.nvm/versions/node/v22.23.1/bin` because the login shell currently selects Node 26.7.0 while the project contract is Node `>=22 <23` — cost if wrong: local commands need an explicit PATH prefix until operator documentation/environment actions select Node 22 automatically.
+- Ruling: Root ESLint ignores generated `**/dist/**`, applies recommended type-checked rules to production `src` TypeScript, and applies recommended syntax rules without project-service typing to `test` TypeScript. This keeps `pnpm lint` executable as package test files are intentionally outside build tsconfigs; Vitest still compiles/runs them — cost if wrong: type-aware ESLint diagnostics do not cover test-only TypeScript, so test type mistakes rely on Vitest execution until a dedicated test tsconfig is introduced.
+
+## Cross-task file and interface scan
+
+| Pair | Producer / consumer relationship | Finding |
+|---|---|---|
+| 1 → 2 | root pnpm/TypeScript contract → contracts package | Compatible; Task 2 pins its own runtime dependencies. |
+| 1 → 4 | workspace membership → `api` package | Compatible; API is listed before it exists. |
+| 1 → 6 | `.env.example` names → Drive authorization/provisioning | Compatible; Task 6 expands exact IDs without values. |
+| 1 → 10 | workspace membership → `web` package | Compatible; web is listed before it exists. |
+| 1 → 14 | root scripts/package/config → build and local lifecycle modifications | Compatible; later task replaces placeholders with executable scripts. |
+| 1 → 15 | root `e2e` script → Playwright setup | Compatible; not a release gate until Task 15. |
+| 1 → 16 | root validation scripts → CI/release tooling | Compatible; Task 16 adds deterministic `validate:ci`. |
+| 2 → 3 | persisted/API contracts → Markdown domain | Compatible; domain imports types and schemas only. |
+| 2 → 4 | shared data contracts → storage/API package | Compatible; workspace dependencies are explicit. |
+| 2 → 5 | `ApiError` → auth/error response layer | Compatible; defensive auth maps to the fixed enum. |
+| 2 → 7 | note/index/preference schemas → vault services | Compatible; system JSON stays schema-versioned. |
+| 2 → 9 | publication manifest contract → snapshot service | Compatible; public readers validate the same manifest. |
+| 2 → 10 | API response schemas → typed browser client | Compatible; browser cannot import backend secrets. |
+| 3 → 4 | domain package → API package | Compatible; browser-safe Web Crypto keeps package portable. |
+| 3 → 7 | codec/indexer → vault and rescan services | Compatible; invalid source remains recoverable. |
+| 3 → 9 | renderer/public ID → publication | Compatible; sanitization and ID generation are reused. |
+| 3 → 10 | renderer contracts → browser preview | Compatible; no server-only import is permitted. |
+| 4 → 5 | API package/entrypoint → first Function | Compatible; Functions runtime is a production dependency. |
+| 4 → 6 | `StoragePort` → Google Drive adapter | Compatible; Drive version is an optimistic string guard. |
+| 4 → 7 | bounded adapters → vault services | Compatible; separate root decorators preserve ancestry. |
+| 4 → 8 | storage bytes/text methods → attachment service | Compatible; no arbitrary caller path is accepted. |
+| 4 → 9 | private storage and revisions → publication | Compatible; manifest/snapshot ancestry remains private-root bounded. |
+| 4 → 14 | API entrypoint/package → esbuild artifact | Compatible; `@azure/functions` remains external and packaged. |
+| 5 → 7 | exact-owner wrapper → private vault Functions | Compatible; every handler stays defense-in-depth guarded. |
+| 5 → 8 | exact-owner wrapper → private attachment Functions | Compatible. |
+| 5 → 9 | exact-owner wrapper → publish/revoke Functions | Compatible; anonymous readers are separate. |
+| 5 → 14 | Function entrypoint/routes → SWA edge rules | Compatible; edge auth and handler auth are both required. |
+| 6 → 7 | roots/system-file IDs/adapter → vault services | Compatible; provisioning creates exact system JSON files first. |
+| 6 → 8 | bounded Drive adapter → attachment persistence | Compatible; assets remain under verified vault ancestry. |
+| 6 → 9 | published root/system manifest → publication service | Compatible; public lookups never accept raw Drive IDs. |
+| 6 → 16 | Drive tooling → backup inventory | Compatible; backup walks both verified roots. |
+| 6 → 17 | authorization/provisioning scripts → live Drive gate | Compatible; live integration is opt-in and isolated. |
+| 6 → 18 | redacted settings → Azure application settings | Compatible; values never enter GitHub or frontend artifacts. |
+| 7 → 8 | note IDs/index/reference model → attachments | Compatible; move recalculates relative asset references. |
+| 7 → 11 | note GET/PUT/version API → editor autosave | Compatible; conflict response retains draft recovery. |
+| 7 → 12 | vault/folder/preferences APIs → explorer/palette | Compatible; protected roots and confirmation tokens remain server-authoritative. |
+| 7 → 15 | service behavior → browser acceptance fixtures | Compatible; local adapter supplies deterministic state. |
+| 8 → 9 | attachment policy/allowlist inputs → publication | Compatible; publish copies referenced safe assets only. |
+| 8 → 13 | private attachment API → attachment UI | Compatible; UI never receives raw Drive URLs. |
+| 8 → 15 | MIME/size/Trash behavior → security E2E | Compatible. |
+| 9 → 12 | publish/revoke commands → command palette | Compatible; commands disable without a current note/publication. |
+| 9 → 13 | private/public publication APIs → owner/public UI | Compatible; revoke confirms `404`. |
+| 9 → 15 | publication boundary → anonymous/security E2E | Compatible. |
+| 10 → 11 | web package/shell/theme → editor | Compatible; Task 11 adds editor dependencies only. |
+| 10 → 12 | web shell/theme/dialog primitive → explorer/palette | Compatible; Radix dialog is shared. |
+| 10 → 13 | router/shell → public route and owner controls | Compatible; public route excludes authenticated shell. |
+| 10 → 14 | Vite app/public config → prebuilt web artifact | Compatible; login remains a visible SPA page. |
+| 10 → 15 | responsive shell → browser/accessibility coverage | Compatible; approved visual spec is the acceptance reference. |
+| 11 → 13 | editor attachment/publication affordances → final UI | Compatible; draft lifecycle stays independent of publish state. |
+| 11 → 15 | drafts/conflicts → browser recovery scenarios | Compatible. |
+| 12 → 13 | active note/navigation state → attachment/public controls | Compatible. |
+| 12 → 15 | search/tree/palette → keyboard/mobile scenarios | Compatible. |
+| 13 → 14 | completed web routes → final build/static config | Compatible. |
+| 13 → 15 | public/attachment UI → browser acceptance | Compatible. |
+| 14 → 15 | local SWA Run/Stop → Playwright web server | Compatible; teardown must call bounded Stop. |
+| 14 → 16 | deterministic artifacts → workflows/release checks | Compatible; deploy uses prebuilt outputs. |
+| 14 → 18 | release artifact/route contract → Azure upload | Compatible; generated hostname remains terminal. |
+| 15 → 16 | acceptance suite → `validate:ci` | Compatible; CI installs Chromium before validation. |
+| 15 → 18 | browser suite → release preflight | Compatible; live browser verification adds generated-host evidence. |
+| 16 → 17 | OAuth/backup operator tooling → live Drive gate | Compatible; recovery inventory is local-only. |
+| 16 → 18 | workflows/release script → GitHub/Azure gate | Compatible; token/settings values are redacted. |
+| 17 → 18 | verified live settings/root health → Azure runtime | Compatible; publication must not start with a seven-day Testing token. |
+
+## Per-task internal consistency scan
+
+| Task | Files/tests/implementation agreement | Finding |
+|---:|---|---|
+| 1 | Root contract test precedes workspace files and lockfile | Consistent after `.gitignore` preseed ruling; behavioral ignore test required. |
+| 2 | Zod tests precede schemas/package build | Consistent; unique folding helper is defined. |
+| 3 | codec/render/link tests precede portable domain | Consistent; public ID uses browser/Node Web Crypto. |
+| 4 | local adapter tests precede storage port/API package | Consistent; Trash and revision behavior are observable. |
+| 5 | auth tests precede principal parser/Function | Consistent; local bypass is loopback and non-production only. |
+| 6 | OAuth/provision tests precede Drive adapter | Consistent; Desktop client, PKCE, full scope, system files, and opt-in live test align. |
+| 7 | vault/rescan/preference tests precede services | Consistent; optimistic guard makes no atomic-lock claim. |
+| 8 | policy/size tests precede attachment implementation | Consistent; `file-type` is added to API dependencies. |
+| 9 | partial publish/revoke tests precede snapshot service | Consistent; manifest-last/revoke-first is fail-closed. |
+| 10 | login/shell tests precede React shell/theme | Consistent with approved visual spec; `/login` stays visible. |
+| 11 | draft/conflict tests precede editor/recovery | Consistent; exact three outcomes have no overwrite default. |
+| 12 | search/tree tests precede explorer/palette | Consistent; server-issued folder confirmation remains authoritative. |
+| 13 | attachment/public UI tests precede routes/components | Consistent; public view has no owner shell or raw IDs. |
+| 14 | artifact/security tests precede config/build/lifecycle | Consistent under declarative-artifact ruling; behavior tests are mandatory. |
+| 15 | E2E scenarios consume complete local stack | Consistent; desktop/mobile/reduced-motion projects share deterministic fixtures. |
+| 16 | workflow/release/backup tests precede scripts/docs | Consistent; no deployment happens in this task. |
+| 17 | read-only target display precedes Drive mutations | Consistent; external authorization gate applies. |
+| 18 | read-only collision checks and clean validation precede publication | Consistent; external authorization gate and no-DNS boundary apply. |
+
+## Task progress
+
+- Task 1: reviewer cannot-verify resolved — implementer report contains explicit RED/GREEN commands and outputs; controller verified a clean branch and no configured Git remote, and this task made no external tool calls.
+- Task 1: complete (commits 0b6ffe1..8fb07d3, review clean)
+- Task 2: fix round 1/5 (1 addressed, 0 open — require canonical UTC `Z` timestamps; commit 1bc5fee)
+- Task 2: complete (commits 8fb07d3..1bc5fee, review clean)
+- Task 3: minor (deferred): outline collection visits only root children, so nested headings may lack IDs/outline entries; final review must triage.
+- Task 3: fix round 1/5 (3 addressed, 1 open — longer valid closing fences remain unrecognized; commit 835be7c)
+- Task 3: fix round 2/5 (1 addressed, 0 open — CommonMark longer closing fence; commit e3d32a0)
+- Task 3: complete (commits 1bc5fee..e3d32a0, review clean with 1 deferred Minor)
+- Task 4: fix round 1/5 opened — 3 Important findings: configured root itself bypasses validation; metadata failure can violate content/revision atomicity and immutability; intermediate directory symlinks can escape the local root. 1 Minor deferred: adapter-specific `kind` leaks through `StoredFile` values.
+- Task 4: fix round 1/5 (3 original findings addressed, 2 related Important findings open — failed create can orphan/collide with the next deterministic revision; Trash can suppress the active-content move failure; commits 0185420..d40f892). The prior `kind` Minor was addressed.
+- Task 4: fix round 2/5 (2 sequential recovery findings addressed, 2 related Important findings open — two adapter instances can race stale metadata and archive a valid revision; Trash rollback-write failure lacks durable recovery; commits 6610438..4a5548a).
+- Task 4: fix round 3/5 (cross-instance lock and durable journal added, but 3 Critical and 3 Important findings remain: unsafe time-only lock stealing, release TOCTOU/permanent deletion, unbound Trash artifact acceptance, handoff ENOENT race, malformed metadata accepted at initialization, and journal no-follow TOCTOU; commits a16d868..d72a1f4).
+- Ruling: Task 4 round-3 checkpoint continues to round 4 with a fail-closed non-stealable lock that times out instead of auto-breaking, atomically archives lock artifacts on owner release, binds Trash recovery to the expected content checksum, validates metadata during initialization, retries benign lock handoff races, and reads journals through one no-follow file handle.
+- Task 4: fix round 4/5 (all prior Critical findings removed; 6 Important findings remain — release ownership TOCTOU, non-finite timeout, shallow metadata validation, optional/unverified file Trash descriptor, recovery skipped when metadata is absent, and remaining root/archive/artifact check-use races; commits f9900b2..0057a87).
+- Task 4: fix round 5/5 (all prior lock, timeout, root, archive, artifact-binding, and initialization findings addressed; 3 Important findings remain — metadata parent cycles/version-to-revision mismatches are accepted, legacy unbound file journals fail without restoring readable metadata, and Trash incorrectly requires the non-authoritative cache; commits ed990d8..12f44ea).
+- Task 4: blocked after the maximum 5 fix rounds; per SDD protocol the remaining Important findings require user escalation before any further implementation task begins.
+- Ruling: The user explicitly approved a post-escalation Task 4R redesign. Task 4R is a new remediation task with a fresh implementer and a fresh 1–5 fix-round audit; it must replace implicit Trash rollback branches with a small explicit transaction-state model and close the three recorded Important findings before Task 5 begins.
+- Ruling: Task 4R's accidental intermediate Node 26 GREEN run is non-authoritative and discarded; complete pre-commit and post-commit validation was rerun under the required Node 22.23.1 runtime, so independent review may proceed using only the recorded Node 22 evidence.
+- Task 4R: fix round 1/5 opened — 1 Important finding: recovery binds proof to `originalMetadata` rather than the active revision and exact Trash projection in current committed metadata, and mismatch throws before rollback. 1 Minor/spec-test gap: invalid transitions and restart idempotence at all terminal/intermediate states lack committed regression coverage.
+- Task 4R: fix round 1/5 (1 Important addressed, 0 Critical/Important open — exact committed projection/current revision/artifact proof with rollback on all mismatches; commits 3c1ac32..830ee61).
+- Task 4R: minor (deferred): the pure `planTrashRecovery` unit suite does not call the `metadata-staged` branch directly; the same successful restart branch is covered by the adapter integration test. Final review must triage.
+- Task 4R: complete (commits 12f44ea..830ee61, no Critical/Important findings, 1 deferred Minor).
+- Task 4: complete after user-approved Task 4R remediation (commits e3d32a0..830ee61).
+- Task 5: fix round 1/5 opened — 7 Important findings: URL canonicalization admits non-canonical loopback/userinfo bypasses; environment values other than exact production fail open; missing owner configuration precedes principal 401/403 classification; cross-realm Error messages leak; revoked array proxies escape the sanitizer; shared DAGs have no monotonic work/output budget; session response contradicts the shared contract.
+- Task 5: fix round 1/5 (7 original findings addressed, 3 related Important findings open — control-character environment values survive trimming, transparent Error proxies/data-message spoofs leak, and reflection/key normalization performs unbounded work before budgets; commits ed10db2..b35ccfe).
+- Task 5: fix round 2/5 (environment, direct proxy/message spoof, and application-level key-budget findings addressed; 2 related Important findings open — permissive supplied request IDs can carry forbidden fixture text, and a Proxy in an ordinary object's prototype chain can execute during `for...in` before budgets; commits 88f90bf..459799e).
+- Task 5: fix round 3/5 (2 addressed, 0 Critical/Important open — canonical UUID-only supplied correlation IDs and proxy-free bounded prototype admission; commits 1201763..1b203a7).
+- Task 5: complete (commits 830ee61..1b203a7, review clean).
+- Task 6: fix round 1/5 opened — 5 Important findings: root CLIs cannot resolve the API-local `googleapis`; library-default retries violate the adapter allowlist/attempt bound; write readback omits ID/MIME/active/ancestry/name contract checks; live integration does not prove the exact private-root child; OAuth callback accepts duplicate state/code parameters. 2 Minor findings included in the fix: common downloaded credential filenames remain trackable and leading-whitespace env keys can be duplicated.
+- Task 6: fix round 1/5 (original findings addressed, 4 related Important findings open — create accepts non-decimal versions, Google adapter rejects valid MIME changes, same-parent rename sends contradictory parent mutations, and existing env values retain CR/NUL injection; commits 0f2129b..cb20ed8). 1 Minor report/test mismatch also open for second-page live ancestry assertions.
+- Task 6: fix round 2/5 (version/MIME/rename/pagination findings addressed; 1 Important open — env parsing/writing still accepts C1 controls U+0080–U+009F; commits c954237..df527eb). 1 Minor included in the next fix: live child-ID guard rejects only CR/LF/NUL while the report claims all controls.
+- Task 6: fix round 3/5 (1 Important and 1 Minor addressed, 0 Critical/Important open — complete C0/C1 rejection for env and live child IDs; commits a328474..c253836).
+- Task 6: complete (commits 1b203a7..c253836, review clean; live integration intentionally skipped and no external state accessed).
+- Task 7: fix round 1/5 opened — 10 Important findings: confirmation tokens are redacted and tree computation is multiplicative; shared response schemas reject handler outputs; Drive mutations can commit before index CAS and strand/unindex data; every note mutation rereads/rebuilds the full vault; folder mutations leave descendant index paths/membership stale; folder move has no route/contract; rescan state is process-local; rescan bounds entries but not Drive calls; unbounded note/index/recovery payloads can be silently truncated; broad catches misclassify storage failures. 2 Minor findings included: case-only API renames omit aliases and runtime uses a predictable fallback opaque-ID secret.
+- Ruling: Task 7 may revise shared contracts and the existing vault-index schema to expose only safe opaque identifiers, paginate vault/rescan results, and persist bounded mutation/rescan state inside the already provisioned index file. Raw Drive IDs remain forbidden; no new private system filename may be created — cost if wrong: the index schema and handlers become more complex, but serverless restart recovery and cross-instance CAS safety are otherwise impossible with the approved storage surface.
+- Task 7: fix round 1/5 (5 addressed, 9 Important open — ambiguous post-write failures can clear recoverable reservations; autosave still rewrites the monolithic full index; folder subtree operations can race descendant mutations and leave preferences stale or self-move; combined rename+move can partially commit; rescan excludes index Drive operations and can return over 100 combined records/recoveries; sliced arrays/preferences lack retrieval pagination; untrusted dependency codes and schema/ancestry failures are misclassified; folder update is non-atomic; folder pagination is not tree-version-bound; commits 0edb325..ea99a0e).
+- Task 7: fix round 2/5 (3 addressed, 5 Important open — recovery can replay an unversioned move over intervening external changes; descendant paths can become stale between preflight and reservation; combined folder update recovery shares the unversioned replay flaw; production RootBoundaryStorage ancestry lookups are absent from the rescan Drive-operation budget; stable tree hashes can still paginate a different unsorted listing order; commits 1a24dd8..a757963). The prior full-index byte/work independence finding was resolved as a non-violation of the binding single-file contract, with proportional behavior measured and disclosed.
+- Task 7: fix round 3/5 (1 addressed, 4 Important open — runtime move preconditions/ETag admission remain optional or weak and terminal conflicted intents permanently block scopes/consume capacity; destination ancestry can change after reservation and produce stale indexed paths; rescan can persist progress but exhaust the budget before returning its new cursor; folder post-reservation version conflicts surface as 503 instead of 409; commits 40cc627..48bd6a4).
+- Task 7: fix round 4/5 (3 addressed, 1 Important open — an accepted rescan transition can extend successor state past the prior cursor expiry, but replay rejects the expired prior cursor before consulting the persisted transition/completion receipt and strands the live scan; commits e0db377..f064cd8).
+- Task 7: fix round 5/5 (1 addressed, 0 Critical/Important open — exact signed prior-cursor receipt recovery across prior expiry for accepted progress/finalization without replay renewal or retraversal; commits 8264cf3..8e6cee4).
+- Task 7: complete (commits c253836..8e6cee4, review clean after 5 fix rounds; live integration intentionally skipped and no external state accessed).
+- Task 8: fix round 1/5 opened — 1 Critical finding: attachment create/Trash reservations and ambiguous Drive/CAS outcomes lack convergent recovery and can permanently block notes, orphan files, desynchronize the index, and exhaust mutation capacity. 5 Important findings: reference detection misses supported/cross-note/canonical forms and the post-reservation race; truncated/polyglot magic can be classified inline; large canonical base64 overflows the regex stack and exact/oversize requests return 503; filename normalization and response schemas use inconsistent Unicode metrics; opaque attachment IDs are stripped by the production Markdown renderer; forbidden folder/shortcut declarations can create the asset folder before rejection. 2 related Minor test gaps are included in the fix round.
+- Task 8: fix round 1/5 (4 addressed, 4 blocking findings open — attachment recovery claims are not cross-instance leased/fence-verified, clears eventually-visible creates, can adopt/Trash unrelated exact files, starves later intents, and retains permanent blockers; the hand-written reference scanner misses production-valid escaped definitions/encoded filenames and does not serialize cross-note updates; WebP/GIF/PDF structural checks still inline malformed content; global 180-code-point targetName schema breaks valid 181–255-character Task 7 folder mutations; commits 79258ac..0049280).
+- Task 8: fix round 2/5 (0 fully addressed, 4 blocking findings open — RootBoundaryStorage drops conditional Trash expectedVersion; recovery claims can steal a renewed same-fence lease, missing/mismatched identities and conflicted intents remain permanent blockers, exact restoration still uses same-ID-or-name, and the capacity test misses ambiguous lifecycle recovery; reference AST parsing improved but conflicted note mutations and folder path changes can race relative cross-note references; minimal VP8L, invalid GIF LZW code size, and fake PDF trailer polyglots still inline; folder pending-name validation still uses UTF-16 units instead of the Task 7 Unicode code-point metric; commits 2c3fdda..9a7c4b8).
+- Task 8: fix round 3/5 (2 addressed, 2 blocking findings open — concurrent recovery calls on the same service instance can both accept the same service-scoped owner/fence claim, and the required ambiguous-to-terminal-to-rescan capacity lifecycle remains unproved; an 11-byte VP8 shell and PDFs with injected pre-xref content or impossible active xref entries still inline; commits 2c065d1..bb75e98).
+- Task 8: fix round 4/5 (0 fully addressed, 2 blocking findings open — per-caller claim tokens close same-/cross-service claim adoption, but rescan finalizes despite uncaptured live mutations, the capacity test never fills/reclaims the 256-entry ceiling, recovery-attempt horizons and the real mid-CAS lease race are not proved; a synthetic positive-partition VP8 payload and PDFs with invalid free-list semantics or an incomplete Catalog/Pages graph still inline; commits b7ad487..4aba0a9).
+- Task 8: fix round 5/5 (1 addressed, 2 blocking findings remain at breaker — WebP/PDF production detection is download-only, but a losing concurrent finalizer can mistake a winner's byte-identical completed index for its own ambiguous write and roll it back; legacy persisted WebP/PDF inline dispositions cause 503 and remain inline in copied rescan projections; commits 482d040..294a9ca).
+- Ruling: Task 8's round-5 concurrent-finalizer rollback defect is real and load-bearing; Task 9 must begin by persisting a unique unpredictable finalization-attempt identity in the completed-index receipt and allowing compensation only when the observed exact version, checksum, content, and attempt identity prove this caller owns the accepted ambiguous write, before any publication work begins — why: the same cursor and timestamp can produce byte-identical completions, so content fingerprints alone cannot distinguish the winner from the losing CAS caller — cost if wrong: snapshot publication could build on an index that an acknowledged concurrent rescan can still roll back.
+- Ruling: Task 8's round-5 legacy WebP/PDF disposition defect is real and load-bearing; Task 9 must begin by deriving delivery and attachment recovery disposition from fresh detected content with safe downward-only correction, and by forcing copied rescan WebP/PDF projections to `download`, before any publication work begins — why: the new upload gate is safe but old persisted `inline` values currently cause `503` or survive rescan instead of degrading safely — cost if wrong: legacy assets could become unavailable or retain an unsafe inline projection in owner/public snapshot flows.
+- Task 8: complete at the 5-round breaker (commits 8e6cee4..294a9ca, 2 real load-bearing findings explicitly carried into Task 9 by ruling; no external state accessed).
+- Task 9: independent review opened for mandatory Task 8 breaker remediation and immutable publication snapshots (commits 294a9ca..5e2ab6c).
+- Task 9: fix round 1/5 opened — 1 Critical finding: a publish that begins source resolution before revoke but reserves afterward can advance from the revoke tombstone and resurrect content. 2 Important findings: abandonment/history trimming/bounded cleanup can leave unreachable folders unqueued or silently evict unresolved cleanup, and cleanup Trash lacks exact ancestry/name/folder-type proof plus post-Trash readback before clearing its durable record. 1 Minor decomposition suggestion is deferred until correctness is clean.
