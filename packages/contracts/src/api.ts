@@ -192,8 +192,8 @@ export const TrashResponseSchema = z.object({ trashed: z.literal(true) }).strict
 
 export const UpdatePreferencesRequestSchema = z
   .object({
-    favorites: z.array(NoteIdSchema).max(10_000),
-    recent: z.array(NoteIdSchema).max(10_000),
+    favorites: z.array(NoteIdSchema).max(100),
+    recent: z.array(NoteIdSchema).max(100),
     theme: z.enum(["dark", "light", "system"]),
     panelState: PreferencesPanelStateSchema.optional()
   })

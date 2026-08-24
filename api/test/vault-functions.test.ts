@@ -194,6 +194,84 @@ describe("private vault handlers", () => {
     expect(second.entries).toHaveLength(100);
     expect(second.entries[0]?.title).toBe("Note 100");
   });
+
+  it("rejects a vault cursor when the exact folder tree changes between pages", async () => {
+    const entries = Array.from({ length: 101 }, (_, index) => ({
+      id: `10000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      title: `Note ${index}`, aliases: [], driveId: `raw-${index}`, path: `Notes/Note ${index}.md`,
+      created: "2026-08-23T12:00:00.000Z", updated: "2026-08-23T12:00:00.000Z", driveVersion: "1",
+      tags: [], searchText: "", excerpt: "", outboundNoteIds: [], unresolvedWikiTargets: [], attachments: [], backlinks: []
+    }));
+    let treeVersion = "1".repeat(64);
+    const handlers = createVaultHandlers({
+      authorize: () => ({ provider: "github", userId: "owner", userDetails: "aserdargun" }),
+      resolveServices: () => ({
+        vault: {
+          readIndex: async () => ({ value: { schemaVersion: 1, generation: 9, entries, pendingMutations: [], rescanState: null } }),
+          vaultTree: async () => ({ treeVersion, folders: [] })
+        },
+        preferences: { read: async () => ({ value: { schemaVersion: 1, favorites: [], recent: [], theme: "system" } }) }
+      }) as never,
+      idCodec: identityCodec
+    });
+    const first = VaultResponseSchema.parse((await handlers.getVault(request("GET", "https://nxt.example/api/private/vault"))).jsonBody);
+    treeVersion = "2".repeat(64);
+
+    const stale = await handlers.getVault(request("GET", `https://nxt.example/api/private/vault?cursor=${first.cursor}`));
+
+    expect(stale.status).toBe(409);
+    expect(stale.jsonBody).toMatchObject({ error: { code: "CONFLICT" } });
+  });
+
+  it("paginates every nested relation, attachment, backlink, and preference without slicing", async () => {
+    const targetIds = Array.from({ length: 120 }, (_, index) => `20000000-0000-4000-8000-${String(index).padStart(12, "0")}`);
+    const entry = {
+      id: noteId, title: "Dense", aliases: [], driveId: "raw-dense", path: "Notes/Dense.md",
+      created: "2026-08-23T12:00:00.000Z", updated: "2026-08-23T12:00:00.000Z", driveVersion: "1",
+      tags: [], searchText: "s".repeat(100_000), excerpt: "e".repeat(4_000), outboundNoteIds: targetIds,
+      unresolvedWikiTargets: Array.from({ length: 120 }, (_, index) => `Missing-${index}-${"x".repeat(140)}`),
+      attachments: Array.from({ length: 120 }, (_, index) => ({
+        driveId: `raw-asset-${index}`,
+        name: `${String(index).padStart(3, "0")}-${"x".repeat(500)}.png`,
+        mimeType: `application/${"x".repeat(244)}`,
+        size: index
+      })),
+      backlinks: [...targetIds]
+    };
+    const favorites = [...targetIds];
+    const recent = [...targetIds].reverse();
+    const services = {
+      vault: {
+        readIndex: async () => ({ value: { schemaVersion: 1, generation: 10, entries: [entry], pendingMutations: [], rescanState: null } }),
+        vaultTree: async () => ({ treeVersion: "3".repeat(64), folders: [] })
+      },
+      preferences: { read: async () => ({ value: { schemaVersion: 1, favorites, recent, theme: "system" } }) }
+    } as never;
+    const handlers = createVaultHandlers({
+      authorize: () => ({ provider: "github", userId: "owner", userDetails: "aserdargun" }),
+      resolveServices: () => services,
+      idCodec: identityCodec
+    });
+    const seen = { outbound: new Set<string>(), unresolved: new Set<string>(), attachments: new Set<string>(), backlinks: new Set<string>(), favorites: new Set<string>(), recent: new Set<string>() };
+    let cursor: string | null = null;
+    do {
+      const suffix = cursor === null ? "" : `?cursor=${encodeURIComponent(cursor)}`;
+      const page = VaultResponseSchema.parse((await handlers.getVault(request("GET", `https://nxt.example/api/private/vault${suffix}`))).jsonBody);
+      for (const projected of page.entries) {
+        projected.outboundNoteIds.forEach((id) => seen.outbound.add(id));
+        projected.unresolvedWikiTargets.forEach((target) => seen.unresolved.add(target));
+        projected.attachments.forEach((attachment) => seen.attachments.add(attachment.name));
+        projected.backlinks.forEach((id) => seen.backlinks.add(id));
+      }
+      page.preferences.favorites.forEach((id) => seen.favorites.add(id));
+      page.preferences.recent.forEach((id) => seen.recent.add(id));
+      cursor = page.cursor;
+    } while (cursor !== null);
+
+    expect(Object.fromEntries(Object.entries(seen).map(([key, value]) => [key, value.size]))).toEqual({
+      outbound: 120, unresolved: 120, attachments: 120, backlinks: 120, favorites: 120, recent: 120
+    });
+  });
 });
 
 describe("private note handlers", () => {
@@ -299,11 +377,10 @@ describe("private folder handlers", () => {
   it("supports an atomic client rename-and-move request with opaque destination parent", async () => {
     const folderId = "raw-folder";
     const destinationId = "raw-destination";
-    const renameFolder = vi.fn(async () => ({ id: folderId, name: "Renamed", version: "2" }));
-    const moveFolder = vi.fn(async () => ({ id: folderId, name: "Renamed", version: "3" }));
+    const updateFolder = vi.fn(async () => ({ id: folderId, name: "Renamed", version: "3" }));
     const treeVersion = "d".repeat(64);
     const services = { vault: {
-      renameFolder, moveFolder,
+      updateFolder,
       vaultTree: async () => ({ treeVersion, folders: [{ id: folderId, name: "Renamed", path: "Notes/Inbox/Renamed", version: "3", protected: false }] })
     } } as never;
     const dependencies = {
@@ -318,7 +395,7 @@ describe("private folder handlers", () => {
       { expectedVersion: "1", name: "Renamed", parentId: parentRef }, { folderId: folderRef }
     ));
     expect(FolderResponseSchema.parse(response.jsonBody).path).toBe("Notes/Inbox/Renamed");
-    expect(renameFolder).toHaveBeenCalledWith({ folderId, expectedVersion: "1", name: "Renamed" });
-    expect(moveFolder).toHaveBeenCalledWith({ folderId, expectedVersion: "2", parentId: destinationId });
+    expect(updateFolder).toHaveBeenCalledTimes(1);
+    expect(updateFolder).toHaveBeenCalledWith({ folderId, expectedVersion: "1", name: "Renamed", parentId: destinationId });
   });
 });

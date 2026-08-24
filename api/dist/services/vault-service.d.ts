@@ -37,6 +37,7 @@ export declare class VaultService {
     private readonly options;
     private readonly noteOperations;
     private readonly protectedFolders;
+    private readonly ownerId;
     constructor(options: {
         storage: StoragePort;
         indexStore: SystemFileStore<VaultIndex>;
@@ -92,6 +93,12 @@ export declare class VaultService {
         expectedVersion: string;
         parentId: string;
     }): Promise<StoredFile>;
+    updateFolder(input: {
+        folderId: string;
+        expectedVersion: string;
+        name?: string;
+        parentId?: string;
+    }): Promise<StoredFile>;
     issueFolderDeleteConfirmation(folderId: string): Promise<Confirmation>;
     trashFolder(input: {
         folderId: string;
@@ -109,10 +116,13 @@ export declare class VaultService {
     private reserve;
     private finalizeEntry;
     private finalize;
+    private applyIndexKeepingMutation;
     private cancel;
     private clearMutation;
-    private expire;
-    private reconcileExpiredMutations;
+    private beginDriveMutation;
+    private markDriveApplied;
+    private handleMutationFailure;
+    private reconcileRecoverableMutations;
     private prunePreferences;
     private reconcile;
     private newMutation;
@@ -127,6 +137,7 @@ export declare class VaultService {
     private assertMarkdownFile;
     private assertFolder;
     private assertFolderDestination;
+    private assertDestinationOutsideSubtree;
     private folderDepth;
     private folderPath;
     private notePath;

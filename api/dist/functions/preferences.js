@@ -6,7 +6,7 @@ export const createPreferencesHandlers = (dependencies = defaultPrivateHandlerDe
         assertNoQuery(request);
         const body = await parseBody(request, UpdatePreferencesRequestSchema);
         const value = (await services.preferences.update(body)).value;
-        return typedJson({ ...value, favorites: value.favorites.slice(0, 100), recent: value.recent.slice(0, 100) }, PreferencesResponseSchema);
+        return typedJson(value, PreferencesResponseSchema);
     })
 });
 export const updatePreferencesHandler = createPreferencesHandlers().updatePreferences;

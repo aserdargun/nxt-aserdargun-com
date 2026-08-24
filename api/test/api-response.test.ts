@@ -441,22 +441,53 @@ describe("errorResponse", () => {
     expect(JSON.stringify(response.jsonBody)).not.toMatch(/Bearer|drive-file-id|refresh_token|code-getter/u);
   });
 
-  it("uses only the official message for a caller-supplied enum error code", () => {
+  it("does not trust a caller-supplied enum error code", () => {
     const response = errorResponse(
       { code: "FORBIDDEN", message: "Bearer caller-message-secret" },
       CANONICAL_REQUEST_ID
     );
     const parsed = ApiErrorSchema.parse(response.jsonBody);
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(503);
     expect(parsed).toEqual({
       error: {
-        code: "FORBIDDEN",
-        message: "This account cannot access the vault.",
+        code: "DRIVE_UNAVAILABLE",
+        message: "The service is temporarily unavailable.",
         requestId: CANONICAL_REQUEST_ID
       }
     });
     expect(JSON.stringify(response.jsonBody)).not.toContain("caller-message-secret");
+  });
+
+  it("does not trust an Error with an enum-like code", () => {
+    const dependencyError = new Error("Bearer raw-drive-id");
+    Object.defineProperty(dependencyError, "code", { value: "NOT_FOUND", enumerable: true });
+
+    const response = errorResponse(dependencyError, CANONICAL_REQUEST_ID);
+
+    expect(response.status).toBe(503);
+    expect(ApiErrorSchema.parse(response.jsonBody)).toEqual({
+      error: {
+        code: "DRIVE_UNAVAILABLE",
+        message: "The service is temporarily unavailable.",
+        requestId: CANONICAL_REQUEST_ID
+      }
+    });
+    expect(JSON.stringify(response.jsonBody)).not.toMatch(/Bearer|raw-drive-id/u);
+  });
+
+  it("does not trust an object that only spoofs the domain-error prototype", () => {
+    const spoofed = Object.create(ApiResponseError.prototype) as { code: string; message: string };
+    Object.defineProperties(spoofed, {
+      code: { value: "INVALID_INPUT", enumerable: true },
+      message: { value: "Bearer forged-domain-error", enumerable: true }
+    });
+
+    const response = errorResponse(spoofed, CANONICAL_REQUEST_ID);
+
+    expect(response.status).toBe(503);
+    expect(ApiErrorSchema.parse(response.jsonBody).error.code).toBe("DRIVE_UNAVAILABLE");
+    expect(JSON.stringify(response.jsonBody)).not.toContain("forged-domain-error");
   });
 
   it("fails closed for a runtime-mutated ApiResponseError code", () => {

@@ -38,7 +38,15 @@ export declare const VaultMutationOperationSchema: z.ZodEnum<{
     "create-folder": "create-folder";
     "rename-folder": "rename-folder";
     "move-folder": "move-folder";
+    "update-folder": "update-folder";
     "trash-folder": "trash-folder";
+}>;
+export declare const VaultMutationPhaseSchema: z.ZodEnum<{
+    reserved: "reserved";
+    "drive-inflight": "drive-inflight";
+    "outcome-unknown": "outcome-unknown";
+    "drive-applied": "drive-applied";
+    "index-applied": "index-applied";
 }>;
 export declare const VaultPendingMutationSchema: z.ZodObject<{
     id: z.ZodUUID;
@@ -50,6 +58,7 @@ export declare const VaultPendingMutationSchema: z.ZodObject<{
         "create-folder": "create-folder";
         "rename-folder": "rename-folder";
         "move-folder": "move-folder";
+        "update-folder": "update-folder";
         "trash-folder": "trash-folder";
     }>;
     noteId: z.ZodOptional<z.ZodUUID>;
@@ -61,8 +70,20 @@ export declare const VaultPendingMutationSchema: z.ZodObject<{
     oldPath: z.ZodOptional<z.ZodString>;
     newPath: z.ZodOptional<z.ZodString>;
     expectedVersion: z.ZodOptional<z.ZodString>;
+    expectedChecksum: z.ZodOptional<z.ZodString>;
+    source: z.ZodOptional<z.ZodString>;
+    ownerId: z.ZodOptional<z.ZodUUID>;
+    fence: z.ZodDefault<z.ZodNumber>;
+    phase: z.ZodDefault<z.ZodEnum<{
+        reserved: "reserved";
+        "drive-inflight": "drive-inflight";
+        "outcome-unknown": "outcome-unknown";
+        "drive-applied": "drive-applied";
+        "index-applied": "index-applied";
+    }>>;
     createdAt: z.ZodISODateTime;
     expiresAt: z.ZodISODateTime;
+    reconcileAfter: z.ZodOptional<z.ZodISODateTime>;
 }, z.core.$strict>;
 export type VaultPendingMutation = z.infer<typeof VaultPendingMutationSchema>;
 export declare const RescanStagedRecordSchema: z.ZodObject<{
@@ -159,6 +180,7 @@ export declare const VaultIndexSchema: z.ZodObject<{
             "create-folder": "create-folder";
             "rename-folder": "rename-folder";
             "move-folder": "move-folder";
+            "update-folder": "update-folder";
             "trash-folder": "trash-folder";
         }>;
         noteId: z.ZodOptional<z.ZodUUID>;
@@ -170,8 +192,20 @@ export declare const VaultIndexSchema: z.ZodObject<{
         oldPath: z.ZodOptional<z.ZodString>;
         newPath: z.ZodOptional<z.ZodString>;
         expectedVersion: z.ZodOptional<z.ZodString>;
+        expectedChecksum: z.ZodOptional<z.ZodString>;
+        source: z.ZodOptional<z.ZodString>;
+        ownerId: z.ZodOptional<z.ZodUUID>;
+        fence: z.ZodDefault<z.ZodNumber>;
+        phase: z.ZodDefault<z.ZodEnum<{
+            reserved: "reserved";
+            "drive-inflight": "drive-inflight";
+            "outcome-unknown": "outcome-unknown";
+            "drive-applied": "drive-applied";
+            "index-applied": "index-applied";
+        }>>;
         createdAt: z.ZodISODateTime;
         expiresAt: z.ZodISODateTime;
+        reconcileAfter: z.ZodOptional<z.ZodISODateTime>;
     }, z.core.$strict>>>;
     rescanState: z.ZodDefault<z.ZodNullable<z.ZodObject<{
         scanId: z.ZodUUID;

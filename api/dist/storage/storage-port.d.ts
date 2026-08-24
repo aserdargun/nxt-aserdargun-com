@@ -11,6 +11,15 @@ export interface StoredFile {
 export declare class StorageVersionConflictError extends Error {
     constructor();
 }
+/** A storage mutation was rejected before it could reach the backing store. */
+export declare class StorageMutationNotAppliedError extends Error {
+    constructor();
+}
+/** A backing store may have applied a mutation even though acknowledgement failed. */
+export declare class StorageMutationOutcomeUnknownError extends Error {
+    readonly fileId?: string | undefined;
+    constructor(fileId?: string | undefined, message?: string);
+}
 export interface StoragePort {
     get(fileId: string): Promise<StoredFile>;
     listChildren(input: {

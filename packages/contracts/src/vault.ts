@@ -44,7 +44,16 @@ export const VaultMutationOperationSchema = z.enum([
   "create-folder",
   "rename-folder",
   "move-folder",
+  "update-folder",
   "trash-folder"
+]);
+
+export const VaultMutationPhaseSchema = z.enum([
+  "reserved",
+  "drive-inflight",
+  "outcome-unknown",
+  "drive-applied",
+  "index-applied"
 ]);
 
 export const VaultPendingMutationSchema = z
@@ -60,8 +69,14 @@ export const VaultPendingMutationSchema = z
     oldPath: z.string().trim().min(1).max(4096).optional(),
     newPath: z.string().trim().min(1).max(4096).optional(),
     expectedVersion: z.string().min(1).max(512).optional(),
+    expectedChecksum: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+    source: z.string().max(100_000).optional(),
+    ownerId: NoteIdSchema.optional(),
+    fence: z.number().int().positive().default(1),
+    phase: VaultMutationPhaseSchema.default("reserved"),
     createdAt: TimestampSchema,
-    expiresAt: TimestampSchema
+    expiresAt: TimestampSchema,
+    reconcileAfter: TimestampSchema.optional()
   })
   .strict();
 

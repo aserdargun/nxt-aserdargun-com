@@ -16,6 +16,25 @@ export class StorageVersionConflictError extends Error {
   }
 }
 
+/** A storage mutation was rejected before it could reach the backing store. */
+export class StorageMutationNotAppliedError extends Error {
+  public constructor() {
+    super("storage mutation was not applied");
+    this.name = "StorageMutationNotAppliedError";
+  }
+}
+
+/** A backing store may have applied a mutation even though acknowledgement failed. */
+export class StorageMutationOutcomeUnknownError extends Error {
+  public constructor(
+    public readonly fileId?: string,
+    message = "storage mutation outcome is unknown"
+  ) {
+    super(message);
+    this.name = "StorageMutationOutcomeUnknownError";
+  }
+}
+
 export interface StoragePort {
   get(fileId: string): Promise<StoredFile>;
   listChildren(input: {

@@ -41,10 +41,11 @@ export const createFolderHandlers = (dependencies: PrivateHandlerDependencies = 
     const folderRef = pathValue(request, "folderId", OpaqueIdSchema);
     const body = await parseBody(request, UpdateFolderRequestSchema);
     const folderId = dependencies.idCodec.decode(folderRef);
-    let version = body.expectedVersion;
-    if (body.name !== undefined) version = (await services.vault.renameFolder({ folderId, expectedVersion: version, name: body.name })).version;
-    if (body.parentId !== undefined) await services.vault.moveFolder({
-      folderId, expectedVersion: version, parentId: dependencies.idCodec.decode(body.parentId)
+    await services.vault.updateFolder({
+      folderId,
+      expectedVersion: body.expectedVersion,
+      ...(body.name === undefined ? {} : { name: body.name }),
+      ...(body.parentId === undefined ? {} : { parentId: dependencies.idCodec.decode(body.parentId) })
     });
     return typedJson(await folderResponse(folderId, dependencies, services), FolderResponseSchema);
   }),

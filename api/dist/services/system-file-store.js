@@ -34,7 +34,7 @@ export class SystemFileStore {
             parsed = this.options.schema.parse(value);
         }
         catch {
-            throw new ApiResponseError("INVALID_INPUT");
+            throw new ApiResponseError("DRIVE_UNAVAILABLE");
         }
         const source = `${JSON.stringify(parsed, null, 2)}\n`;
         let updated;

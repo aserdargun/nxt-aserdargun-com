@@ -5,7 +5,9 @@ import { ApiResponseError } from "../http/api-response.js";
 import { preserveApiError } from "./system-file-store.js";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const MAX_ENTRIES_PER_PAGE = 100;
-const MAX_OPERATIONS_PER_PAGE = 100;
+// Leaves room for the existing-index CAS reads/readbacks, including bounded retries.
+const MAX_OPERATIONS_PER_PAGE = 20;
+const MAX_INDEX_CAS_ATTEMPTS = 3;
 const SCAN_TTL_MS = 10 * 60 * 1_000;
 const MAX_FOLDER_DEPTH = 20;
 const MAX_RECORD_RESPONSE_BYTES = 100_000;
@@ -122,7 +124,8 @@ export class RescanService {
         }
         const recoveries = [];
         let recoveryBytes = 0;
-        while (state.deliveredRecoveryCount < state.recoveries.length && recoveries.length < MAX_ENTRIES_PER_PAGE) {
+        while (state.deliveredRecoveryCount < state.recoveries.length &&
+            pageRecords.length + recoveries.length < MAX_ENTRIES_PER_PAGE) {
             const recovery = state.recoveries[state.deliveredRecoveryCount];
             if (recovery === undefined)
                 break;
@@ -164,7 +167,7 @@ export class RescanService {
                 deliveredRecoveryCount: 0
             };
             return { ...index, rescanState: created };
-        });
+        }, { attempts: MAX_INDEX_CAS_ATTEMPTS });
         return structuredClone(created);
     }
     async resumeScan(cursor) {
@@ -187,7 +190,7 @@ export class RescanService {
             if (current === null || current.scanId !== state.scanId || current.position !== priorPosition || current.nonce !== priorNonce)
                 throw new ApiResponseError("CONFLICT");
             return { ...index, rescanState: state };
-        });
+        }, { attempts: MAX_INDEX_CAS_ATTEMPTS });
         return state;
     }
     async completeScan(state, priorPosition, priorNonce) {
@@ -203,7 +206,7 @@ export class RescanService {
             if (current === null || current.scanId !== state.scanId || current.position !== priorPosition || current.nonce !== priorNonce)
                 throw new ApiResponseError("CONFLICT");
             return { ...index, generation: index.generation + 1, entries, rescanState: null };
-        });
+        }, { attempts: MAX_INDEX_CAS_ATTEMPTS });
     }
     signCursor(state) {
         const payload = {

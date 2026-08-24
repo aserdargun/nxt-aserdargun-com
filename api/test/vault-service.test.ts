@@ -128,6 +128,16 @@ describe("SystemFileStore", () => {
         schema: VaultIndexSchema
       }).update({ schemaVersion: 1, entries: [] }, `${before.file.version}-stale`)
     ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    const validStore = new SystemFileStore({
+      storage: raw,
+      fileId: ids.index.id,
+      parentId: "private",
+      name: "vault-index.json",
+      schema: VaultIndexSchema
+    });
+    await expect(validStore.update({ schemaVersion: 2, entries: [] } as never))
+      .rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
   });
 });
 

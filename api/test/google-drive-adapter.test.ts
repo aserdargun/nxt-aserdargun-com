@@ -179,7 +179,7 @@ describe("GoogleDriveAdapter", () => {
         mimeType: "text/markdown",
         text: "next"
       })
-    ).rejects.toThrow("Drive write failed");
+    ).rejects.toThrow("Drive write outcome is unknown");
     expect(failedWriteCalls).toBe(1);
   });
 

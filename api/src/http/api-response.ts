@@ -49,6 +49,8 @@ interface SanitizationState {
   exhausted: boolean;
 }
 
+const TRUSTED_API_ERRORS = new WeakSet<object>();
+
 export class ApiResponseError extends Error {
   public readonly code: ApiErrorCode;
   public readonly status: number;
@@ -59,6 +61,7 @@ export class ApiResponseError extends Error {
     this.name = "ApiResponseError";
     this.code = code;
     this.status = definition.status;
+    TRUSTED_API_ERRORS.add(this);
   }
 }
 
@@ -112,9 +115,7 @@ export const errorResponse = (error: unknown, suppliedRequestId?: string): HttpR
 
 const extractErrorCode = (error: unknown): ApiErrorCode | null => {
   try {
-    if ((typeof error !== "object" && typeof error !== "function") || error === null) {
-      return null;
-    }
+    if (!(error instanceof ApiResponseError) || !TRUSTED_API_ERRORS.has(error)) return null;
     if (inspectProxy(error) !== false) {
       return null;
     }

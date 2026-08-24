@@ -33,6 +33,7 @@ const TRUNCATED = "[Truncated]";
 const UNSERIALIZABLE = "[Unserializable]";
 const ERROR_MARKER = "[Error]";
 const CIRCULAR = "[Circular]";
+const TRUSTED_API_ERRORS = new WeakSet();
 export class ApiResponseError extends Error {
     code;
     status;
@@ -42,6 +43,7 @@ export class ApiResponseError extends Error {
         this.name = "ApiResponseError";
         this.code = code;
         this.status = definition.status;
+        TRUSTED_API_ERRORS.add(this);
     }
 }
 export const json = (value, status = 200) => ({
@@ -96,9 +98,8 @@ export const errorResponse = (error, suppliedRequestId) => {
 };
 const extractErrorCode = (error) => {
     try {
-        if ((typeof error !== "object" && typeof error !== "function") || error === null) {
+        if (!(error instanceof ApiResponseError) || !TRUSTED_API_ERRORS.has(error))
             return null;
-        }
         if (inspectProxy(error) !== false) {
             return null;
         }
