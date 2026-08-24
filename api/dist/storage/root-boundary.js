@@ -1,3 +1,4 @@
+import { StorageOperationBudgetExceededError } from "./storage-port.js";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const SHORTCUT_MIME_TYPE = "application/vnd.google-apps.shortcut";
 const MAX_FILE_ID_LENGTH = 512;
@@ -46,7 +47,7 @@ export class RootBoundaryStorage {
     static forTest(input) {
         return new RootBoundaryStorage(createTestStorage(input), input.allowedRootId);
     }
-    async assertInside(fileId) {
+    async assertInside(fileId, context) {
         let currentId = fileId;
         const visited = new Set();
         for (let nodes = 0; nodes < MAX_ANCESTRY_NODES; nodes += 1) {
@@ -57,10 +58,12 @@ export class RootBoundaryStorage {
             visited.add(currentId);
             let file;
             try {
-                file = await this.storage.get(currentId);
+                file = await this.storage.get(currentId, context);
             }
-            catch {
-                throw new Error("missing parent in file ancestry");
+            catch (error) {
+                if (error instanceof StorageOperationBudgetExceededError)
+                    throw error;
+                throw new Error("missing parent in file ancestry", { cause: error });
             }
             if (file.id !== currentId) {
                 throw new Error("file identity does not match ancestry request");
@@ -87,71 +90,71 @@ export class RootBoundaryStorage {
         }
         throw new Error("ancestry limit exceeded");
     }
-    async get(fileId) {
-        await this.assertInside(fileId);
-        return this.storage.get(fileId);
+    async get(fileId, context) {
+        await this.assertInside(fileId, context);
+        return this.storage.get(fileId, context);
     }
-    async listChildren(input) {
-        await this.assertInside(input.parentId);
-        const page = await this.storage.listChildren(input);
+    async listChildren(input, context) {
+        await this.assertInside(input.parentId, context);
+        const page = await this.storage.listChildren(input, context);
         for (const file of page.files) {
-            await this.assertInside(file.id);
+            await this.assertInside(file.id, context);
         }
         return page;
     }
-    async readText(fileId) {
-        await this.assertInside(fileId);
-        return this.storage.readText(fileId);
+    async readText(fileId, context) {
+        await this.assertInside(fileId, context);
+        return this.storage.readText(fileId, context);
     }
-    async readBytes(fileId) {
-        await this.assertInside(fileId);
-        return this.storage.readBytes(fileId);
+    async readBytes(fileId, context) {
+        await this.assertInside(fileId, context);
+        return this.storage.readBytes(fileId, context);
     }
-    async createFolder(input) {
-        await this.assertInside(input.parentId);
-        const file = await this.storage.createFolder(input);
-        await this.assertInside(file.id);
+    async createFolder(input, context) {
+        await this.assertInside(input.parentId, context);
+        const file = await this.storage.createFolder(input, context);
+        await this.assertInside(file.id, context);
         return file;
     }
-    async createText(input) {
-        await this.assertInside(input.parentId);
-        const file = await this.storage.createText(input);
-        await this.assertInside(file.id);
+    async createText(input, context) {
+        await this.assertInside(input.parentId, context);
+        const file = await this.storage.createText(input, context);
+        await this.assertInside(file.id, context);
         return file;
     }
-    async createBytes(input) {
-        await this.assertInside(input.parentId);
-        const file = await this.storage.createBytes(input);
-        await this.assertInside(file.id);
+    async createBytes(input, context) {
+        await this.assertInside(input.parentId, context);
+        const file = await this.storage.createBytes(input, context);
+        await this.assertInside(file.id, context);
         return file;
     }
-    async updateText(input) {
-        await this.assertInside(input.fileId);
-        const file = await this.storage.updateText(input);
+    async updateText(input, context) {
+        await this.assertInside(input.fileId, context);
+        const file = await this.storage.updateText(input, context);
         if (file.id !== input.fileId) {
             throw new Error("updated file identity changed");
         }
-        await this.assertReturnedInside(file);
-        await this.assertInside(file.id);
+        await this.assertReturnedInside(file, context);
+        await this.assertInside(file.id, context);
         return file;
     }
-    async move(input) {
-        await this.assertInside(input.fileId);
-        await this.assertInside(input.fromParentId);
-        await this.assertInside(input.toParentId);
-        const file = await this.storage.move(input);
-        await this.assertInside(file.id);
+    async move(input, context) {
+        await this.assertInside(input.fileId, context);
+        await this.assertInside(input.fromParentId, context);
+        await this.assertInside(input.toParentId, context);
+        const file = await this.storage.move(input, context);
+        await this.assertInside(file.id, context);
         return file;
     }
-    async trash(fileId) {
-        await this.assertInside(fileId);
-        return this.storage.trash(fileId);
+    async trash(fileId, context) {
+        await this.assertInside(fileId, context);
+        return this.storage.trash(fileId, context);
     }
-    async listRevisions(fileId) {
-        await this.assertInside(fileId);
-        return this.storage.listRevisions(fileId);
+    async listRevisions(fileId, context) {
+        await this.assertInside(fileId, context);
+        return this.storage.listRevisions(fileId, context);
     }
-    async assertReturnedInside(file) {
+    async assertReturnedInside(file, context) {
         assertFileId(file.id);
         if (file.trashed) {
             throw new Error("trashed file is outside configured root");
@@ -168,7 +171,7 @@ export class RootBoundaryStorage {
         if (file.parentIds.length !== 1) {
             throw new Error("ambiguous ancestry");
         }
-        await this.assertInside(file.parentIds[0]);
+        await this.assertInside(file.parentIds[0], context);
     }
 }
 const assertFileId = (fileId) => {

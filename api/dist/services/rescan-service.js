@@ -2,11 +2,13 @@ import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { MAX_NOTE_SOURCE_BYTES } from "@nxt/contracts";
 import { deriveIndex, parseNote } from "@nxt/domain";
 import { ApiResponseError } from "../http/api-response.js";
+import { StorageOperationBudget, StorageOperationBudgetExceededError } from "../storage/storage-port.js";
 import { preserveApiError } from "./system-file-store.js";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const MAX_ENTRIES_PER_PAGE = 100;
-// Leaves room for the existing-index CAS reads/readbacks, including bounded retries.
 const MAX_OPERATIONS_PER_PAGE = 20;
+const MAX_DRIVE_OPERATIONS_PER_REQUEST = 100;
+const PERSISTENCE_OPERATION_RESERVE = 70;
 const MAX_INDEX_CAS_ATTEMPTS = 3;
 const SCAN_TTL_MS = 10 * 60 * 1_000;
 const MAX_FOLDER_DEPTH = 20;
@@ -24,31 +26,43 @@ export class RescanService {
     async scanPage(input) {
         if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > MAX_ENTRIES_PER_PAGE)
             throw new ApiResponseError("INVALID_INPUT");
+        const operationBudget = new StorageOperationBudget(MAX_DRIVE_OPERATIONS_PER_REQUEST);
+        const context = { operationBudget };
         let state;
         if (input.cursor === null) {
-            state = await this.startScan();
+            state = await this.startScan(context);
         }
         else {
-            state = await this.resumeScan(input.cursor);
+            state = await this.resumeScan(input.cursor, context);
         }
         const priorPosition = state.position;
         const priorNonce = state.nonce;
-        const committedIndex = (await this.options.indexStore.read()).value;
+        const priorDeliveredRecoveryCount = state.deliveredRecoveryCount;
+        const committedIndex = (await this.options.indexStore.read(context)).value;
         const pageRecords = [];
         let responseBytes = 0;
         let operations = 0;
         let listedEntries = 0;
         let processed = 0;
-        while (state.queue.length > 0 && operations < MAX_OPERATIONS_PER_PAGE) {
+        while (state.queue.length > 0 && operations < MAX_OPERATIONS_PER_PAGE &&
+            operationBudget.remaining > PERSISTENCE_OPERATION_RESERVE) {
             const current = state.queue[0];
             if (current === undefined)
                 break;
             if (current.kind === "read") {
                 if (pageRecords.length >= MAX_ENTRIES_PER_PAGE)
                     break;
+                let readback;
+                try {
+                    readback = await this.options.storage.readText(current.driveId, context);
+                }
+                catch (error) {
+                    if (error instanceof StorageOperationBudgetExceededError)
+                        break;
+                    throw preserveApiError(error, "DRIVE_UNAVAILABLE");
+                }
                 state.queue.shift();
                 operations += 1;
-                const readback = await this.options.storage.readText(current.driveId).catch((error) => { throw preserveApiError(error, "DRIVE_UNAVAILABLE"); });
                 if (readback.file.trashed || !readback.file.name.toLocaleLowerCase("en-US").endsWith(".md"))
                     throw new ApiResponseError("DRIVE_UNAVAILABLE");
                 if (new TextEncoder().encode(readback.text).byteLength > MAX_NOTE_SOURCE_BYTES)
@@ -79,15 +93,23 @@ export class RescanService {
                 }
                 continue;
             }
-            const remaining = Math.min(input.limit - listedEntries, MAX_ENTRIES_PER_PAGE - listedEntries);
+            const remaining = Math.min(input.limit - listedEntries, MAX_ENTRIES_PER_PAGE - listedEntries, 1);
             if (remaining <= 0)
                 break;
             operations += 1;
-            const page = await this.options.storage.listChildren({
-                parentId: current.folderId,
-                pageSize: remaining,
-                ...(current.pageToken === undefined ? {} : { pageToken: current.pageToken })
-            }).catch((error) => { throw preserveApiError(error, "DRIVE_UNAVAILABLE"); });
+            let page;
+            try {
+                page = await this.options.storage.listChildren({
+                    parentId: current.folderId,
+                    pageSize: remaining,
+                    ...(current.pageToken === undefined ? {} : { pageToken: current.pageToken })
+                }, context);
+            }
+            catch (error) {
+                if (error instanceof StorageOperationBudgetExceededError)
+                    break;
+                throw preserveApiError(error, "DRIVE_UNAVAILABLE");
+            }
             listedEntries += page.files.length;
             processed += page.files.length;
             state.queue.shift();
@@ -138,13 +160,16 @@ export class RescanService {
         }
         const complete = state.queue.length === 0 && state.deliveredRecoveryCount === state.recoveries.length;
         if (complete) {
-            await this.completeScan(state, priorPosition, priorNonce);
+            await this.completeScan(state, priorPosition, priorNonce, context);
             return { cursor: null, processed, complete: true, records: pageRecords, recoveries };
         }
-        state = await this.persistProgress(state, priorPosition, priorNonce);
+        if (operations === 0 && state.deliveredRecoveryCount === priorDeliveredRecoveryCount) {
+            return { cursor: this.signCursor(state), processed, complete: false, records: pageRecords, recoveries };
+        }
+        state = await this.persistProgress(state, priorPosition, priorNonce, context);
         return { cursor: this.signCursor(state), processed, complete: false, records: pageRecords, recoveries };
     }
-    async startScan() {
+    async startScan(context) {
         const now = this.now();
         let created;
         await this.options.indexStore.compareAndSet((index) => {
@@ -167,12 +192,12 @@ export class RescanService {
                 deliveredRecoveryCount: 0
             };
             return { ...index, rescanState: created };
-        }, { attempts: MAX_INDEX_CAS_ATTEMPTS });
+        }, { attempts: MAX_INDEX_CAS_ATTEMPTS, context });
         return structuredClone(created);
     }
-    async resumeScan(cursor) {
+    async resumeScan(cursor, context) {
         const payload = this.verifyCursor(cursor);
-        const snapshot = await this.options.indexStore.read();
+        const snapshot = await this.options.indexStore.read(context);
         const state = snapshot.value.rescanState;
         if (state === null || Date.parse(state.expiresAt) <= this.now().getTime())
             throw new ApiResponseError("CONFLICT");
@@ -181,7 +206,7 @@ export class RescanService {
             throw new ApiResponseError("CONFLICT");
         return structuredClone(state);
     }
-    async persistProgress(state, priorPosition, priorNonce) {
+    async persistProgress(state, priorPosition, priorNonce, context) {
         state.position += 1;
         state.nonce = randomBytes(16).toString("base64url");
         state.expiresAt = new Date(this.now().getTime() + SCAN_TTL_MS).toISOString();
@@ -190,10 +215,10 @@ export class RescanService {
             if (current === null || current.scanId !== state.scanId || current.position !== priorPosition || current.nonce !== priorNonce)
                 throw new ApiResponseError("CONFLICT");
             return { ...index, rescanState: state };
-        }, { attempts: MAX_INDEX_CAS_ATTEMPTS });
+        }, { attempts: MAX_INDEX_CAS_ATTEMPTS, context });
         return state;
     }
-    async completeScan(state, priorPosition, priorNonce) {
+    async completeScan(state, priorPosition, priorNonce, context) {
         let entries;
         try {
             entries = deriveIndex(state.records).entries;
@@ -206,7 +231,7 @@ export class RescanService {
             if (current === null || current.scanId !== state.scanId || current.position !== priorPosition || current.nonce !== priorNonce)
                 throw new ApiResponseError("CONFLICT");
             return { ...index, generation: index.generation + 1, entries, rescanState: null };
-        }, { attempts: MAX_INDEX_CAS_ATTEMPTS });
+        }, { attempts: MAX_INDEX_CAS_ATTEMPTS, context });
     }
     signCursor(state) {
         const payload = {

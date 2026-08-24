@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +7,8 @@ import { describe, expect, it } from "vitest";
 import { RescanService } from "../src/services/rescan-service.js";
 import { SystemFileStore } from "../src/services/system-file-store.js";
 import { LocalDriveAdapter } from "../src/storage/local-drive-adapter.js";
-import type { StoragePort } from "../src/storage/storage-port.js";
+import { RootBoundaryStorage } from "../src/storage/root-boundary.js";
+import { StorageVersionConflictError, type StoragePort, type StoredFile } from "../src/storage/storage-port.js";
 
 const delegate = (storage: StoragePort, overrides: Partial<StoragePort>): StoragePort => ({
   get: overrides.get ?? storage.get.bind(storage),
@@ -198,6 +200,116 @@ describe("persisted rescan staging", () => {
     expect(injectedConflict).toBe(true);
     expect(operations).toBeLessThanOrEqual(100);
     expect(page.records.length + page.recoveries.length).toBeLessThanOrEqual(100);
+  });
+
+  it("enforces the budget below RootBoundary ancestry reads and resumes after an index CAS retry", async () => {
+    const folderMime = "application/vnd.google-apps.folder";
+    const files = new Map<string, StoredFile>();
+    const texts = new Map<string, string>();
+    const add = (id: string, name: string, mimeType: string, parentIds: string[], text?: string): void => {
+      files.set(id, {
+        id, name, mimeType, parentIds, version: "1", modifiedTime: "2026-08-24T08:00:00.000Z",
+        size: text === undefined ? 0 : new TextEncoder().encode(text).byteLength, trashed: false
+      });
+      if (text !== undefined) texts.set(id, text);
+    };
+    add("root", "root", folderMime, []);
+    add("level-one", "level-one", folderMime, ["root"]);
+    add("level-two", "level-two", folderMime, ["level-one"]);
+    add("notes", "Notes", folderMime, ["level-two"]);
+    add("private", "private", folderMime, ["root"]);
+    add("index", "vault-index.json", "application/json", ["private"], '{"schemaVersion":1,"entries":[]}\n');
+    const timestamp = "2026-08-24T08:00:00.000Z";
+    for (let index = 0; index < 100; index += 1) {
+      const suffix = String(index).padStart(3, "0");
+      if (index % 5 === 0) {
+        add(`empty-${suffix}`, `Empty-${suffix}`, folderMime, ["notes"]);
+      } else {
+        const noteId = `30000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+        add(
+          `note-${suffix}`,
+          `Note-${suffix}.md`,
+          "text/markdown",
+          ["notes"],
+          `---\nid: ${noteId}\ntitle: Note ${index}\ncreated: ${timestamp}\nupdated: ${timestamp}\ntags: []\naliases: []\n---\n\nbody`
+        );
+      }
+    }
+    let calls = 0;
+    let injectConflict = true;
+    const charge = (context: unknown): void => {
+      const budget = (context as { operationBudget?: { consume(): void } } | undefined)?.operationBudget;
+      budget?.consume();
+      calls += 1;
+    };
+    const metadata = (fileId: string): StoredFile => {
+      const file = files.get(fileId);
+      if (file === undefined) throw new Error("missing file");
+      return structuredClone(file);
+    };
+    const unsupported = async (): Promise<never> => { throw new Error("unsupported"); };
+    const lowLevel = {
+      get: async (fileId: string, context?: unknown) => { charge(context); return metadata(fileId); },
+      listChildren: async (input: { parentId: string; pageToken?: string; pageSize: number }, context?: unknown) => {
+        charge(context);
+        const offset = input.pageToken === undefined ? 0 : Number(input.pageToken);
+        const candidates = [...files.values()].filter((file) => !file.trashed && file.parentIds[0] === input.parentId);
+        const page = candidates.slice(offset, offset + input.pageSize).map((file) => structuredClone(file));
+        const next = offset + page.length;
+        return { files: page, ...(next < candidates.length ? { nextPageToken: String(next) } : {}) };
+      },
+      readText: async (fileId: string, context?: unknown) => {
+        charge(context);
+        const text = texts.get(fileId);
+        if (text === undefined) throw new Error("not text");
+        return { file: metadata(fileId), text, checksum: createHash("sha256").update(text).digest("hex") };
+      },
+      readBytes: unsupported,
+      createFolder: unsupported,
+      createText: unsupported,
+      createBytes: unsupported,
+      updateText: async (input: { fileId: string; expectedVersion: string; mimeType: string; text: string }, context?: unknown) => {
+        charge(context);
+        const file = files.get(input.fileId);
+        if (file === undefined || file.version !== input.expectedVersion) throw new StorageVersionConflictError();
+        if (input.fileId === "index" && injectConflict) {
+          injectConflict = false;
+          file.version = String(Number(file.version) + 1);
+          throw new StorageVersionConflictError();
+        }
+        file.version = String(Number(file.version) + 1);
+        file.mimeType = input.mimeType;
+        file.size = new TextEncoder().encode(input.text).byteLength;
+        texts.set(input.fileId, input.text);
+        return metadata(input.fileId);
+      },
+      move: unsupported,
+      trash: unsupported,
+      listRevisions: unsupported
+    } as StoragePort;
+    const bounded = new RootBoundaryStorage(lowLevel, "root");
+    const indexStore = new SystemFileStore({
+      storage: bounded, fileId: "index", parentId: "private", name: "vault-index.json", schema: VaultIndexSchema
+    });
+    let cursor: string | null = null;
+    let complete = false;
+    let pages = 0;
+    while (!complete) {
+      calls = 0;
+      const page = await new RescanService({
+        storage: bounded,
+        indexStore,
+        notesFolderId: "notes",
+        cursorSecret: "persisted-rescan-cursor-secret-32-bytes"
+      }).scanPage({ cursor, limit: 100 });
+      expect(calls).toBeLessThanOrEqual(100);
+      expect(page.records.length + page.recoveries.length).toBeLessThanOrEqual(100);
+      cursor = page.cursor;
+      complete = page.complete;
+      pages += 1;
+      expect(pages).toBeLessThan(250);
+    }
+    expect(injectConflict).toBe(false);
   });
 
   it("persists bounded invalid-frontmatter recovery source instead of process-local state", async () => {

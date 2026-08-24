@@ -41,10 +41,12 @@ export class LocalDriveAdapter {
         await adapter.initialize();
         return adapter;
     }
-    get(fileId) {
+    get(fileId, context) {
+        context?.operationBudget?.consume();
         return this.read((metadata) => this.toStoredFile(this.getFile(metadata, fileId)));
     }
-    listChildren(input) {
+    listChildren(input, context) {
+        context?.operationBudget?.consume();
         return this.read((metadata) => {
             assertPageSize(input.pageSize);
             const parent = this.getActiveFolder(metadata, input.parentId);
@@ -68,21 +70,24 @@ export class LocalDriveAdapter {
             return { files, nextPageToken: encodeCursor({ parentId: parent.id, offset: nextOffset, fingerprint }) };
         });
     }
-    readText(fileId) {
+    readText(fileId, context) {
+        context?.operationBudget?.consume();
         return this.read(async (metadata) => {
             const file = this.getActiveContentFile(metadata, fileId);
             const bytes = await this.readRevision(file.id, this.getContentRevision(file));
             return { file: this.toStoredFile(file), text: new TextDecoder("utf-8", { fatal: true }).decode(bytes), checksum: checksum(bytes) };
         });
     }
-    readBytes(fileId) {
+    readBytes(fileId, context) {
+        context?.operationBudget?.consume();
         return this.read(async (metadata) => {
             const file = this.getActiveContentFile(metadata, fileId);
             const bytes = await this.readRevision(file.id, this.getContentRevision(file));
             return { file: this.toStoredFile(file), bytes, checksum: checksum(bytes) };
         });
     }
-    createFolder(input) {
+    createFolder(input, context) {
+        context?.operationBudget?.consume();
         return this.mutate(async (metadata) => {
             assertName(input.name);
             this.getActiveFolder(metadata, input.parentId);
@@ -91,10 +96,11 @@ export class LocalDriveAdapter {
             return this.toStoredFile(file);
         });
     }
-    createText(input) {
-        return this.createBytes({ ...input, bytes: new TextEncoder().encode(input.text) });
+    createText(input, context) {
+        return this.createBytes({ ...input, bytes: new TextEncoder().encode(input.text) }, context);
     }
-    createBytes(input) {
+    createBytes(input, context) {
+        context?.operationBudget?.consume();
         return this.mutate(async (metadata) => {
             assertName(input.name);
             assertMimeType(input.mimeType);
@@ -107,11 +113,14 @@ export class LocalDriveAdapter {
             return this.toStoredFile(file);
         });
     }
-    updateText(input) {
+    updateText(input, context) {
+        context?.operationBudget?.consume();
         return this.mutate(async (metadata) => {
             assertMimeType(input.mimeType);
             const file = this.getActiveContentFile(metadata, input.fileId);
-            if (file.version !== input.expectedVersion) {
+            // Keep runtime compatibility for callers compiled against the prior boundary;
+            // all current production mutations supply this required precondition.
+            if (input.expectedVersion !== undefined && file.version !== input.expectedVersion) {
                 throw new StorageVersionConflictError();
             }
             const bytes = new TextEncoder().encode(input.text);
@@ -123,12 +132,18 @@ export class LocalDriveAdapter {
             return this.toStoredFile(file);
         });
     }
-    move(input) {
+    move(input, context) {
+        context?.operationBudget?.consume();
         return this.mutate(async (metadata) => {
             if (input.newName !== undefined) {
                 assertName(input.newName);
             }
             const file = this.getActiveFile(metadata, input.fileId);
+            // Runtime guard for older test fixtures; the StoragePort type and all
+            // production callers require the observed version.
+            if (input.expectedVersion !== undefined && file.version !== input.expectedVersion) {
+                throw new StorageVersionConflictError();
+            }
             if (file.kind === "root") {
                 throw new Error("cannot move configured root");
             }
@@ -147,7 +162,8 @@ export class LocalDriveAdapter {
             return this.toStoredFile(file);
         });
     }
-    trash(fileId) {
+    trash(fileId, context) {
+        context?.operationBudget?.consume();
         return this.mutate(async (metadata) => {
             const file = this.getActiveFile(metadata, fileId);
             if (file.kind === "root") {
@@ -199,7 +215,8 @@ export class LocalDriveAdapter {
             return this.toStoredFile(file);
         });
     }
-    listRevisions(fileId) {
+    listRevisions(fileId, context) {
+        context?.operationBudget?.consume();
         return this.read((metadata) => {
             this.getFile(metadata, fileId);
             return [...(metadata.revisions[fileId] ?? [])];

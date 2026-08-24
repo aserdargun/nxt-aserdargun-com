@@ -223,6 +223,38 @@ describe("private vault handlers", () => {
     expect(stale.jsonBody).toMatchObject({ error: { code: "CONFLICT" } });
   });
 
+  it("uses one canonical folder order across pages when provider listing order changes", async () => {
+    const treeVersion = "2".repeat(64);
+    const folders = [
+      { id: "raw-folder-charlie", name: "Charlie", path: "Notes/Charlie", version: "1", protected: false },
+      { id: "raw-folder-alpha", name: "Alpha", path: "Notes/Alpha", version: "1", protected: false },
+      { id: "raw-folder-bravo", name: "Bravo", path: "Notes/Bravo", version: "1", protected: false }
+    ];
+    let calls = 0;
+    const handlers = createVaultHandlers({
+      authorize: () => ({ provider: "github", userId: "owner", userDetails: "aserdargun" }),
+      resolveServices: () => ({
+        vault: {
+          readIndex: async () => ({ value: { schemaVersion: 1, generation: 9, entries: [], pendingMutations: [], rescanState: null } }),
+          vaultTree: async () => ({ treeVersion, folders: calls++ % 2 === 0 ? folders : [...folders].reverse() })
+        },
+        preferences: { read: async () => ({ value: { schemaVersion: 1, favorites: [], recent: [], theme: "system" } }) }
+      }) as never,
+      idCodec: identityCodec
+    });
+
+    const first = VaultResponseSchema.parse((await handlers.getVault(request("GET", "https://nxt.example/api/private/vault?limit=2"))).jsonBody);
+    const second = VaultResponseSchema.parse((await handlers.getVault(request(
+      "GET",
+      `https://nxt.example/api/private/vault?limit=2&cursor=${encodeURIComponent(first.cursor!)}`
+    ))).jsonBody);
+
+    expect([...first.folders, ...second.folders].map((folder) => folder.path)).toEqual([
+      "Notes/Alpha", "Notes/Bravo", "Notes/Charlie"
+    ]);
+    expect(second.cursor).toBeNull();
+  });
+
   it("paginates every nested relation, attachment, backlink, and preference without slicing", async () => {
     const targetIds = Array.from({ length: 120 }, (_, index) => `20000000-0000-4000-8000-${String(index).padStart(12, "0")}`);
     const entry = {

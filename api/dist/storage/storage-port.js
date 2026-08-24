@@ -4,6 +4,28 @@ export class StorageVersionConflictError extends Error {
         this.name = "StorageVersionConflictError";
     }
 }
+export class StorageOperationBudgetExceededError extends Error {
+    constructor() {
+        super("storage operation budget exhausted");
+        this.name = "StorageOperationBudgetExceededError";
+    }
+}
+export class StorageOperationBudget {
+    limit;
+    consumed = 0;
+    constructor(limit) {
+        this.limit = limit;
+        if (!Number.isSafeInteger(limit) || limit < 1)
+            throw new Error("invalid storage operation budget");
+    }
+    consume() {
+        if (this.consumed >= this.limit)
+            throw new StorageOperationBudgetExceededError();
+        this.consumed += 1;
+    }
+    get remaining() { return this.limit - this.consumed; }
+    get used() { return this.consumed; }
+}
 /** A storage mutation was rejected before it could reach the backing store. */
 export class StorageMutationNotAppliedError extends Error {
     constructor() {

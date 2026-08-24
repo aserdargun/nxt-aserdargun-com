@@ -23,7 +23,12 @@ export const createVaultHandlers = (dependencies: PrivateHandlerDependencies = d
     ]);
     if (page.generation !== null && page.generation !== index.value.generation) throw new ApiResponseError("CONFLICT");
     if (page.treeVersion !== null && page.treeVersion !== tree.treeVersion) throw new ApiResponseError("CONFLICT");
-    const folderCandidates = tree.folders.slice(page.folderOffset, page.folderOffset + page.limit).map((folder) => ({
+    const orderedFolders = [...tree.folders].sort((first, second) => {
+      const firstPath = first.path.normalize("NFKC").toLocaleLowerCase("en-US");
+      const secondPath = second.path.normalize("NFKC").toLocaleLowerCase("en-US");
+      return firstPath.localeCompare(secondPath, "en-US") || first.id.localeCompare(second.id, "en-US");
+    });
+    const folderCandidates = orderedFolders.slice(page.folderOffset, page.folderOffset + page.limit).map((folder) => ({
       id: dependencies.idCodec.encode(folder.id),
       name: folder.name,
       path: folder.path,
@@ -77,7 +82,7 @@ export const createVaultHandlers = (dependencies: PrivateHandlerDependencies = d
     const recentEnd = Math.min(page.recentOffset + 100, preferences.value.recent.length);
     const nextFavoriteOffset = favoriteEnd;
     const nextRecentOffset = recentEnd;
-    const complete = nextEntryOffset >= index.value.entries.length && nextFolderOffset >= tree.folders.length &&
+    const complete = nextEntryOffset >= index.value.entries.length && nextFolderOffset >= orderedFolders.length &&
       nextFavoriteOffset >= preferences.value.favorites.length && nextRecentOffset >= preferences.value.recent.length;
     return typedJson({
       entries,

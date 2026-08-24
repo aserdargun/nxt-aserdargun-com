@@ -50,6 +50,7 @@ export interface GoogleDriveClient {
             responseType: "arraybuffer";
         }): Promise<{
             data: unknown;
+            headers?: unknown;
         }>;
         list(input: GoogleDriveListInput): Promise<{
             data: unknown;
@@ -57,7 +58,11 @@ export interface GoogleDriveClient {
         create(input: GoogleDriveCreateInput): Promise<{
             data: unknown;
         }>;
-        update(input: GoogleDriveUpdateInput): Promise<{
+        update(input: GoogleDriveUpdateInput, options?: {
+            headers: {
+                "If-Match": string;
+            };
+        }): Promise<{
             data: unknown;
         }>;
     };
@@ -70,6 +75,9 @@ export interface GoogleDriveClient {
 interface GoogleRequestOptions {
     responseType?: "arraybuffer";
     retry: false;
+    headers?: {
+        "If-Match": string;
+    };
 }
 interface RawGoogleDriveClient {
     files: {

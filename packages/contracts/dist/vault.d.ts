@@ -47,6 +47,7 @@ export declare const VaultMutationPhaseSchema: z.ZodEnum<{
     "outcome-unknown": "outcome-unknown";
     "drive-applied": "drive-applied";
     "index-applied": "index-applied";
+    conflicted: "conflicted";
 }>;
 export declare const VaultPendingMutationSchema: z.ZodObject<{
     id: z.ZodUUID;
@@ -70,6 +71,8 @@ export declare const VaultPendingMutationSchema: z.ZodObject<{
     oldPath: z.ZodOptional<z.ZodString>;
     newPath: z.ZodOptional<z.ZodString>;
     expectedVersion: z.ZodOptional<z.ZodString>;
+    moveExpectedVersion: z.ZodOptional<z.ZodString>;
+    originalChecksum: z.ZodOptional<z.ZodString>;
     expectedChecksum: z.ZodOptional<z.ZodString>;
     source: z.ZodOptional<z.ZodString>;
     ownerId: z.ZodOptional<z.ZodUUID>;
@@ -80,6 +83,7 @@ export declare const VaultPendingMutationSchema: z.ZodObject<{
         "outcome-unknown": "outcome-unknown";
         "drive-applied": "drive-applied";
         "index-applied": "index-applied";
+        conflicted: "conflicted";
     }>>;
     createdAt: z.ZodISODateTime;
     expiresAt: z.ZodISODateTime;
@@ -192,6 +196,8 @@ export declare const VaultIndexSchema: z.ZodObject<{
         oldPath: z.ZodOptional<z.ZodString>;
         newPath: z.ZodOptional<z.ZodString>;
         expectedVersion: z.ZodOptional<z.ZodString>;
+        moveExpectedVersion: z.ZodOptional<z.ZodString>;
+        originalChecksum: z.ZodOptional<z.ZodString>;
         expectedChecksum: z.ZodOptional<z.ZodString>;
         source: z.ZodOptional<z.ZodString>;
         ownerId: z.ZodOptional<z.ZodUUID>;
@@ -202,6 +208,7 @@ export declare const VaultIndexSchema: z.ZodObject<{
             "outcome-unknown": "outcome-unknown";
             "drive-applied": "drive-applied";
             "index-applied": "index-applied";
+            conflicted: "conflicted";
         }>>;
         createdAt: z.ZodISODateTime;
         expiresAt: z.ZodISODateTime;

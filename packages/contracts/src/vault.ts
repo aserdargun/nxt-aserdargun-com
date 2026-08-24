@@ -53,7 +53,8 @@ export const VaultMutationPhaseSchema = z.enum([
   "drive-inflight",
   "outcome-unknown",
   "drive-applied",
-  "index-applied"
+  "index-applied",
+  "conflicted"
 ]);
 
 export const VaultPendingMutationSchema = z
@@ -69,6 +70,8 @@ export const VaultPendingMutationSchema = z
     oldPath: z.string().trim().min(1).max(4096).optional(),
     newPath: z.string().trim().min(1).max(4096).optional(),
     expectedVersion: z.string().min(1).max(512).optional(),
+    moveExpectedVersion: z.string().min(1).max(512).optional(),
+    originalChecksum: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
     expectedChecksum: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
     source: z.string().max(100_000).optional(),
     ownerId: NoteIdSchema.optional(),

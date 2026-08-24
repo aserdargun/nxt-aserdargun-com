@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { ApiResponseError } from "../http/api-response.js";
-import { StorageVersionConflictError } from "../storage/storage-port.js";
+import { StorageOperationBudgetExceededError, StorageVersionConflictError } from "../storage/storage-port.js";
 const JSON_MIME_TYPE = "application/json";
 const CHECKSUM = /^[a-f0-9]{64}$/u;
 export class SystemFileStore {
@@ -8,9 +8,9 @@ export class SystemFileStore {
     constructor(options) {
         this.options = options;
     }
-    async read() {
+    async read(context) {
         try {
-            const readback = await this.options.storage.readText(this.options.fileId);
+            const readback = await this.options.storage.readText(this.options.fileId, context);
             this.assertPinnedFile(readback.file);
             this.assertChecksum(readback.text, readback.checksum);
             return {
@@ -24,8 +24,8 @@ export class SystemFileStore {
             throw preserveApiError(error, "DRIVE_UNAVAILABLE");
         }
     }
-    async update(value, expectedVersion) {
-        const before = await this.read();
+    async update(value, expectedVersion, context) {
+        const before = await this.read(context);
         if (expectedVersion !== undefined && before.file.version !== expectedVersion) {
             throw new ApiResponseError("CONFLICT");
         }
@@ -44,14 +44,16 @@ export class SystemFileStore {
                 expectedVersion: before.file.version,
                 mimeType: JSON_MIME_TYPE,
                 text: source
-            });
+            }, context);
         }
         catch (error) {
+            if (error instanceof StorageOperationBudgetExceededError)
+                throw error;
             throw new ApiResponseError(error instanceof StorageVersionConflictError ? "CONFLICT" : "DRIVE_UNAVAILABLE");
         }
         try {
             this.assertPinnedFile(updated);
-            const after = await this.read();
+            const after = await this.read(context);
             if (after.file.version !== updated.version || after.source !== source) {
                 throw new ApiResponseError("DRIVE_UNAVAILABLE");
             }
@@ -64,7 +66,7 @@ export class SystemFileStore {
     async compareAndSet(transform, options = {}) {
         const attempts = options.attempts ?? 8;
         for (let attempt = 0; attempt < attempts; attempt += 1) {
-            const current = await this.read();
+            const current = await this.read(options.context);
             let next;
             try {
                 next = transform(current.value);
@@ -73,7 +75,7 @@ export class SystemFileStore {
                 throw preserveApiError(error, "DRIVE_UNAVAILABLE");
             }
             try {
-                return await this.update(next, current.file.version);
+                return await this.update(next, current.file.version, options.context);
             }
             catch (error) {
                 if (!(error instanceof ApiResponseError) || error.code !== "CONFLICT" || attempt === attempts - 1)
@@ -99,5 +101,7 @@ export class SystemFileStore {
         }
     }
 }
-export const preserveApiError = (error, fallback) => error instanceof ApiResponseError ? error : new ApiResponseError(fallback);
+export const preserveApiError = (error, fallback) => error instanceof ApiResponseError || error instanceof StorageOperationBudgetExceededError
+    ? error
+    : new ApiResponseError(fallback);
 //# sourceMappingURL=system-file-store.js.map

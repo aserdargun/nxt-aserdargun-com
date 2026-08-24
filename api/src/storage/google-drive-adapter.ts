@@ -8,7 +8,9 @@ import type {
 } from "./google-drive-client.js";
 import {
   StorageMutationOutcomeUnknownError,
+  StorageOperationBudgetExceededError,
   StorageVersionConflictError,
+  type StorageOperationContext,
   type StoragePort,
   type StoredFile
 } from "./storage-port.js";
@@ -47,10 +49,10 @@ export class GoogleDriveAdapter implements StoragePort {
     this.rootId = options.rootId;
   }
 
-  public async get(fileId: string): Promise<StoredFile> {
+  public async get(fileId: string, context?: StorageOperationContext): Promise<StoredFile> {
     assertFileId(fileId);
     try {
-      return toStoredFile(await this.readMetadata(fileId), this.rootId);
+      return toStoredFile(await this.readMetadata(fileId, context), this.rootId);
     } catch (error) {
       throw preserveSafeError(error, "Google Drive read failed.");
     }
@@ -60,7 +62,7 @@ export class GoogleDriveAdapter implements StoragePort {
     parentId: string;
     pageToken?: string;
     pageSize: number;
-  }): Promise<{ files: StoredFile[]; nextPageToken?: string }> {
+  }, context?: StorageOperationContext): Promise<{ files: StoredFile[]; nextPageToken?: string }> {
     assertFileId(input.parentId);
     assertPageSize(input.pageSize);
     try {
@@ -73,7 +75,7 @@ export class GoogleDriveAdapter implements StoragePort {
             ? {}
             : { pageToken: input.pageToken }),
           fields: LIST_FIELDS
-        })
+        }), context
       );
       const data = requireRecord(response.data);
       const rawFiles = data.files === undefined ? [] : requireArray(data.files);
@@ -92,9 +94,10 @@ export class GoogleDriveAdapter implements StoragePort {
   }
 
   public async readText(
-    fileId: string
+    fileId: string,
+    context?: StorageOperationContext
   ): Promise<{ file: StoredFile; text: string; checksum: string }> {
-    const result = await this.readBytes(fileId);
+    const result = await this.readBytes(fileId, context);
     try {
       return {
         file: result.file,
@@ -109,18 +112,19 @@ export class GoogleDriveAdapter implements StoragePort {
   }
 
   public async readBytes(
-    fileId: string
+    fileId: string,
+    context?: StorageOperationContext
   ): Promise<{ file: StoredFile; bytes: Uint8Array; checksum: string }> {
     assertFileId(fileId);
     try {
-      const metadata = await this.readMetadata(fileId);
+      const metadata = await this.readMetadata(fileId, context);
       const file = toStoredFile(metadata, this.rootId);
       assertReadableContent(file);
       const response = await this.readWithRetry(() =>
         this.client.files.get(
           { fileId, alt: "media" },
           { responseType: "arraybuffer" }
-        )
+        ), context
       );
       const bytes = toBytes(response.data);
       const expectedChecksum = requireNonEmptyString(
@@ -140,12 +144,12 @@ export class GoogleDriveAdapter implements StoragePort {
   public async createFolder(input: {
     parentId: string;
     name: string;
-  }): Promise<StoredFile> {
+  }, context?: StorageOperationContext): Promise<StoredFile> {
     return this.create({
       parentId: input.parentId,
       name: input.name,
       mimeType: FOLDER_MIME_TYPE
-    });
+    }, context);
   }
 
   public async createText(input: {
@@ -153,9 +157,9 @@ export class GoogleDriveAdapter implements StoragePort {
     name: string;
     mimeType: string;
     text: string;
-  }): Promise<StoredFile> {
+  }, context?: StorageOperationContext): Promise<StoredFile> {
     const bytes = new TextEncoder().encode(input.text);
-    return this.create({ ...input, body: input.text, checksum: md5(bytes) });
+    return this.create({ ...input, body: input.text, checksum: md5(bytes) }, context);
   }
 
   public async createBytes(input: {
@@ -163,12 +167,12 @@ export class GoogleDriveAdapter implements StoragePort {
     name: string;
     mimeType: string;
     bytes: Uint8Array;
-  }): Promise<StoredFile> {
+  }, context?: StorageOperationContext): Promise<StoredFile> {
     return this.create({
       ...input,
       body: input.bytes,
       checksum: md5(input.bytes)
-    });
+    }, context);
   }
 
   public async updateText(input: {
@@ -176,13 +180,16 @@ export class GoogleDriveAdapter implements StoragePort {
     expectedVersion: string;
     mimeType: string;
     text: string;
-  }): Promise<StoredFile> {
+  }, context?: StorageOperationContext): Promise<StoredFile> {
     assertFileId(input.fileId);
     assertMimeType(input.mimeType);
-    assertVersion(input.expectedVersion);
+    if (input.expectedVersion !== undefined) assertVersion(input.expectedVersion);
     let before: StoredFile;
+    let etag: string;
     try {
-      before = toStoredFile(await this.readMetadata(input.fileId), this.rootId);
+      const snapshot = await this.readMetadataSnapshot(input.fileId, context);
+      before = toStoredFile(snapshot.data, this.rootId);
+      etag = responseEtag(snapshot.headers);
     } catch (error) {
       throw preserveSafeError(error, "Google Drive read failed.");
     }
@@ -192,14 +199,16 @@ export class GoogleDriveAdapter implements StoragePort {
       throw new StorageVersionConflictError();
     const bytes = new TextEncoder().encode(input.text);
     let response;
+    context?.operationBudget?.consume();
     try {
       response = await this.client.files.update({
         fileId: input.fileId,
         requestBody: { mimeType: input.mimeType },
         media: { mimeType: input.mimeType, body: input.text },
         fields: "id"
-      });
-    } catch {
+      }, { headers: { "If-Match": etag } });
+    } catch (error) {
+      if (errorStatus(error) === 412) throw new StorageVersionConflictError();
       throw new StorageMutationOutcomeUnknownError(input.fileId, "Google Drive write outcome is unknown.");
     }
     try {
@@ -211,7 +220,8 @@ export class GoogleDriveAdapter implements StoragePort {
       const after = await this.verifyUpload(
         input.fileId,
         md5(bytes),
-        before.version
+        before.version,
+        context
       );
       if (!matchesActiveSnapshot(after, before, input.mimeType)) {
         throw new DriveContractError("Google Drive upload verification failed.");
@@ -226,19 +236,25 @@ export class GoogleDriveAdapter implements StoragePort {
     fileId: string;
     fromParentId: string;
     toParentId: string;
+    expectedVersion: string;
     newName?: string;
-  }): Promise<StoredFile> {
+  }, context?: StorageOperationContext): Promise<StoredFile> {
     assertFileId(input.fileId);
     assertFileId(input.fromParentId);
     assertFileId(input.toParentId);
+    if (input.expectedVersion !== undefined) assertVersion(input.expectedVersion);
     if (input.newName !== undefined) assertName(input.newName);
     let before: StoredFile;
+    let etag: string;
     try {
-      before = toStoredFile(await this.readMetadata(input.fileId), this.rootId);
+      const snapshot = await this.readMetadataSnapshot(input.fileId, context);
+      before = toStoredFile(snapshot.data, this.rootId);
+      etag = responseEtag(snapshot.headers);
     } catch (error) {
       throw preserveSafeError(error, "Google Drive read failed.");
     }
     assertActiveNonShortcut(before);
+    if (input.expectedVersion !== undefined && before.version !== input.expectedVersion) throw new StorageVersionConflictError();
     if (
       before.parentIds.length !== 1 ||
       before.parentIds[0] !== input.fromParentId
@@ -265,9 +281,11 @@ export class GoogleDriveAdapter implements StoragePort {
       fields: "id"
     };
     let response;
+    context?.operationBudget?.consume();
     try {
-      response = await this.client.files.update(request);
-    } catch {
+      response = await this.client.files.update(request, { headers: { "If-Match": etag } });
+    } catch (error) {
+      if (errorStatus(error) === 412) throw new StorageVersionConflictError();
       throw new StorageMutationOutcomeUnknownError(input.fileId, "Google Drive move outcome is unknown.");
     }
     try {
@@ -276,7 +294,7 @@ export class GoogleDriveAdapter implements StoragePort {
         input.fileId,
         "Google Drive move verification failed."
       );
-      const after = await this.readBackAfterWrite(input.fileId);
+      const after = await this.readBackAfterWrite(input.fileId, context);
       if (
         after.id !== before.id ||
         after.name !== (input.newName ?? before.name) ||
@@ -294,19 +312,20 @@ export class GoogleDriveAdapter implements StoragePort {
     }
   }
 
-  public async trash(fileId: string): Promise<StoredFile> {
+  public async trash(fileId: string, context?: StorageOperationContext): Promise<StoredFile> {
     assertFileId(fileId);
     if (fileId === this.rootId)
       throw new DriveContractError("cannot trash configured root");
     let before: StoredFile;
     try {
-      before = toStoredFile(await this.readMetadata(fileId), this.rootId);
+      before = toStoredFile(await this.readMetadata(fileId, context), this.rootId);
     } catch (error) {
       throw preserveSafeError(error, "Google Drive read failed.");
     }
     assertActiveNonShortcut(before);
     assertSingleParent(before, "Google Drive Trash verification failed.");
     let response;
+    context?.operationBudget?.consume();
     try {
       response = await this.client.files.update({
         fileId,
@@ -322,7 +341,7 @@ export class GoogleDriveAdapter implements StoragePort {
         fileId,
         "Google Drive Trash verification failed."
       );
-      const file = await this.readBackAfterWrite(fileId);
+      const file = await this.readBackAfterWrite(fileId, context);
       if (
         file.id !== before.id ||
         file.name !== before.name ||
@@ -339,7 +358,8 @@ export class GoogleDriveAdapter implements StoragePort {
   }
 
   public async listRevisions(
-    fileId: string
+    fileId: string,
+    context?: StorageOperationContext
   ): Promise<Array<{ id: string; modifiedTime: string }>> {
     assertFileId(fileId);
     const revisions: Array<{ id: string; modifiedTime: string }> = [];
@@ -353,7 +373,7 @@ export class GoogleDriveAdapter implements StoragePort {
             pageSize: 100,
             fields: REVISION_FIELDS,
             ...(pageToken === undefined ? {} : { pageToken })
-          })
+          }), context
         );
         const data = requireRecord(response.data);
         for (const rawRevision of data.revisions === undefined
@@ -386,7 +406,7 @@ export class GoogleDriveAdapter implements StoragePort {
     mimeType: string;
     body?: string | Uint8Array;
     checksum?: string;
-  }): Promise<StoredFile> {
+  }, context?: StorageOperationContext): Promise<StoredFile> {
     assertFileId(input.parentId);
     assertName(input.name);
     assertMimeType(input.mimeType);
@@ -402,6 +422,7 @@ export class GoogleDriveAdapter implements StoragePort {
       fields: "id"
     };
     let response;
+    context?.operationBudget?.consume();
     try {
       response = await this.client.files.create(request);
     } catch {
@@ -412,8 +433,8 @@ export class GoogleDriveAdapter implements StoragePort {
       createdId = requireFileIdFromWrite(response.data);
       const created =
         input.checksum === undefined
-          ? await this.readBackAfterWrite(createdId)
-          : await this.verifyUpload(createdId, input.checksum);
+          ? await this.readBackAfterWrite(createdId, context)
+          : await this.verifyUpload(createdId, input.checksum, undefined, context);
       if (
         created.id !== createdId ||
         created.name !== input.name ||
@@ -437,9 +458,10 @@ export class GoogleDriveAdapter implements StoragePort {
   private async verifyUpload(
     fileId: string,
     expectedChecksum: string,
-    previousVersion?: string
+    previousVersion?: string,
+    context?: StorageOperationContext
   ): Promise<StoredFile> {
-    const metadata = await this.readMetadataAfterWrite(fileId);
+    const metadata = await this.readMetadataAfterWrite(fileId, context);
     const file = toStoredFile(metadata, this.rootId);
     const checksum = requireRecord(metadata).md5Checksum;
     if (checksum !== expectedChecksum)
@@ -453,30 +475,37 @@ export class GoogleDriveAdapter implements StoragePort {
     return file;
   }
 
-  private async readBackAfterWrite(fileId: string): Promise<StoredFile> {
-    return toStoredFile(await this.readMetadataAfterWrite(fileId), this.rootId);
+  private async readBackAfterWrite(fileId: string, context?: StorageOperationContext): Promise<StoredFile> {
+    return toStoredFile(await this.readMetadataAfterWrite(fileId, context), this.rootId);
   }
 
-  private async readMetadataAfterWrite(fileId: string): Promise<unknown> {
+  private async readMetadataAfterWrite(fileId: string, context?: StorageOperationContext): Promise<unknown> {
     try {
-      return await this.readMetadata(fileId);
-    } catch {
+      return await this.readMetadata(fileId, context);
+    } catch (error) {
+      if (error instanceof StorageOperationBudgetExceededError) throw error;
       throw new DriveContractError("Google Drive write readback failed.");
     }
   }
 
-  private async readMetadata(fileId: string): Promise<unknown> {
-    assertFileId(fileId);
-    const response = await this.readWithRetry(() =>
-      this.client.files.get({ fileId, fields: FILE_FIELDS })
-    );
-    return response.data;
+  private async readMetadata(fileId: string, context?: StorageOperationContext): Promise<unknown> {
+    return (await this.readMetadataSnapshot(fileId, context)).data;
   }
 
-  private async readWithRetry<T>(operation: () => Promise<T>): Promise<T> {
+  private async readMetadataSnapshot(fileId: string, context?: StorageOperationContext): Promise<{ data: unknown; headers?: unknown }> {
+    assertFileId(fileId);
+    const response = await this.readWithRetry(
+      () => this.client.files.get({ fileId, fields: FILE_FIELDS }),
+      context
+    );
+    return response;
+  }
+
+  private async readWithRetry<T>(operation: () => Promise<T>, context?: StorageOperationContext): Promise<T> {
     let lastError: unknown;
     for (let attempt = 0; attempt < MAX_READ_ATTEMPTS; attempt += 1) {
       try {
+        context?.operationBudget?.consume();
         return await operation();
       } catch (error) {
         lastError = error;
@@ -615,6 +644,18 @@ const requireNonEmptyString = (value: unknown): string => {
   return value;
 };
 
+const responseEtag = (headers: unknown): string => {
+  const record = requireRecord(headers);
+  let etag = record.etag ?? record.ETag;
+  if (typeof etag !== "string" && typeof record.get === "function") {
+    try { etag = (record.get as (name: string) => unknown)("etag"); } catch { etag = undefined; }
+  }
+  if (typeof etag !== "string" || etag.length < 3 || etag.length > 512 || /[\r\n\0]/u.test(etag)) {
+    throw new DriveContractError("Google Drive version precondition is unavailable.");
+  }
+  return etag;
+};
+
 const optionalString = (value: unknown): string | undefined => {
   if (value === undefined || value === null || value === "") return undefined;
   return requireNonEmptyString(value);
@@ -709,8 +750,8 @@ const md5 = (bytes: Uint8Array): string =>
 const preserveSafeError = (
   error: unknown,
   fallback: string
-): DriveContractError =>
-  error instanceof DriveContractError
+): Error =>
+  error instanceof DriveContractError || error instanceof StorageOperationBudgetExceededError
     ? error
     : new DriveContractError(fallback);
 

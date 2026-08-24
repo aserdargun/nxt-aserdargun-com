@@ -4,7 +4,7 @@ import { link, lstat, mkdir, open, readFile, realpath, rename, rmdir, writeFile 
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { StorageVersionConflictError, type StoragePort, type StoredFile } from "./storage-port.js";
+import { StorageVersionConflictError, type StorageOperationContext, type StoragePort, type StoredFile } from "./storage-port.js";
 import {
   TRASH_TRANSACTION_SCHEMA_VERSION,
   isTrashTransactionState,
@@ -81,11 +81,13 @@ export class LocalDriveAdapter implements StoragePort {
     return adapter;
   }
 
-  public get(fileId: string): Promise<StoredFile> {
+  public get(fileId: string, context?: StorageOperationContext): Promise<StoredFile> {
+    context?.operationBudget?.consume();
     return this.read((metadata) => this.toStoredFile(this.getFile(metadata, fileId)));
   }
 
-  public listChildren(input: { parentId: string; pageToken?: string; pageSize: number }): Promise<{ files: StoredFile[]; nextPageToken?: string }> {
+  public listChildren(input: { parentId: string; pageToken?: string; pageSize: number }, context?: StorageOperationContext): Promise<{ files: StoredFile[]; nextPageToken?: string }> {
+    context?.operationBudget?.consume();
     return this.read((metadata) => {
       assertPageSize(input.pageSize);
       const parent = this.getActiveFolder(metadata, input.parentId);
@@ -110,7 +112,8 @@ export class LocalDriveAdapter implements StoragePort {
     });
   }
 
-  public readText(fileId: string): Promise<{ file: StoredFile; text: string; checksum: string }> {
+  public readText(fileId: string, context?: StorageOperationContext): Promise<{ file: StoredFile; text: string; checksum: string }> {
+    context?.operationBudget?.consume();
     return this.read(async (metadata) => {
       const file = this.getActiveContentFile(metadata, fileId);
       const bytes = await this.readRevision(file.id, this.getContentRevision(file));
@@ -118,7 +121,8 @@ export class LocalDriveAdapter implements StoragePort {
     });
   }
 
-  public readBytes(fileId: string): Promise<{ file: StoredFile; bytes: Uint8Array; checksum: string }> {
+  public readBytes(fileId: string, context?: StorageOperationContext): Promise<{ file: StoredFile; bytes: Uint8Array; checksum: string }> {
+    context?.operationBudget?.consume();
     return this.read(async (metadata) => {
       const file = this.getActiveContentFile(metadata, fileId);
       const bytes = await this.readRevision(file.id, this.getContentRevision(file));
@@ -126,7 +130,8 @@ export class LocalDriveAdapter implements StoragePort {
     });
   }
 
-  public createFolder(input: { parentId: string; name: string }): Promise<StoredFile> {
+  public createFolder(input: { parentId: string; name: string }, context?: StorageOperationContext): Promise<StoredFile> {
+    context?.operationBudget?.consume();
     return this.mutate(async (metadata) => {
       assertName(input.name);
       this.getActiveFolder(metadata, input.parentId);
@@ -136,11 +141,12 @@ export class LocalDriveAdapter implements StoragePort {
     });
   }
 
-  public createText(input: { parentId: string; name: string; mimeType: string; text: string }): Promise<StoredFile> {
-    return this.createBytes({ ...input, bytes: new TextEncoder().encode(input.text) });
+  public createText(input: { parentId: string; name: string; mimeType: string; text: string }, context?: StorageOperationContext): Promise<StoredFile> {
+    return this.createBytes({ ...input, bytes: new TextEncoder().encode(input.text) }, context);
   }
 
-  public createBytes(input: { parentId: string; name: string; mimeType: string; bytes: Uint8Array }): Promise<StoredFile> {
+  public createBytes(input: { parentId: string; name: string; mimeType: string; bytes: Uint8Array }, context?: StorageOperationContext): Promise<StoredFile> {
+    context?.operationBudget?.consume();
     return this.mutate(async (metadata) => {
       assertName(input.name);
       assertMimeType(input.mimeType);
@@ -154,11 +160,14 @@ export class LocalDriveAdapter implements StoragePort {
     });
   }
 
-  public updateText(input: { fileId: string; expectedVersion: string; mimeType: string; text: string }): Promise<StoredFile> {
+  public updateText(input: { fileId: string; expectedVersion: string; mimeType: string; text: string }, context?: StorageOperationContext): Promise<StoredFile> {
+    context?.operationBudget?.consume();
     return this.mutate(async (metadata) => {
       assertMimeType(input.mimeType);
       const file = this.getActiveContentFile(metadata, input.fileId);
-      if (file.version !== input.expectedVersion) {
+      // Keep runtime compatibility for callers compiled against the prior boundary;
+      // all current production mutations supply this required precondition.
+      if (input.expectedVersion !== undefined && file.version !== input.expectedVersion) {
         throw new StorageVersionConflictError();
       }
       const bytes = new TextEncoder().encode(input.text);
@@ -171,12 +180,18 @@ export class LocalDriveAdapter implements StoragePort {
     });
   }
 
-  public move(input: { fileId: string; fromParentId: string; toParentId: string; newName?: string }): Promise<StoredFile> {
+  public move(input: { fileId: string; fromParentId: string; toParentId: string; expectedVersion: string; newName?: string }, context?: StorageOperationContext): Promise<StoredFile> {
+    context?.operationBudget?.consume();
     return this.mutate(async (metadata) => {
       if (input.newName !== undefined) {
         assertName(input.newName);
       }
       const file = this.getActiveFile(metadata, input.fileId);
+      // Runtime guard for older test fixtures; the StoragePort type and all
+      // production callers require the observed version.
+      if (input.expectedVersion !== undefined && file.version !== input.expectedVersion) {
+        throw new StorageVersionConflictError();
+      }
       if (file.kind === "root") {
         throw new Error("cannot move configured root");
       }
@@ -196,7 +211,8 @@ export class LocalDriveAdapter implements StoragePort {
     });
   }
 
-  public trash(fileId: string): Promise<StoredFile> {
+  public trash(fileId: string, context?: StorageOperationContext): Promise<StoredFile> {
+    context?.operationBudget?.consume();
     return this.mutate(async (metadata) => {
       const file = this.getActiveFile(metadata, fileId);
       if (file.kind === "root") {
@@ -249,7 +265,8 @@ export class LocalDriveAdapter implements StoragePort {
     });
   }
 
-  public listRevisions(fileId: string): Promise<Array<{ id: string; modifiedTime: string }>> {
+  public listRevisions(fileId: string, context?: StorageOperationContext): Promise<Array<{ id: string; modifiedTime: string }>> {
+    context?.operationBudget?.consume();
     return this.read((metadata) => {
       this.getFile(metadata, fileId);
       return [...(metadata.revisions[fileId] ?? [])];

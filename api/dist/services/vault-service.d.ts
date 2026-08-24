@@ -99,6 +99,7 @@ export declare class VaultService {
         name?: string;
         parentId?: string;
     }): Promise<StoredFile>;
+    private updateFolderAttempt;
     issueFolderDeleteConfirmation(folderId: string): Promise<Confirmation>;
     trashFolder(input: {
         folderId: string;
@@ -112,8 +113,13 @@ export declare class VaultService {
         folders: FolderTreeRecord[];
     }>;
     private updateNoteUnserialized;
+    private updateNoteAttempt;
     private moveNoteUnserialized;
+    private moveNoteAttempt;
     private reserve;
+    private revalidateReservedFile;
+    private checkpointMutation;
+    private markMutationConflicted;
     private finalizeEntry;
     private finalize;
     private applyIndexKeepingMutation;

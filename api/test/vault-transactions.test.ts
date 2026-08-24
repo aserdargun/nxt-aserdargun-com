@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PreferencesSchema, VaultIndexSchema, type VaultIndexEntry } from "@nxt/contracts";
+import { PreferencesSchema, VaultIndexSchema, type VaultIndex, type VaultIndexEntry, type VaultPendingMutation } from "@nxt/contracts";
 import { parseNote, serializeNote } from "@nxt/domain";
 import { describe, expect, it } from "vitest";
 import { SystemFileStore } from "../src/services/system-file-store.js";
@@ -61,9 +61,13 @@ const setup = async () => {
     schema: PreferencesSchema
   });
   let currentTime = new Date("2026-08-24T08:00:00.000Z");
-  const serviceFor = (id: string, port: StoragePort = storage) => new VaultService({
+  const serviceFor = (
+    id: string,
+    port: StoragePort = storage,
+    indexStore: SystemFileStore<VaultIndex> = storeFor(port)
+  ) => new VaultService({
     storage: port,
-    indexStore: storeFor(port),
+    indexStore,
     folders,
     createId: () => id,
     now: () => currentTime,
@@ -74,6 +78,36 @@ const setup = async () => {
     storage, folders, indexFile, preferencesFile, storeFor, preferencesStoreFor, serviceFor,
     setTime: (value: string) => { currentTime = new Date(value); }
   };
+};
+
+const gateFirstReservation = (base: SystemFileStore<VaultIndex>) => {
+  let release!: () => void;
+  let entered!: () => void;
+  let first = true;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const didEnter = new Promise<void>((resolve) => { entered = resolve; });
+  const observed: VaultPendingMutation[] = [];
+  const store = {
+    read: base.read.bind(base),
+    update: base.update.bind(base),
+    compareAndSet: async (
+      transform: (current: VaultIndex) => VaultIndex,
+      options?: { attempts?: number }
+    ) => {
+      if (first) {
+        first = false;
+        entered();
+        await released;
+      }
+      return base.compareAndSet((current) => {
+        const before = new Set(current.pendingMutations.map((mutation) => mutation.id));
+        const next = transform(current);
+        observed.push(...next.pendingMutations.filter((mutation) => !before.has(mutation.id)));
+        return next;
+      }, options);
+    }
+  } as unknown as SystemFileStore<VaultIndex>;
+  return { store, didEnter, release, observed };
 };
 
 describe("persisted vault mutation coordination", () => {
@@ -468,5 +502,165 @@ describe("persisted vault mutation coordination", () => {
     await fixture.serviceFor(randomUUID()).createFolder({ parentId: fixture.folders.plansId, name: "Trigger" });
     expect((await fixture.storeFor().read()).value.pendingMutations).toEqual([]);
     expect((await fixture.preferencesStoreFor().read()).value).toMatchObject({ favorites: [], recent: [] });
+  });
+
+  it.each([
+    ["external rename", async (fixture: Awaited<ReturnType<typeof setup>>, folderId: string, version: string) => {
+      await fixture.storage.move({
+        fileId: folderId,
+        fromParentId: fixture.folders.plansId,
+        toParentId: fixture.folders.plansId,
+        newName: "External",
+        expectedVersion: version
+      } as never);
+    }, "External", "Plans"],
+    ["external parent move", async (fixture: Awaited<ReturnType<typeof setup>>, folderId: string, version: string) => {
+      await fixture.storage.move({
+        fileId: folderId,
+        fromParentId: fixture.folders.plansId,
+        toParentId: fixture.folders.archiveId,
+        expectedVersion: version
+      } as never);
+    }, "Parent", "Archive"]
+  ])("does not overwrite an %s while recovering an ambiguous folder move", async (_label, externalChange, expectedName, expectedParent) => {
+    const fixture = await setup();
+    const parent = await fixture.serviceFor(randomUUID()).createFolder({ parentId: fixture.folders.plansId, name: "Parent" });
+    const ambiguous = delegate(fixture.storage, {
+      move: async (input) => {
+        if (input.fileId === parent.id) throw new Error("injected ambiguous move");
+        return fixture.storage.move(input);
+      }
+    });
+    await expect(fixture.serviceFor(randomUUID(), ambiguous).updateFolder({
+      folderId: parent.id,
+      expectedVersion: parent.version,
+      name: "Intended",
+      parentId: fixture.folders.inboxId
+    })).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+    await externalChange(fixture, parent.id, parent.version);
+    fixture.setTime("2026-08-24T08:16:00.000Z");
+
+    await expect(fixture.serviceFor(randomUUID()).createFolder({
+      parentId: fixture.folders.plansId,
+      name: "Unrelated"
+    })).resolves.toMatchObject({ name: "Unrelated" });
+
+    const actual = await fixture.storage.get(parent.id);
+    const actualParent = await fixture.storage.get(actual.parentIds[0]!);
+    expect(actual).toMatchObject({ name: expectedName });
+    expect(actualParent.name).toBe(expectedParent);
+    expect((await fixture.storeFor().read()).value.pendingMutations).toContainEqual(expect.objectContaining({
+      folderId: parent.id,
+      phase: "conflicted"
+    }));
+  });
+
+  it("does not block unrelated work or overwrite external note content during ambiguous move recovery", async () => {
+    const fixture = await setup();
+    const created = await fixture.serviceFor(randomUUID()).createNote({
+      title: "Target", body: "original", folderId: fixture.folders.plansId
+    });
+    const ambiguous = delegate(fixture.storage, {
+      move: async (input) => {
+        if (input.fileId === created.driveId) throw new Error("injected ambiguous move");
+        return fixture.storage.move(input);
+      }
+    });
+    await expect(fixture.serviceFor(randomUUID(), ambiguous).moveNote({
+      noteId: created.note.frontmatter.id,
+      expectedVersion: created.version,
+      folderId: fixture.folders.inboxId
+    })).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+    const external = parseNote(created.source);
+    external.body = "external content";
+    const externalFile = await fixture.storage.updateText({
+      fileId: created.driveId,
+      expectedVersion: created.version,
+      mimeType: "text/markdown",
+      text: serializeNote(external)
+    });
+    fixture.setTime("2026-08-24T08:16:00.000Z");
+
+    await expect(fixture.serviceFor(randomUUID()).createFolder({
+      parentId: fixture.folders.plansId,
+      name: "Unrelated"
+    })).resolves.toMatchObject({ name: "Unrelated" });
+    await expect(fixture.storage.readText(created.driveId)).resolves.toMatchObject({
+      file: { version: externalFile.version, parentIds: [fixture.folders.plansId] },
+      text: expect.stringContaining("external content")
+    });
+    expect((await fixture.storeFor().read()).value.pendingMutations).toContainEqual(expect.objectContaining({
+      noteId: created.note.frontmatter.id,
+      phase: "conflicted"
+    }));
+  });
+
+  it("conditionally replays an exact unchanged note move after the ambiguity horizon", async () => {
+    const fixture = await setup();
+    const created = await fixture.serviceFor(randomUUID()).createNote({
+      title: "Target", body: "original", folderId: fixture.folders.plansId
+    });
+    let noteMoveCalls = 0;
+    const guarded = delegate(fixture.storage, {
+      move: async (input) => {
+        if (input.fileId === created.driveId) {
+          noteMoveCalls += 1;
+          if (noteMoveCalls === 1) throw new Error("injected ambiguous move");
+          if ((input as typeof input & { expectedVersion?: string }).expectedVersion !== created.version) {
+            throw new Error("missing exact move precondition");
+          }
+        }
+        return fixture.storage.move(input);
+      }
+    });
+    await expect(fixture.serviceFor(randomUUID(), guarded).moveNote({
+      noteId: created.note.frontmatter.id,
+      expectedVersion: created.version,
+      folderId: fixture.folders.inboxId
+    })).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+    fixture.setTime("2026-08-24T08:16:00.000Z");
+
+    await fixture.serviceFor(randomUUID(), guarded).createFolder({ parentId: fixture.folders.plansId, name: "Trigger" });
+
+    expect(noteMoveCalls).toBe(2);
+    expect((await fixture.storeFor().read()).value.entries.find((entry) => entry.id === created.note.frontmatter.id)?.path)
+      .toBe("Notes/Inbox/Target.md");
+  });
+
+  it.each(["update", "move"] as const)("retries note %s from fresh paths when an ancestor finishes between preflight and reservation", async (operation) => {
+    const fixture = await setup();
+    const parent = await fixture.serviceFor(randomUUID()).createFolder({ parentId: fixture.folders.plansId, name: "Parent" });
+    const created = await fixture.serviceFor(randomUUID()).createNote({ title: "Nested", body: "original", folderId: parent.id });
+    const gate = gateFirstReservation(fixture.storeFor());
+    const service = fixture.serviceFor(randomUUID(), fixture.storage, gate.store);
+    const changed = parseNote(created.source);
+    changed.body = "changed";
+    const pending = operation === "update"
+      ? service.updateNote({ noteId: created.note.frontmatter.id, expectedVersion: created.version, source: serializeNote(changed) })
+      : service.moveNote({ noteId: created.note.frontmatter.id, expectedVersion: created.version, folderId: fixture.folders.inboxId });
+    await gate.didEnter;
+    await fixture.serviceFor(randomUUID()).renameFolder({ folderId: parent.id, expectedVersion: parent.version, name: "Renamed" });
+    gate.release();
+    await pending;
+
+    expect(gate.observed.at(-1)?.oldPath).toBe("Notes/Plans/Renamed/Nested.md");
+  });
+
+  it("retries a nested folder update from its fresh path when its ancestor changes before reservation", async () => {
+    const fixture = await setup();
+    const parent = await fixture.serviceFor(randomUUID()).createFolder({ parentId: fixture.folders.plansId, name: "Parent" });
+    const child = await fixture.serviceFor(randomUUID()).createFolder({ parentId: parent.id, name: "Child" });
+    const gate = gateFirstReservation(fixture.storeFor());
+    const pending = fixture.serviceFor(randomUUID(), fixture.storage, gate.store).renameFolder({
+      folderId: child.id,
+      expectedVersion: child.version,
+      name: "Child-Renamed"
+    });
+    await gate.didEnter;
+    await fixture.serviceFor(randomUUID()).renameFolder({ folderId: parent.id, expectedVersion: parent.version, name: "Parent-Renamed" });
+    gate.release();
+    await pending;
+
+    expect(gate.observed.at(-1)?.oldPath).toBe("Notes/Plans/Parent - Renamed/Child");
   });
 });

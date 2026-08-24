@@ -126,6 +126,33 @@ describe("LocalDriveAdapter", () => {
     await expect(storage.readText(file.id)).resolves.toMatchObject({ text: "text" });
   });
 
+  it("atomically rejects a move when the observed version changed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
+    const storage = await LocalDriveAdapter.create(root);
+    const first = await storage.createFolder({ parentId: "vault", name: "first" });
+    const second = await storage.createFolder({ parentId: "vault", name: "second" });
+    const file = await storage.createText({ parentId: first.id, name: "note.md", mimeType: "text/markdown", text: "text" });
+    const externallyRenamed = await storage.move({
+      fileId: file.id,
+      fromParentId: first.id,
+      toParentId: first.id,
+      newName: "external.md"
+    } as never);
+
+    await expect(storage.move({
+      fileId: file.id,
+      fromParentId: first.id,
+      toParentId: second.id,
+      newName: "intended.md",
+      expectedVersion: file.version
+    } as never)).rejects.toThrow("version conflict");
+    await expect(storage.get(file.id)).resolves.toMatchObject({
+      version: externallyRenamed.version,
+      name: "external.md",
+      parentIds: [first.id]
+    });
+  });
+
   it("does not expose an update when metadata persistence rejects it and retries preserve its revision", async () => {
     const root = await mkdtemp(join(tmpdir(), "nxt-drive-"));
     let rejectNextMetadataSave = false;

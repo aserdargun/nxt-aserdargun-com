@@ -1,5 +1,5 @@
 import { type VaultIndex } from "@nxt/contracts";
-import type { StoragePort } from "../storage/storage-port.js";
+import { type StoragePort } from "../storage/storage-port.js";
 import { type SystemFileSnapshot, type SystemFileStore } from "./system-file-store.js";
 export interface RescanRecord {
     noteId: string;

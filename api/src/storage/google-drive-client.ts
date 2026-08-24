@@ -61,10 +61,13 @@ export interface GoogleDriveClient {
     get(
       input: GoogleDriveGetInput,
       options?: { responseType: "arraybuffer" }
-    ): Promise<{ data: unknown }>;
+    ): Promise<{ data: unknown; headers?: unknown }>;
     list(input: GoogleDriveListInput): Promise<{ data: unknown }>;
     create(input: GoogleDriveCreateInput): Promise<{ data: unknown }>;
-    update(input: GoogleDriveUpdateInput): Promise<{ data: unknown }>;
+    update(
+      input: GoogleDriveUpdateInput,
+      options?: { headers: { "If-Match": string } }
+    ): Promise<{ data: unknown }>;
   };
   revisions: {
     list(input: GoogleDriveRevisionListInput): Promise<{ data: unknown }>;
@@ -74,6 +77,7 @@ export interface GoogleDriveClient {
 interface GoogleRequestOptions {
   responseType?: "arraybuffer";
   retry: false;
+  headers?: { "If-Match": string };
 }
 
 interface RawGoogleDriveClient {
@@ -172,7 +176,7 @@ export const wrapGoogleDriveClient = (
       raw.files.get(input, { ...options, retry: false }),
     list: (input) => raw.files.list(input, { retry: false }),
     create: (input) => raw.files.create(input, { retry: false }),
-    update: (input) => raw.files.update(input, { retry: false })
+    update: (input, options) => raw.files.update(input, { ...options, retry: false })
   },
   revisions: {
     list: (input) => raw.revisions.list(input, { retry: false })

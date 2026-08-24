@@ -43,7 +43,10 @@ describe("wrapGoogleDriveClient", () => {
       requestBody: { name: "file", mimeType: "text/plain", parents: ["parent"] },
       fields: "id"
     });
-    await client.files.update({ fileId: "file", requestBody: { trashed: true }, fields: "id" });
+    await client.files.update(
+      { fileId: "file", requestBody: { trashed: true }, fields: "id" },
+      { headers: { "If-Match": '"observed-etag"' } }
+    );
     await client.revisions.list({ fileId: "file", pageSize: 100, fields: "revisions(id)" });
 
     expect(calls.map(({ method, options }) => ({ method, options }))).toEqual([
@@ -51,7 +54,7 @@ describe("wrapGoogleDriveClient", () => {
       { method: "get", options: { responseType: "arraybuffer", retry: false } },
       { method: "list", options: { retry: false } },
       { method: "create", options: { retry: false } },
-      { method: "update", options: { retry: false } },
+      { method: "update", options: { headers: { "If-Match": '"observed-etag"' }, retry: false } },
       { method: "revisions.list", options: { retry: false } }
     ]);
   });

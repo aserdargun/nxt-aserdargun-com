@@ -39,7 +39,7 @@ export const wrapGoogleDriveClient = (raw) => ({
         get: (input, options) => raw.files.get(input, { ...options, retry: false }),
         list: (input) => raw.files.list(input, { retry: false }),
         create: (input) => raw.files.create(input, { retry: false }),
-        update: (input) => raw.files.update(input, { retry: false })
+        update: (input, options) => raw.files.update(input, { ...options, retry: false })
     },
     revisions: {
         list: (input) => raw.revisions.list(input, { retry: false })

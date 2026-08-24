@@ -787,6 +787,41 @@ describe("GoogleDriveAdapter", () => {
     ]);
   });
 
+  it("sends the observed Drive ETag as an atomic move precondition", async () => {
+    const calls: unknown[][] = [];
+    let metadataReads = 0;
+    const update = (async (...args: unknown[]) => {
+      calls.push(args);
+      return { data: { id: "file-id" } };
+    }) as GoogleDriveClient["files"]["update"];
+    const adapter = new GoogleDriveAdapter(createClient({
+      get: async () => ({
+        data: metadataReads++ === 0
+          ? driveFile({ parents: ["from-parent"], version: "7" })
+          : driveFile({ parents: ["to-parent"], version: "8" }),
+        headers: { etag: '"etag-version-7"' }
+      }),
+      update
+    }));
+
+    await expect(adapter.move({
+      fileId: "file-id",
+      fromParentId: "from-parent",
+      toParentId: "to-parent",
+      expectedVersion: "7"
+    } as never)).resolves.toMatchObject({ version: "8", parentIds: ["to-parent"] });
+
+    expect(calls).toEqual([[
+      {
+        fileId: "file-id",
+        addParents: "to-parent",
+        removeParents: "from-parent",
+        fields: "id"
+      },
+      { headers: { "If-Match": '"etag-version-7"' } }
+    ]]);
+  });
+
   it("rejects a same-parent move without a rename before writing", async () => {
     let writes = 0;
     const adapter = new GoogleDriveAdapter(
@@ -901,9 +936,14 @@ const createClient = (
     update?: GoogleDriveClient["files"]["update"];
     revisionsList?: GoogleDriveClient["revisions"]["list"];
   } = {}
-): GoogleDriveClient => ({
+): GoogleDriveClient => {
+  const get = overrides.get ?? (async () => ({ data: driveFile() }));
+  return ({
   files: {
-    get: overrides.get ?? (async () => ({ data: driveFile() })),
+    get: async (input, options) => {
+      const response = await get(input, options);
+      return { ...response, headers: response.headers ?? { etag: '"test-etag"' } };
+    },
     list: overrides.list ?? (async () => ({ data: { files: [] } })),
     create: overrides.create ?? (async () => ({ data: { id: "created-id" } })),
     update: overrides.update ?? (async () => ({ data: { id: "file-id" } }))
@@ -912,3 +952,4 @@ const createClient = (
     list: overrides.revisionsList ?? (async () => ({ data: { revisions: [] } }))
   }
 });
+};

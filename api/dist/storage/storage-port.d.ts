@@ -11,6 +11,20 @@ export interface StoredFile {
 export declare class StorageVersionConflictError extends Error {
     constructor();
 }
+export declare class StorageOperationBudgetExceededError extends Error {
+    constructor();
+}
+export declare class StorageOperationBudget {
+    readonly limit: number;
+    private consumed;
+    constructor(limit: number);
+    consume(): void;
+    get remaining(): number;
+    get used(): number;
+}
+export interface StorageOperationContext {
+    operationBudget?: StorageOperationBudget;
+}
 /** A storage mutation was rejected before it could reach the backing store. */
 export declare class StorageMutationNotAppliedError extends Error {
     constructor();
@@ -21,21 +35,21 @@ export declare class StorageMutationOutcomeUnknownError extends Error {
     constructor(fileId?: string | undefined, message?: string);
 }
 export interface StoragePort {
-    get(fileId: string): Promise<StoredFile>;
+    get(fileId: string, context?: StorageOperationContext): Promise<StoredFile>;
     listChildren(input: {
         parentId: string;
         pageToken?: string;
         pageSize: number;
-    }): Promise<{
+    }, context?: StorageOperationContext): Promise<{
         files: StoredFile[];
         nextPageToken?: string;
     }>;
-    readText(fileId: string): Promise<{
+    readText(fileId: string, context?: StorageOperationContext): Promise<{
         file: StoredFile;
         text: string;
         checksum: string;
     }>;
-    readBytes(fileId: string): Promise<{
+    readBytes(fileId: string, context?: StorageOperationContext): Promise<{
         file: StoredFile;
         bytes: Uint8Array;
         checksum: string;
@@ -43,33 +57,34 @@ export interface StoragePort {
     createFolder(input: {
         parentId: string;
         name: string;
-    }): Promise<StoredFile>;
+    }, context?: StorageOperationContext): Promise<StoredFile>;
     createText(input: {
         parentId: string;
         name: string;
         mimeType: string;
         text: string;
-    }): Promise<StoredFile>;
+    }, context?: StorageOperationContext): Promise<StoredFile>;
     createBytes(input: {
         parentId: string;
         name: string;
         mimeType: string;
         bytes: Uint8Array;
-    }): Promise<StoredFile>;
+    }, context?: StorageOperationContext): Promise<StoredFile>;
     updateText(input: {
         fileId: string;
         expectedVersion: string;
         mimeType: string;
         text: string;
-    }): Promise<StoredFile>;
+    }, context?: StorageOperationContext): Promise<StoredFile>;
     move(input: {
         fileId: string;
         fromParentId: string;
         toParentId: string;
+        expectedVersion: string;
         newName?: string;
-    }): Promise<StoredFile>;
-    trash(fileId: string): Promise<StoredFile>;
-    listRevisions(fileId: string): Promise<Array<{
+    }, context?: StorageOperationContext): Promise<StoredFile>;
+    trash(fileId: string, context?: StorageOperationContext): Promise<StoredFile>;
+    listRevisions(fileId: string, context?: StorageOperationContext): Promise<Array<{
         id: string;
         modifiedTime: string;
     }>>;

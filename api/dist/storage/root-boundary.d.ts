@@ -1,4 +1,4 @@
-import type { StoragePort, StoredFile } from "./storage-port.js";
+import { type StorageOperationContext, type StoragePort, type StoredFile } from "./storage-port.js";
 type TestGraphInput = {
     allowedRootId: string;
     graph: Record<string, string[]>;
@@ -10,22 +10,22 @@ export declare class RootBoundaryStorage implements StoragePort {
     private readonly allowedRootId;
     constructor(storage: StoragePort, allowedRootId: string);
     static forTest(input: TestGraphInput): RootBoundaryStorage;
-    assertInside(fileId: string): Promise<void>;
-    get(fileId: string): Promise<StoredFile>;
+    assertInside(fileId: string, context?: StorageOperationContext): Promise<void>;
+    get(fileId: string, context?: StorageOperationContext): Promise<StoredFile>;
     listChildren(input: {
         parentId: string;
         pageToken?: string;
         pageSize: number;
-    }): Promise<{
+    }, context?: StorageOperationContext): Promise<{
         files: StoredFile[];
         nextPageToken?: string;
     }>;
-    readText(fileId: string): Promise<{
+    readText(fileId: string, context?: StorageOperationContext): Promise<{
         file: StoredFile;
         text: string;
         checksum: string;
     }>;
-    readBytes(fileId: string): Promise<{
+    readBytes(fileId: string, context?: StorageOperationContext): Promise<{
         file: StoredFile;
         bytes: Uint8Array;
         checksum: string;
@@ -33,33 +33,34 @@ export declare class RootBoundaryStorage implements StoragePort {
     createFolder(input: {
         parentId: string;
         name: string;
-    }): Promise<StoredFile>;
+    }, context?: StorageOperationContext): Promise<StoredFile>;
     createText(input: {
         parentId: string;
         name: string;
         mimeType: string;
         text: string;
-    }): Promise<StoredFile>;
+    }, context?: StorageOperationContext): Promise<StoredFile>;
     createBytes(input: {
         parentId: string;
         name: string;
         mimeType: string;
         bytes: Uint8Array;
-    }): Promise<StoredFile>;
+    }, context?: StorageOperationContext): Promise<StoredFile>;
     updateText(input: {
         fileId: string;
         expectedVersion: string;
         mimeType: string;
         text: string;
-    }): Promise<StoredFile>;
+    }, context?: StorageOperationContext): Promise<StoredFile>;
     move(input: {
         fileId: string;
         fromParentId: string;
         toParentId: string;
+        expectedVersion: string;
         newName?: string;
-    }): Promise<StoredFile>;
-    trash(fileId: string): Promise<StoredFile>;
-    listRevisions(fileId: string): Promise<Array<{
+    }, context?: StorageOperationContext): Promise<StoredFile>;
+    trash(fileId: string, context?: StorageOperationContext): Promise<StoredFile>;
+    listRevisions(fileId: string, context?: StorageOperationContext): Promise<Array<{
         id: string;
         modifiedTime: string;
     }>>;

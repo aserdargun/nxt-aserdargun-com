@@ -1,5 +1,5 @@
 import { ApiResponseError } from "../http/api-response.js";
-import { type StoragePort, type StoredFile } from "../storage/storage-port.js";
+import { type StorageOperationContext, type StoragePort, type StoredFile } from "../storage/storage-port.js";
 export interface RuntimeSchema<T> {
     parse(value: unknown): T;
 }
@@ -18,13 +18,14 @@ export declare class SystemFileStore<T> {
         name: string;
         schema: RuntimeSchema<T>;
     });
-    read(): Promise<SystemFileSnapshot<T>>;
-    update(value: T, expectedVersion?: string): Promise<SystemFileSnapshot<T>>;
+    read(context?: StorageOperationContext): Promise<SystemFileSnapshot<T>>;
+    update(value: T, expectedVersion?: string, context?: StorageOperationContext): Promise<SystemFileSnapshot<T>>;
     compareAndSet(transform: (current: T) => T, options?: {
         attempts?: number;
+        context?: StorageOperationContext;
     }): Promise<SystemFileSnapshot<T>>;
     private assertPinnedFile;
     private assertChecksum;
 }
-export declare const preserveApiError: (error: unknown, fallback: ConstructorParameters<typeof ApiResponseError>[0]) => ApiResponseError;
+export declare const preserveApiError: (error: unknown, fallback: ConstructorParameters<typeof ApiResponseError>[0]) => Error;
 //# sourceMappingURL=system-file-store.d.ts.map

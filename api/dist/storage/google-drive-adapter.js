@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { setTimeout as sleepTimer } from "node:timers/promises";
-import { StorageMutationOutcomeUnknownError, StorageVersionConflictError } from "./storage-port.js";
+import { StorageMutationOutcomeUnknownError, StorageOperationBudgetExceededError, StorageVersionConflictError } from "./storage-port.js";
 const FILE_FIELDS = "id,name,mimeType,parents,version,modifiedTime,size,trashed,md5Checksum";
 const LIST_FIELDS = `nextPageToken,files(${FILE_FIELDS})`;
 const REVISION_FIELDS = "nextPageToken,revisions(id,modifiedTime)";
@@ -26,16 +26,16 @@ export class GoogleDriveAdapter {
             assertFileId(options.rootId);
         this.rootId = options.rootId;
     }
-    async get(fileId) {
+    async get(fileId, context) {
         assertFileId(fileId);
         try {
-            return toStoredFile(await this.readMetadata(fileId), this.rootId);
+            return toStoredFile(await this.readMetadata(fileId, context), this.rootId);
         }
         catch (error) {
             throw preserveSafeError(error, "Google Drive read failed.");
         }
     }
-    async listChildren(input) {
+    async listChildren(input, context) {
         assertFileId(input.parentId);
         assertPageSize(input.pageSize);
         try {
@@ -47,7 +47,7 @@ export class GoogleDriveAdapter {
                     ? {}
                     : { pageToken: input.pageToken }),
                 fields: LIST_FIELDS
-            }));
+            }), context);
             const data = requireRecord(response.data);
             const rawFiles = data.files === undefined ? [] : requireArray(data.files);
             const files = rawFiles.map((file) => toStoredFile(file, this.rootId));
@@ -62,8 +62,8 @@ export class GoogleDriveAdapter {
             throw preserveSafeError(error, "Google Drive read failed.");
         }
     }
-    async readText(fileId) {
-        const result = await this.readBytes(fileId);
+    async readText(fileId, context) {
+        const result = await this.readBytes(fileId, context);
         try {
             return {
                 file: result.file,
@@ -75,13 +75,13 @@ export class GoogleDriveAdapter {
             throw new DriveContractError("Google Drive text content is not valid UTF-8.");
         }
     }
-    async readBytes(fileId) {
+    async readBytes(fileId, context) {
         assertFileId(fileId);
         try {
-            const metadata = await this.readMetadata(fileId);
+            const metadata = await this.readMetadata(fileId, context);
             const file = toStoredFile(metadata, this.rootId);
             assertReadableContent(file);
-            const response = await this.readWithRetry(() => this.client.files.get({ fileId, alt: "media" }, { responseType: "arraybuffer" }));
+            const response = await this.readWithRetry(() => this.client.files.get({ fileId, alt: "media" }, { responseType: "arraybuffer" }), context);
             const bytes = toBytes(response.data);
             const expectedChecksum = requireNonEmptyString(requireRecord(metadata).md5Checksum);
             if (md5(bytes) !== expectedChecksum) {
@@ -93,31 +93,35 @@ export class GoogleDriveAdapter {
             throw preserveSafeError(error, "Google Drive read failed.");
         }
     }
-    async createFolder(input) {
+    async createFolder(input, context) {
         return this.create({
             parentId: input.parentId,
             name: input.name,
             mimeType: FOLDER_MIME_TYPE
-        });
+        }, context);
     }
-    async createText(input) {
+    async createText(input, context) {
         const bytes = new TextEncoder().encode(input.text);
-        return this.create({ ...input, body: input.text, checksum: md5(bytes) });
+        return this.create({ ...input, body: input.text, checksum: md5(bytes) }, context);
     }
-    async createBytes(input) {
+    async createBytes(input, context) {
         return this.create({
             ...input,
             body: input.bytes,
             checksum: md5(input.bytes)
-        });
+        }, context);
     }
-    async updateText(input) {
+    async updateText(input, context) {
         assertFileId(input.fileId);
         assertMimeType(input.mimeType);
-        assertVersion(input.expectedVersion);
+        if (input.expectedVersion !== undefined)
+            assertVersion(input.expectedVersion);
         let before;
+        let etag;
         try {
-            before = toStoredFile(await this.readMetadata(input.fileId), this.rootId);
+            const snapshot = await this.readMetadataSnapshot(input.fileId, context);
+            before = toStoredFile(snapshot.data, this.rootId);
+            etag = responseEtag(snapshot.headers);
         }
         catch (error) {
             throw preserveSafeError(error, "Google Drive read failed.");
@@ -128,20 +132,23 @@ export class GoogleDriveAdapter {
             throw new StorageVersionConflictError();
         const bytes = new TextEncoder().encode(input.text);
         let response;
+        context?.operationBudget?.consume();
         try {
             response = await this.client.files.update({
                 fileId: input.fileId,
                 requestBody: { mimeType: input.mimeType },
                 media: { mimeType: input.mimeType, body: input.text },
                 fields: "id"
-            });
+            }, { headers: { "If-Match": etag } });
         }
-        catch {
+        catch (error) {
+            if (errorStatus(error) === 412)
+                throw new StorageVersionConflictError();
             throw new StorageMutationOutcomeUnknownError(input.fileId, "Google Drive write outcome is unknown.");
         }
         try {
             assertWriteResponseId(response.data, input.fileId, "Google Drive upload verification failed.");
-            const after = await this.verifyUpload(input.fileId, md5(bytes), before.version);
+            const after = await this.verifyUpload(input.fileId, md5(bytes), before.version, context);
             if (!matchesActiveSnapshot(after, before, input.mimeType)) {
                 throw new DriveContractError("Google Drive upload verification failed.");
             }
@@ -151,20 +158,27 @@ export class GoogleDriveAdapter {
             throw mutationOutcomeUnknown(error, input.fileId, "Google Drive upload verification failed.");
         }
     }
-    async move(input) {
+    async move(input, context) {
         assertFileId(input.fileId);
         assertFileId(input.fromParentId);
         assertFileId(input.toParentId);
+        if (input.expectedVersion !== undefined)
+            assertVersion(input.expectedVersion);
         if (input.newName !== undefined)
             assertName(input.newName);
         let before;
+        let etag;
         try {
-            before = toStoredFile(await this.readMetadata(input.fileId), this.rootId);
+            const snapshot = await this.readMetadataSnapshot(input.fileId, context);
+            before = toStoredFile(snapshot.data, this.rootId);
+            etag = responseEtag(snapshot.headers);
         }
         catch (error) {
             throw preserveSafeError(error, "Google Drive read failed.");
         }
         assertActiveNonShortcut(before);
+        if (input.expectedVersion !== undefined && before.version !== input.expectedVersion)
+            throw new StorageVersionConflictError();
         if (before.parentIds.length !== 1 ||
             before.parentIds[0] !== input.fromParentId) {
             throw new DriveContractError("Google Drive ancestry does not match the requested move.");
@@ -187,15 +201,18 @@ export class GoogleDriveAdapter {
             fields: "id"
         };
         let response;
+        context?.operationBudget?.consume();
         try {
-            response = await this.client.files.update(request);
+            response = await this.client.files.update(request, { headers: { "If-Match": etag } });
         }
-        catch {
+        catch (error) {
+            if (errorStatus(error) === 412)
+                throw new StorageVersionConflictError();
             throw new StorageMutationOutcomeUnknownError(input.fileId, "Google Drive move outcome is unknown.");
         }
         try {
             assertWriteResponseId(response.data, input.fileId, "Google Drive move verification failed.");
-            const after = await this.readBackAfterWrite(input.fileId);
+            const after = await this.readBackAfterWrite(input.fileId, context);
             if (after.id !== before.id ||
                 after.name !== (input.newName ?? before.name) ||
                 after.mimeType !== before.mimeType ||
@@ -211,13 +228,13 @@ export class GoogleDriveAdapter {
             throw mutationOutcomeUnknown(error, input.fileId, "Google Drive move verification failed.");
         }
     }
-    async trash(fileId) {
+    async trash(fileId, context) {
         assertFileId(fileId);
         if (fileId === this.rootId)
             throw new DriveContractError("cannot trash configured root");
         let before;
         try {
-            before = toStoredFile(await this.readMetadata(fileId), this.rootId);
+            before = toStoredFile(await this.readMetadata(fileId, context), this.rootId);
         }
         catch (error) {
             throw preserveSafeError(error, "Google Drive read failed.");
@@ -225,6 +242,7 @@ export class GoogleDriveAdapter {
         assertActiveNonShortcut(before);
         assertSingleParent(before, "Google Drive Trash verification failed.");
         let response;
+        context?.operationBudget?.consume();
         try {
             response = await this.client.files.update({
                 fileId,
@@ -237,7 +255,7 @@ export class GoogleDriveAdapter {
         }
         try {
             assertWriteResponseId(response.data, fileId, "Google Drive Trash verification failed.");
-            const file = await this.readBackAfterWrite(fileId);
+            const file = await this.readBackAfterWrite(fileId, context);
             if (file.id !== before.id ||
                 file.name !== before.name ||
                 file.mimeType !== before.mimeType ||
@@ -252,7 +270,7 @@ export class GoogleDriveAdapter {
             throw mutationOutcomeUnknown(error, fileId, "Google Drive Trash verification failed.");
         }
     }
-    async listRevisions(fileId) {
+    async listRevisions(fileId, context) {
         assertFileId(fileId);
         const revisions = [];
         const seenTokens = new Set();
@@ -264,7 +282,7 @@ export class GoogleDriveAdapter {
                     pageSize: 100,
                     fields: REVISION_FIELDS,
                     ...(pageToken === undefined ? {} : { pageToken })
-                }));
+                }), context);
                 const data = requireRecord(response.data);
                 for (const rawRevision of data.revisions === undefined
                     ? []
@@ -289,7 +307,7 @@ export class GoogleDriveAdapter {
             throw preserveSafeError(error, "Google Drive read failed.");
         }
     }
-    async create(input) {
+    async create(input, context) {
         assertFileId(input.parentId);
         assertName(input.name);
         assertMimeType(input.mimeType);
@@ -305,6 +323,7 @@ export class GoogleDriveAdapter {
             fields: "id"
         };
         let response;
+        context?.operationBudget?.consume();
         try {
             response = await this.client.files.create(request);
         }
@@ -315,8 +334,8 @@ export class GoogleDriveAdapter {
         try {
             createdId = requireFileIdFromWrite(response.data);
             const created = input.checksum === undefined
-                ? await this.readBackAfterWrite(createdId)
-                : await this.verifyUpload(createdId, input.checksum);
+                ? await this.readBackAfterWrite(createdId, context)
+                : await this.verifyUpload(createdId, input.checksum, undefined, context);
             if (created.id !== createdId ||
                 created.name !== input.name ||
                 created.mimeType !== input.mimeType ||
@@ -331,8 +350,8 @@ export class GoogleDriveAdapter {
             throw mutationOutcomeUnknown(error, createdId, input.checksum === undefined ? "Google Drive create verification failed." : "Google Drive upload verification failed.");
         }
     }
-    async verifyUpload(fileId, expectedChecksum, previousVersion) {
-        const metadata = await this.readMetadataAfterWrite(fileId);
+    async verifyUpload(fileId, expectedChecksum, previousVersion, context) {
+        const metadata = await this.readMetadataAfterWrite(fileId, context);
         const file = toStoredFile(metadata, this.rootId);
         const checksum = requireRecord(metadata).md5Checksum;
         if (checksum !== expectedChecksum)
@@ -343,26 +362,32 @@ export class GoogleDriveAdapter {
         }
         return file;
     }
-    async readBackAfterWrite(fileId) {
-        return toStoredFile(await this.readMetadataAfterWrite(fileId), this.rootId);
+    async readBackAfterWrite(fileId, context) {
+        return toStoredFile(await this.readMetadataAfterWrite(fileId, context), this.rootId);
     }
-    async readMetadataAfterWrite(fileId) {
+    async readMetadataAfterWrite(fileId, context) {
         try {
-            return await this.readMetadata(fileId);
+            return await this.readMetadata(fileId, context);
         }
-        catch {
+        catch (error) {
+            if (error instanceof StorageOperationBudgetExceededError)
+                throw error;
             throw new DriveContractError("Google Drive write readback failed.");
         }
     }
-    async readMetadata(fileId) {
-        assertFileId(fileId);
-        const response = await this.readWithRetry(() => this.client.files.get({ fileId, fields: FILE_FIELDS }));
-        return response.data;
+    async readMetadata(fileId, context) {
+        return (await this.readMetadataSnapshot(fileId, context)).data;
     }
-    async readWithRetry(operation) {
+    async readMetadataSnapshot(fileId, context) {
+        assertFileId(fileId);
+        const response = await this.readWithRetry(() => this.client.files.get({ fileId, fields: FILE_FIELDS }), context);
+        return response;
+    }
+    async readWithRetry(operation, context) {
         let lastError;
         for (let attempt = 0; attempt < MAX_READ_ATTEMPTS; attempt += 1) {
             try {
+                context?.operationBudget?.consume();
                 return await operation();
             }
             catch (error) {
@@ -478,6 +503,22 @@ const requireNonEmptyString = (value) => {
         throw new DriveContractError("Google Drive response is invalid.");
     return value;
 };
+const responseEtag = (headers) => {
+    const record = requireRecord(headers);
+    let etag = record.etag ?? record.ETag;
+    if (typeof etag !== "string" && typeof record.get === "function") {
+        try {
+            etag = record.get("etag");
+        }
+        catch {
+            etag = undefined;
+        }
+    }
+    if (typeof etag !== "string" || etag.length < 3 || etag.length > 512 || /[\r\n\0]/u.test(etag)) {
+        throw new DriveContractError("Google Drive version precondition is unavailable.");
+    }
+    return etag;
+};
 const optionalString = (value) => {
     if (value === undefined || value === null || value === "")
         return undefined;
@@ -557,7 +598,7 @@ const toBytes = (value) => {
 };
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const md5 = (bytes) => createHash("md5").update(bytes).digest("hex");
-const preserveSafeError = (error, fallback) => error instanceof DriveContractError
+const preserveSafeError = (error, fallback) => error instanceof DriveContractError || error instanceof StorageOperationBudgetExceededError
     ? error
     : new DriveContractError(fallback);
 const mutationOutcomeUnknown = (error, fileId, fallback) => new StorageMutationOutcomeUnknownError(fileId, error instanceof DriveContractError ? error.message : fallback);
