@@ -52,6 +52,8 @@ const ACTIVE_NOTE = {
 } as const;
 
 const MOBILE_MEDIA_QUERY = "(max-width: 767px)";
+// The 23% explorer track first fits the measured 93.1875px brand plus 4 × 44px targets at 1171px.
+const WIDE_DESKTOP_MEDIA_QUERY = "(min-width: 1171px)";
 
 const mobileViewportSnapshot = (): boolean =>
   typeof window !== "undefined" &&
@@ -67,6 +69,25 @@ const subscribeToMobileViewport = (onChange: () => void): (() => void) => {
 
 const useMobileViewport = (): boolean =>
   useSyncExternalStore(subscribeToMobileViewport, mobileViewportSnapshot, () => false);
+
+const wideDesktopViewportSnapshot = (): boolean =>
+  typeof window === "undefined" || typeof window.matchMedia !== "function"
+    ? true
+    : window.matchMedia(WIDE_DESKTOP_MEDIA_QUERY).matches;
+
+const subscribeToWideDesktopViewport = (onChange: () => void): (() => void) => {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return () => {};
+  const query = window.matchMedia(WIDE_DESKTOP_MEDIA_QUERY);
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
+};
+
+const useWideDesktopViewport = (): boolean =>
+  useSyncExternalStore(
+    subscribeToWideDesktopViewport,
+    wideDesktopViewportSnapshot,
+    () => true
+  );
 
 interface DestinationNavigationProps {
   readonly label: "Desktop destinations" | "Mobile destinations";
@@ -124,19 +145,23 @@ const ActiveNotePath = ({
 
 const ShellHeader = ({
   activeDestination,
-  onSelect
+  onSelect,
+  showDesktopDestinations
 }: {
   readonly activeDestination: Destination;
   readonly onSelect: (destination: Destination) => void;
+  readonly showDesktopDestinations: boolean;
 }): React.JSX.Element => (
   <header className="shell-header">
     <div className="shell-header-explorer">
       <span className="brand shell-brand">NXT</span>
-      <DestinationNavigation
-        label="Desktop destinations"
-        activeDestination={activeDestination}
-        onSelect={onSelect}
-      />
+      {showDesktopDestinations ? (
+        <DestinationNavigation
+          label="Desktop destinations"
+          activeDestination={activeDestination}
+          onSelect={onSelect}
+        />
+      ) : null}
     </div>
     <span className="mobile-title">{ACTIVE_NOTE.title}</span>
     <button className="mobile-more touch-target" type="button" aria-label="Info" onClick={() => onSelect("info")}>
@@ -255,6 +280,7 @@ const InfoRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Element
 export const OwnerShell = (): React.JSX.Element => {
   const [activeDestination, setActiveDestination] = useState<Destination>("editor");
   const isMobileViewport = useMobileViewport();
+  const isWideDesktopViewport = useWideDesktopViewport();
   const isHidden = (destination: Destination): boolean =>
     isMobileViewport && activeDestination !== destination;
 
@@ -264,7 +290,11 @@ export const OwnerShell = (): React.JSX.Element => {
       data-testid="owner-shell"
       data-mobile-destination={activeDestination}
     >
-      <ShellHeader activeDestination={activeDestination} onSelect={setActiveDestination} />
+      <ShellHeader
+        activeDestination={activeDestination}
+        onSelect={setActiveDestination}
+        showDesktopDestinations={!isMobileViewport && isWideDesktopViewport}
+      />
       <main className="workspace" aria-label="NXT workspace">
         <ExplorerRegion hidden={isHidden("files")} />
         <EditorRegion hidden={isHidden("editor")} />

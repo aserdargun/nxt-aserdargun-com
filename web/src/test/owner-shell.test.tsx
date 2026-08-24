@@ -107,6 +107,31 @@ const useMobileViewport = (matches: boolean): void => {
   );
 };
 
+const useViewportWidth = (width: number): void => {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string): MediaQueryList => {
+      const constraints = Array.from(
+        query.matchAll(/\((min|max)-width:\s*(\d+)px\)/gu),
+        ([, boundary, value]) => ({ boundary, value: Number(value) })
+      );
+      const matches = constraints.every(({ boundary, value }) =>
+        boundary === "min" ? width >= value : width <= value
+      );
+      return {
+        matches,
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(() => true)
+      };
+    })
+  );
+};
+
 const readTree = async (directory: string): Promise<string> => {
   const entries = await readdir(directory, { withFileTypes: true });
   const sources = await Promise.all(
@@ -195,6 +220,40 @@ describe("responsive owner shell", () => {
       expect(screen.getByRole("region", { name })).toBeVisible();
     }
   });
+
+  it.each([768, 1024, 1156, 1157, 1170])(
+    "omits redundant focusable header destinations at %ipx while preserving the desktop shell",
+    (width) => {
+      useViewportWidth(width);
+      render(<OwnerShell />);
+
+      const header = screen.getByRole("banner");
+      expect(
+        within(header).queryByRole("navigation", { name: "Desktop destinations" })
+      ).not.toBeInTheDocument();
+      for (const name of ["Files", "Editor", "Preview"] as const) {
+        expect(screen.getByRole("region", { name })).toBeVisible();
+      }
+      expect(within(header).getByRole("button", { name: "Add attachment" })).toBeVisible();
+      expect(within(header).getByRole("button", { name: "Publish" })).toBeVisible();
+      expect(within(header).getByLabelText("Save status")).toBeVisible();
+    }
+  );
+
+  it.each([1171, 1505])(
+    "retains the accepted large-desktop destination controls at %ipx",
+    (width) => {
+      useViewportWidth(width);
+      render(<OwnerShell />);
+
+      const desktop = within(screen.getByRole("banner")).getByRole("navigation", {
+        name: "Desktop destinations"
+      });
+      for (const name of DESTINATIONS) {
+        expect(within(desktop).getByRole("button", { name })).toBeVisible();
+      }
+    }
+  );
 
   it("exposes the complete active note path from the same visible value", () => {
     render(<OwnerShell />);
