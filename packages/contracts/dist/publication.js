@@ -71,14 +71,6 @@ export const PublicationEntrySchema = z.object({
     if (!ids.has(value.activeRevisionId))
         context.addIssue({ code: "custom", path: ["activeRevisionId"], message: "active revision is missing" });
 });
-export const PublicationTombstoneSchema = z.object({
-    publicId: PublicIdSchema,
-    sourceNoteId: NoteIdSchema,
-    epoch: EpochSchema,
-    publicFolderId: DriveIdSchema,
-    publicFolderVersion: VersionSchema,
-    revokedAt: TimestampSchema
-}).strict();
 export const PublicationOperationSchema = z.object({
     operationId: PublicIdSchema,
     publicId: PublicIdSchema,
@@ -93,7 +85,8 @@ export const PublicationOperationSchema = z.object({
     revisionFolderId: DriveIdSchema.nullable().default(null),
     revisionFolderVersion: VersionSchema.nullable().default(null),
     revisionId: z.string().regex(/^[A-Za-z0-9_-]{3,64}$/u).nullable().default(null),
-    revisionMarker: MarkerSchema.nullable().default(null)
+    revisionMarker: MarkerSchema.nullable().default(null),
+    cleanupSlots: z.number().int().min(1).max(2).default(2)
 }).strict();
 export const PublicationCleanupSchema = z.object({
     cleanupId: PublicIdSchema,
@@ -102,7 +95,36 @@ export const PublicationCleanupSchema = z.object({
     expectedVersion: VersionSchema,
     marker: MarkerSchema,
     kind: z.enum(["public-root", "revision"]),
-    queuedAt: TimestampSchema
+    queuedAt: TimestampSchema,
+    ownershipVersion: z.literal(1).nullable().default(null),
+    parentFolderId: DriveIdSchema.nullable().default(null),
+    folderName: z.string().regex(/^[A-Za-z0-9_-]{3,64}$/u).nullable().default(null),
+    operationId: PublicIdSchema.nullable().default(null)
+}).strict().superRefine((value, context) => {
+    if (value.ownershipVersion === null) {
+        if (value.parentFolderId !== null || value.folderName !== null || value.operationId !== null) {
+            context.addIssue({ code: "custom", path: ["ownershipVersion"], message: "legacy cleanup ownership must be wholly absent" });
+        }
+        return;
+    }
+    if (value.parentFolderId === null || value.folderName === null) {
+        context.addIssue({ code: "custom", path: ["parentFolderId"], message: "cleanup ownership must bind its exact parent and name" });
+    }
+    if (value.kind === "public-root" && value.operationId !== null) {
+        context.addIssue({ code: "custom", path: ["operationId"], message: "public root cleanup cannot carry a revision operation" });
+    }
+    if (value.kind === "revision" && value.operationId === null) {
+        context.addIssue({ code: "custom", path: ["operationId"], message: "revision cleanup must bind its operation" });
+    }
+});
+export const PublicationTombstoneSchema = z.object({
+    publicId: PublicIdSchema,
+    sourceNoteId: NoteIdSchema,
+    epoch: EpochSchema,
+    publicFolderId: DriveIdSchema,
+    publicFolderVersion: VersionSchema,
+    revokedAt: TimestampSchema,
+    cleanup: z.array(PublicationCleanupSchema).max(32).default([])
 }).strict();
 export const PublicationManifestSchema = z.object({
     schemaVersion: z.literal(1),
@@ -110,7 +132,8 @@ export const PublicationManifestSchema = z.object({
     entries: z.array(PublicationEntrySchema).max(10_000),
     tombstones: z.array(PublicationTombstoneSchema).max(10_000).default([]),
     operations: z.array(PublicationOperationSchema).max(64).default([]),
-    cleanup: z.array(PublicationCleanupSchema).max(64).default([])
+    cleanup: z.array(PublicationCleanupSchema).max(64).default([]),
+    cleanupOffset: z.number().int().nonnegative().max(320_064).default(0)
 }).strict().superRefine((value, context) => {
     const publicIds = new Set();
     const noteIds = new Set();
@@ -128,7 +151,21 @@ export const PublicationManifestSchema = z.object({
     });
     if (new Set(value.operations.map((operation) => operation.operationId)).size !== value.operations.length)
         context.addIssue({ code: "custom", path: ["operations"], message: "operationId must be unique" });
-    if (new Set(value.cleanup.map((cleanup) => cleanup.cleanupId)).size !== value.cleanup.length)
-        context.addIssue({ code: "custom", path: ["cleanup"], message: "cleanupId must be unique" });
+    const cleanup = [...value.cleanup, ...value.tombstones.flatMap((tombstone) => tombstone.cleanup)];
+    if (new Set(cleanup.map((record) => record.cleanupId)).size !== cleanup.length)
+        context.addIssue({ code: "custom", path: ["cleanup"], message: "cleanupId must be globally unique" });
+    if (value.cleanup.length + value.operations.reduce((total, operation) => total + operation.cleanupSlots, 0) > 64) {
+        context.addIssue({ code: "custom", path: ["operations"], message: "cleanup ownership capacity is exhausted" });
+    }
+    value.tombstones.forEach((tombstone, tombstoneIndex) => tombstone.cleanup.forEach((record, cleanupIndex) => {
+        if (record.publicId !== tombstone.publicId || record.kind !== "revision" || record.ownershipVersion !== 1 ||
+            record.parentFolderId !== tombstone.publicFolderId || record.operationId === null) {
+            context.addIssue({
+                code: "custom",
+                path: ["tombstones", tombstoneIndex, "cleanup", cleanupIndex],
+                message: "tombstone cleanup must exactly own one of its revisions"
+            });
+        }
+    }));
 });
 //# sourceMappingURL=publication.js.map

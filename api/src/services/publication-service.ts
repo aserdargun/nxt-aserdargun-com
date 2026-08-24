@@ -43,6 +43,7 @@ const SHORTCUT_MIME_TYPE = "application/vnd.google-apps.shortcut";
 const JSON_MIME_TYPE = "application/json";
 const MAX_MANIFEST_OPERATIONS = 64;
 const MAX_CLEANUP_RECORDS = 64;
+const MAX_TOMBSTONE_CLEANUP_RECORDS = 32;
 const MAX_CLEANUPS_PER_REQUEST = 4;
 const MAX_CHILDREN_PER_FOLDER = 100;
 const MAX_REVISION_COLLISIONS = 16;
@@ -59,6 +60,12 @@ type ManifestCleanup = PublicationManifest["cleanup"][number];
 type ManifestEntry = PublicationManifest["entries"][number];
 type ManifestTombstone = PublicationManifest["tombstones"][number];
 type IndexedAsset = { noteId: string; attachment: VaultAttachment };
+type CleanupArtifact = Omit<ManifestCleanup, "cleanupId" | "queuedAt">;
+
+interface PublicationCausality {
+  generation: number;
+  identity: string;
+}
 
 export interface PublicationResult {
   publicId: string;
@@ -124,11 +131,14 @@ export class PublicationService {
     this.assertNoteId(input.noteId);
     this.assertVersion(input.expectedVersion);
     const context = this.context();
+    const initialCausality = await this.observePublicationCausality(input.noteId, context);
     await this.processCleanup(context);
+    const causality = await this.observePublicationCausality(input.noteId, context);
+    if (initialCausality.identity !== causality.identity) throw new ApiResponseError("CONFLICT");
     const source = await this.options.vault.getNote(input.noteId).catch((error) => { throw preserveApiError(error, "DRIVE_UNAVAILABLE"); });
     this.assertExpectedSource(source, input.expectedVersion);
-    const operation = await this.reservePublish(source, context);
-    let orphan: { folderId: string; version: string; marker: string; kind: "revision" } | undefined;
+    const operation = await this.reservePublish(source, causality, context);
+    const orphans: CleanupArtifact[] = [];
     try {
       const manifest = await this.options.manifestStore.read(context);
       const reserved = manifest.value.operations.find((candidate) => candidate.operationId === operation.operationId);
@@ -147,6 +157,9 @@ export class PublicationService {
       });
       const publishedRoot = await this.verifyPublishedRoot(context);
       const publicFolder = await this.ensurePublicFolder(operation, publishedRoot, context);
+      if (operation.cleanupSlots === 2) {
+        orphans.push(publicRootCleanupArtifact(operation.publicId, publicFolder.file, publishedRoot.id));
+      }
       let activeOperation = await this.persistOperationFolder(operation, publicFolder.file, context);
       const revisionId = activeOperation.revisionId ?? await this.chooseRevisionId(publicFolder.file.id, source.version, context);
       const revisionMarker = activeOperation.revisionMarker ?? publicationMarker(activeOperation.operationId, "revision");
@@ -160,7 +173,7 @@ export class PublicationService {
         operationId: activeOperation.operationId,
         context
       });
-      orphan = { folderId: revisionFolder.file.id, version: revisionFolder.file.version, marker: revisionMarker, kind: "revision" };
+      orphans.push(revisionCleanupArtifact(activeOperation.publicId, activeOperation.operationId, revisionId, revisionMarker, revisionFolder.file, publicFolder.file.id));
       activeOperation = await this.persistOperationRevisionFolder(activeOperation, revisionFolder.file, context);
       const snapshot = await this.writeSnapshot({
         operation: activeOperation,
@@ -174,10 +187,9 @@ export class PublicationService {
       });
       await this.assertSourceStillCurrent(source);
       const result = await this.commitPublication(activeOperation, snapshot, context);
-      orphan = undefined;
       return result;
     } catch (error) {
-      await this.abandonOperation(operation.operationId, operation.publicId, orphan).catch(() => undefined);
+      await this.abandonOperation(operation.operationId, operation.publicId, orphans).catch(() => undefined);
       throw toPrivateApiError(error);
     }
   }
@@ -187,7 +199,10 @@ export class PublicationService {
     const context = this.context();
     await this.processCleanup(context);
     const now = this.now().toISOString();
-    const cleanupCandidates = Array.from({ length: MAX_RANDOM_ID_COLLISIONS }, () => this.id());
+    const cleanupCandidates = Array.from(
+      { length: MAX_TOMBSTONE_CLEANUP_RECORDS * MAX_RANDOM_ID_COLLISIONS },
+      () => this.id()
+    );
     try {
       await this.options.manifestStore.compareAndSet((manifest) => {
         const entry = manifest.entries.find((candidate) => candidate.publicId === input.publicId);
@@ -195,35 +210,36 @@ export class PublicationService {
           if (manifest.tombstones.some((candidate) => candidate.publicId === input.publicId)) return manifest;
           throw new ApiResponseError("NOT_FOUND");
         }
-        const active = activeRevision(entry);
         const relatedOperations = manifest.operations.filter((operation) => operation.publicId === input.publicId);
         const usedIds = manifestIdentifierSet(manifest);
-        const cleanupId = cleanupCandidates.find((candidate) => !usedIds.has(candidate));
-        if (cleanupId === undefined) throw new ApiResponseError("CONFLICT");
+        const cleanupIds = takeUniqueIdentifiers(cleanupCandidates, entry.revisions.length, usedIds);
+        if (cleanupIds.length !== entry.revisions.length) throw new ApiResponseError("CONFLICT");
         const epoch = Math.max(entry.epoch, ...relatedOperations.map((operation) => operation.epoch)) + 1;
+        const cleanup = entry.revisions.map((revision, index) => revisionCleanupRecord({
+          cleanupId: cleanupIds[index] as string,
+          publicId: entry.publicId,
+          operationId: revision.operationId,
+          revisionId: revision.revisionId,
+          folderId: revision.snapshotFolderId,
+          folderVersion: revision.snapshotFolderVersion,
+          marker: revision.snapshotMarker,
+          publicFolderId: entry.publicFolderId,
+          queuedAt: now
+        }));
         const tombstone: ManifestTombstone = {
           publicId: entry.publicId,
           sourceNoteId: entry.sourceNoteId,
           epoch,
           publicFolderId: entry.publicFolderId,
           publicFolderVersion: entry.publicFolderVersion,
-          revokedAt: now
+          revokedAt: now,
+          cleanup
         };
-        const cleanup: ManifestCleanup = {
-          cleanupId,
-          publicId: entry.publicId,
-          folderId: active.snapshotFolderId,
-          expectedVersion: active.snapshotFolderVersion,
-          marker: active.snapshotMarker,
-          kind: "revision",
-          queuedAt: now
-        };
-        const queued = [...manifest.cleanup, cleanup, ...relatedOperations.flatMap((operation) => cleanupForOperation(operation, now, operation.operationId))];
         return bumpManifest(manifest, {
           entries: manifest.entries.filter((candidate) => candidate.publicId !== input.publicId),
           tombstones: [...manifest.tombstones.filter((candidate) => candidate.publicId !== input.publicId && candidate.sourceNoteId !== entry.sourceNoteId), tombstone],
-          operations: manifest.operations.filter((operation) => operation.publicId !== input.publicId),
-          cleanup: boundedCleanup(queued)
+          operations: manifest.operations,
+          cleanup: manifest.cleanup
         });
       }, { context });
     } catch (error) {
@@ -238,17 +254,30 @@ export class PublicationService {
     return { revoked: true };
   }
 
-  private async reservePublish(source: VaultNoteResult, context: StorageOperationContext): Promise<ManifestOperation> {
+  private async observePublicationCausality(noteId: string, context: StorageOperationContext): Promise<PublicationCausality> {
+    const snapshot = await this.options.manifestStore.read(context);
+    return publicationCausality(snapshot.value, noteId);
+  }
+
+  private async reservePublish(
+    source: VaultNoteResult,
+    causality: PublicationCausality,
+    context: StorageOperationContext
+  ): Promise<ManifestOperation> {
     const candidateIds = Array.from({ length: MAX_RANDOM_ID_COLLISIONS * 3 }, () => this.id());
     const startedAt = this.now().toISOString();
     let operationId: string | undefined;
     let proposed: ManifestOperation | undefined;
     try {
       const committed = await this.options.manifestStore.compareAndSet((manifest) => {
+        if (!samePublicationCausality(publicationCausality(manifest, source.note.frontmatter.id), causality)) {
+          throw new ApiResponseError("CONFLICT");
+        }
         const stale = manifest.operations.find((operation) => operation.sourceNoteId === source.note.frontmatter.id);
         if (stale !== undefined && !operationCanBeRecovered(stale, startedAt)) throw new ApiResponseError("CONFLICT");
         const active = manifest.entries.find((entry) => entry.sourceNoteId === source.note.frontmatter.id);
         const tombstone = manifest.tombstones.find((entry) => entry.sourceNoteId === source.note.frontmatter.id);
+        if (tombstone !== undefined && tombstone.cleanup.length !== 0) throw new ApiResponseError("CONFLICT");
         const previous = active ?? tombstone;
         const usedIds = manifestIdentifierSet(manifest);
         operationId = candidateIds.find((candidate) => !usedIds.has(candidate));
@@ -264,10 +293,12 @@ export class PublicationService {
         if (staleNeedsCleanup && cleanupId === undefined) throw new ApiResponseError("CONFLICT");
         const staleCleanup = stale === undefined || cleanupId === undefined ? [] : cleanupForOperation(stale, startedAt, cleanupId);
         const remainingOperations = manifest.operations.filter((operation) => operation.operationId !== stale?.operationId);
+        const cleanupSlots = previous?.publicFolderId !== undefined || stale?.publicFolderId !== null && stale?.publicFolderId !== undefined ? 1 : 2;
         if (
           remainingOperations.length + 1 > MAX_MANIFEST_OPERATIONS ||
           manifest.cleanup.length + staleCleanup.length > MAX_CLEANUP_RECORDS ||
-          remainingOperations.length + 1 + manifest.cleanup.length + staleCleanup.length > MAX_CLEANUP_RECORDS
+          manifest.cleanup.length + staleCleanup.length +
+            remainingOperations.reduce((total, operation) => total + operation.cleanupSlots, 0) + cleanupSlots > MAX_CLEANUP_RECORDS
         ) throw new ApiResponseError("CONFLICT");
         proposed = {
           operationId,
@@ -283,11 +314,12 @@ export class PublicationService {
           revisionFolderId: null,
           revisionFolderVersion: null,
           revisionId: null,
-          revisionMarker: null
+          revisionMarker: null,
+          cleanupSlots
         };
         return bumpManifest(manifest, {
           operations: [...remainingOperations, proposed],
-          cleanup: [...manifest.cleanup, ...staleCleanup]
+          cleanup: boundedCleanup([...manifest.cleanup, ...staleCleanup])
         });
       }, { context });
       if (operationId === undefined) throw new ApiResponseError("CONFLICT");
@@ -633,6 +665,7 @@ export class PublicationService {
   }
 
   private async commitPublication(operation: ManifestOperation, snapshot: SnapshotArtifact, context: StorageOperationContext): Promise<PublicationResult> {
+    const cleanupCandidates = Array.from({ length: MAX_RANDOM_ID_COLLISIONS }, () => this.id());
     try {
       const committed = await this.options.manifestStore.compareAndSet((manifest) => {
         const currentOperation = manifest.operations.find((candidate) => candidate.operationId === operation.operationId);
@@ -641,7 +674,23 @@ export class PublicationService {
         const tombstone = manifest.tombstones.find((entry) => entry.sourceNoteId === operation.sourceNoteId);
         const previous = active ?? tombstone;
         if ((previous?.epoch ?? 0) !== operation.epoch - 1 || (previous !== undefined && previous.publicId !== operation.publicId)) throw new ApiResponseError("CONFLICT");
-        const revisions = [...(active?.revisions ?? []), snapshot.revision].slice(-32);
+        const completeHistory = [...(active?.revisions ?? []), snapshot.revision];
+        const evicted = completeHistory.slice(0, Math.max(0, completeHistory.length - 32));
+        const usedIds = manifestIdentifierSet(manifest);
+        const cleanupIds = takeUniqueIdentifiers(cleanupCandidates, evicted.length, usedIds);
+        if (cleanupIds.length !== evicted.length) throw new ApiResponseError("CONFLICT");
+        const evictionCleanup = evicted.map((revision, index) => revisionCleanupRecord({
+          cleanupId: cleanupIds[index] as string,
+          publicId: operation.publicId,
+          operationId: revision.operationId,
+          revisionId: revision.revisionId,
+          folderId: revision.snapshotFolderId,
+          folderVersion: revision.snapshotFolderVersion,
+          marker: revision.snapshotMarker,
+          publicFolderId: active?.publicFolderId ?? snapshot.publicFolder.id,
+          queuedAt: snapshot.revision.publishedAt
+        }));
+        const revisions = completeHistory.slice(-32);
         const entry: ManifestEntry = {
           publicId: operation.publicId,
           sourceNoteId: operation.sourceNoteId,
@@ -654,7 +703,8 @@ export class PublicationService {
         return bumpManifest(manifest, {
           entries: [...manifest.entries.filter((candidate) => candidate.sourceNoteId !== operation.sourceNoteId && candidate.publicId !== operation.publicId), entry],
           tombstones: manifest.tombstones.filter((candidate) => candidate.sourceNoteId !== operation.sourceNoteId && candidate.publicId !== operation.publicId),
-          operations: manifest.operations.filter((candidate) => candidate.operationId !== operation.operationId)
+          operations: manifest.operations.filter((candidate) => candidate.operationId !== operation.operationId),
+          cleanup: boundedCleanup([...manifest.cleanup, ...evictionCleanup])
         });
       }, { context });
       const entry = committed.value.entries.find((candidate) => candidate.publicId === operation.publicId);
@@ -696,27 +746,46 @@ export class PublicationService {
     return result;
   }
 
-  private async abandonOperation(operationId: string, publicId: string, orphan?: { folderId: string; version: string; marker: string; kind: "revision" }): Promise<void> {
-    const cleanupCandidates = Array.from({ length: MAX_RANDOM_ID_COLLISIONS }, () => this.id());
+  private async abandonOperation(operationId: string, publicId: string, orphans: CleanupArtifact[]): Promise<void> {
+    const cleanupCandidates = Array.from({ length: MAX_RANDOM_ID_COLLISIONS * 2 }, () => this.id());
     const queuedAt = this.now().toISOString();
     await this.options.manifestStore.compareAndSet((manifest) => {
       if (manifest.entries.some((entry) => entry.revisions.some((revision) => revision.operationId === operationId))) return manifest;
       const operation = manifest.operations.find((candidate) => candidate.operationId === operationId);
-      const derived = orphan ?? (operation?.revisionFolderId !== null && operation?.revisionFolderId !== undefined && operation.revisionFolderVersion !== null && operation.revisionMarker !== null
-        ? { folderId: operation.revisionFolderId, version: operation.revisionFolderVersion, marker: operation.revisionMarker, kind: "revision" as const }
-        : undefined);
+      const derived: CleanupArtifact[] = [...orphans];
+      if (
+        operation?.revisionFolderId !== null && operation?.revisionFolderId !== undefined &&
+        operation.revisionFolderVersion !== null && operation.revisionMarker !== null &&
+        operation.revisionId !== null && operation.publicFolderId !== null
+      ) {
+        derived.push(revisionCleanupArtifact(
+          operation.publicId,
+          operation.operationId,
+          operation.revisionId,
+          operation.revisionMarker,
+          { id: operation.revisionFolderId, version: operation.revisionFolderVersion },
+          operation.publicFolderId
+        ));
+      }
+      if (operation?.cleanupSlots === 2 && operation.publicFolderId !== null && operation.publicFolderVersion !== null) {
+        derived.push(publicRootCleanupArtifact(
+          operation.publicId,
+          { id: operation.publicFolderId, version: operation.publicFolderVersion },
+          this.options.publishedRootId
+        ));
+      }
+      const artifacts = [...new Map(derived.map((artifact) => [artifact.folderId, artifact])).values()]
+        .sort((left, right) => left.kind === right.kind ? 0 : left.kind === "revision" ? -1 : 1);
+      if (operation !== undefined && artifacts.length > operation.cleanupSlots) throw new ApiResponseError("CONFLICT");
       const usedIds = manifestIdentifierSet(manifest);
-      const cleanupId = cleanupCandidates.find((candidate) => !usedIds.has(candidate));
-      if (derived !== undefined && cleanupId === undefined) throw new ApiResponseError("CONFLICT");
-      const cleanup = derived === undefined ? [] : [{
-        cleanupId: cleanupId as string,
+      const cleanupIds = takeUniqueIdentifiers(cleanupCandidates, artifacts.length, usedIds);
+      if (cleanupIds.length !== artifacts.length) throw new ApiResponseError("CONFLICT");
+      const cleanup = artifacts.map((artifact, index) => ({
+        ...artifact,
+        cleanupId: cleanupIds[index] as string,
         publicId,
-        folderId: derived.folderId,
-        expectedVersion: derived.version,
-        marker: derived.marker,
-        kind: derived.kind,
         queuedAt
-      } satisfies ManifestCleanup];
+      } satisfies ManifestCleanup));
       return bumpManifest(manifest, {
         operations: manifest.operations.filter((candidate) => candidate.operationId !== operationId),
         cleanup: boundedCleanup([...manifest.cleanup, ...cleanup])
@@ -726,28 +795,111 @@ export class PublicationService {
 
   private async processCleanup(context: StorageOperationContext): Promise<void> {
     const snapshot = await this.options.manifestStore.read(context);
-    for (const cleanup of snapshot.value.cleanup.slice(0, MAX_CLEANUPS_PER_REQUEST)) {
-      let cleared = false;
+    const records = manifestCleanupRecords(snapshot.value);
+    if (records.length === 0) return;
+    const start = snapshot.value.cleanupOffset % records.length;
+    const selected = Array.from(
+      { length: Math.min(MAX_CLEANUPS_PER_REQUEST, records.length) },
+      (_value, index) => records[(start + index) % records.length] as ManifestCleanup
+    );
+    for (const cleanup of selected) {
       try {
         const currentManifest = await this.options.manifestStore.read(context);
-        if (!currentManifest.value.cleanup.some((candidate) => candidate.cleanupId === cleanup.cleanupId)) continue;
+        const currentCleanup = findManifestCleanup(currentManifest.value, cleanup.cleanupId);
+        if (currentCleanup === undefined || !sameCleanupRecord(currentCleanup, cleanup)) continue;
         if (manifestReferencesFolder(currentManifest.value, cleanup.folderId)) continue;
-        const file = await this.options.storage.get(cleanup.folderId, { ...context, allowTrashed: true });
-        if (!markerMatches(file, cleanup.marker, cleanup.kind === "public-root" ? "public" : "revision", cleanup.publicId)) continue;
+        if (
+          cleanup.kind === "public-root" &&
+          manifestCleanupRecords(currentManifest.value).some((candidate) =>
+            candidate.cleanupId !== cleanup.cleanupId && candidate.kind === "revision" && candidate.publicId === cleanup.publicId)
+        ) continue;
+        const file = await this.verifyCleanupTarget(cleanup, context);
         if (!file.trashed) {
           if (file.version !== cleanup.expectedVersion) continue;
-          const trashed = await this.options.storage.trash({ fileId: file.id, expectedVersion: cleanup.expectedVersion }, context);
-          if (trashed.id !== file.id || !trashed.trashed) continue;
+          let trashed: StoredFile;
+          try {
+            trashed = await this.options.storage.trash({ fileId: file.id, expectedVersion: file.version }, context);
+          } catch {
+            // An ambiguous Trash is recovered only by a later independently verified read.
+            continue;
+          }
+          if (
+            trashed.version === file.version ||
+            !cleanupFolderMatches(trashed, cleanup, true) ||
+            trashed.id !== file.id
+          ) continue;
+          const readback = await this.verifyCleanupTarget(cleanup, context);
+          if (readback.version !== trashed.version || !cleanupFolderMatches(readback, cleanup, true)) continue;
+        } else if (file.version === cleanup.expectedVersion) {
+          continue;
         }
-        cleared = true;
+        await this.clearCleanupRecord(cleanup, context);
       } catch {
         // Cleanup is durable and retried by a later bounded request.
       }
-      if (!cleared) continue;
-      await this.options.manifestStore.compareAndSet((manifest) => bumpManifest(manifest, {
-        cleanup: manifest.cleanup.filter((candidate) => candidate.cleanupId !== cleanup.cleanupId)
-      }), { context }).catch(() => undefined);
     }
+    await this.options.manifestStore.compareAndSet((manifest) => {
+      const remaining = manifestCleanupRecords(manifest).length;
+      const cleanupOffset = remaining === 0 ? 0 : (manifest.cleanupOffset + selected.length) % remaining;
+      return bumpManifest(manifest, { cleanupOffset });
+    }, { context }).catch(() => undefined);
+  }
+
+  private async verifyCleanupTarget(cleanup: ManifestCleanup, context: StorageOperationContext): Promise<StoredFile> {
+    if (
+      cleanup.ownershipVersion !== 1 || cleanup.parentFolderId === null || cleanup.folderName === null ||
+      (cleanup.kind === "revision" && cleanup.operationId === null)
+    ) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+    const publishedRoot = await this.verifyPublishedRoot(context);
+    if (cleanup.kind === "public-root") {
+      if (
+        cleanup.parentFolderId !== publishedRoot.id || cleanup.folderName !== cleanup.publicId || cleanup.operationId !== null ||
+        cleanup.marker !== publicationMarker(cleanup.publicId, "public")
+      ) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+      const file = await this.options.storage.get(cleanup.folderId, { ...context, allowTrashed: true });
+      if (!cleanupFolderMatches(file, cleanup, file.trashed)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+      if (!file.trashed) await this.assertUniqueCleanupChild(publishedRoot.id, cleanup.folderName, file.id, context);
+      return file;
+    }
+    const publicFolder = await this.options.storage.get(cleanup.parentFolderId, context);
+    if (
+      !folderMatches(
+        publicFolder,
+        publishedRoot.id,
+        cleanup.publicId,
+        publicationMarker(cleanup.publicId, "public"),
+        "public",
+        cleanup.publicId
+      ) || publicFolder.appProperties?.nxtPublicationOperation !== undefined ||
+      publicFolder.appProperties?.nxtPublicationAssetId !== undefined
+    ) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+    await this.assertUniqueCleanupChild(publishedRoot.id, cleanup.publicId, publicFolder.id, context);
+    const file = await this.options.storage.get(cleanup.folderId, { ...context, allowTrashed: true });
+    if (!cleanupFolderMatches(file, cleanup, file.trashed)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+    if (!file.trashed) await this.assertUniqueCleanupChild(publicFolder.id, cleanup.folderName, file.id, context);
+    return file;
+  }
+
+  private async assertUniqueCleanupChild(parentId: string, name: string, fileId: string, context: StorageOperationContext): Promise<void> {
+    const exact = await this.exactChildren(parentId, name, context);
+    if (exact.length !== 1 || exact[0]?.id !== fileId) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+  }
+
+  private async clearCleanupRecord(cleanup: ManifestCleanup, context: StorageOperationContext): Promise<void> {
+    await this.options.manifestStore.compareAndSet((manifest) => {
+      const current = findManifestCleanup(manifest, cleanup.cleanupId);
+      if (
+        current === undefined || !sameCleanupRecord(current, cleanup) ||
+        manifestReferencesFolder(manifest, cleanup.folderId)
+      ) return manifest;
+      return bumpManifest(manifest, {
+        cleanup: manifest.cleanup.filter((candidate) => candidate.cleanupId !== cleanup.cleanupId),
+        tombstones: manifest.tombstones.map((tombstone) => ({
+          ...tombstone,
+          cleanup: tombstone.cleanup.filter((candidate) => candidate.cleanupId !== cleanup.cleanupId)
+        }))
+      });
+    }, { context });
   }
 
   private async exactChildren(parentId: string, name: string, context: StorageOperationContext): Promise<StoredFile[]> {
@@ -961,14 +1113,141 @@ const bumpManifest = (manifest: PublicationManifest, changes: Partial<Publicatio
 });
 
 const boundedCleanup = (records: ManifestCleanup[]): ManifestCleanup[] => {
-  const byId = new Map(records.map((record) => [record.cleanupId, record]));
-  return [...byId.values()].slice(-MAX_CLEANUP_RECORDS);
+  const byId = new Map<string, ManifestCleanup>();
+  for (const record of records) {
+    const existing = byId.get(record.cleanupId);
+    if (existing !== undefined && !sameCleanupRecord(existing, record)) throw new ApiResponseError("CONFLICT");
+    byId.set(record.cleanupId, record);
+  }
+  if (byId.size > MAX_CLEANUP_RECORDS) throw new ApiResponseError("CONFLICT");
+  return [...byId.values()];
 };
 
 const cleanupForOperation = (operation: ManifestOperation, queuedAt: string, cleanupId: string): ManifestCleanup[] =>
-  operation.revisionFolderId !== null && operation.revisionFolderVersion !== null && operation.revisionMarker !== null
-    ? [{ cleanupId, publicId: operation.publicId, folderId: operation.revisionFolderId, expectedVersion: operation.revisionFolderVersion, marker: operation.revisionMarker, kind: "revision", queuedAt }]
+  operation.revisionFolderId !== null && operation.revisionFolderVersion !== null && operation.revisionMarker !== null &&
+  operation.revisionId !== null && operation.publicFolderId !== null
+    ? [{
+        ...revisionCleanupArtifact(
+          operation.publicId,
+          operation.operationId,
+          operation.revisionId,
+          operation.revisionMarker,
+          { id: operation.revisionFolderId, version: operation.revisionFolderVersion },
+          operation.publicFolderId
+        ),
+        cleanupId,
+        queuedAt
+      }]
     : [];
+
+const publicRootCleanupArtifact = (
+  publicId: string,
+  folder: Pick<StoredFile, "id" | "version">,
+  publishedRootId: string
+): CleanupArtifact => ({
+  publicId,
+  folderId: folder.id,
+  expectedVersion: folder.version,
+  marker: publicationMarker(publicId, "public"),
+  kind: "public-root",
+  ownershipVersion: 1,
+  parentFolderId: publishedRootId,
+  folderName: publicId,
+  operationId: null
+});
+
+const revisionCleanupArtifact = (
+  publicId: string,
+  operationId: string,
+  revisionId: string,
+  marker: string,
+  folder: Pick<StoredFile, "id" | "version">,
+  publicFolderId: string
+): CleanupArtifact => ({
+  publicId,
+  folderId: folder.id,
+  expectedVersion: folder.version,
+  marker,
+  kind: "revision",
+  ownershipVersion: 1,
+  parentFolderId: publicFolderId,
+  folderName: revisionId,
+  operationId
+});
+
+const revisionCleanupRecord = (input: {
+  cleanupId: string;
+  publicId: string;
+  operationId: string;
+  revisionId: string;
+  folderId: string;
+  folderVersion: string;
+  marker: string;
+  publicFolderId: string;
+  queuedAt: string;
+}): ManifestCleanup => ({
+  ...revisionCleanupArtifact(
+    input.publicId,
+    input.operationId,
+    input.revisionId,
+    input.marker,
+    { id: input.folderId, version: input.folderVersion },
+    input.publicFolderId
+  ),
+  cleanupId: input.cleanupId,
+  queuedAt: input.queuedAt
+});
+
+const publicationCausality = (manifest: PublicationManifest, noteId: string): PublicationCausality => {
+  const active = manifest.entries.find((entry) => entry.sourceNoteId === noteId);
+  const tombstone = manifest.tombstones.find((entry) => entry.sourceNoteId === noteId);
+  const predecessor = active === undefined
+    ? tombstone === undefined ? null : {
+        kind: "tombstone" as const,
+        value: {
+          publicId: tombstone.publicId,
+          sourceNoteId: tombstone.sourceNoteId,
+          epoch: tombstone.epoch,
+          publicFolderId: tombstone.publicFolderId,
+          publicFolderVersion: tombstone.publicFolderVersion,
+          revokedAt: tombstone.revokedAt
+        }
+      }
+    : { kind: "entry" as const, value: active };
+  const operations = manifest.operations
+    .filter((operation) => operation.sourceNoteId === noteId)
+    .map((operation) => operation)
+    .sort((left, right) => left.operationId < right.operationId ? -1 : left.operationId > right.operationId ? 1 : 0);
+  const identity = createHash("sha256")
+    .update(JSON.stringify({ predecessor, operations }), "utf8")
+    .digest("hex");
+  return { generation: manifest.generation, identity };
+};
+
+const samePublicationCausality = (left: PublicationCausality, right: PublicationCausality): boolean =>
+  left.generation === right.generation && left.identity === right.identity;
+
+const takeUniqueIdentifiers = (candidates: readonly string[], count: number, used: Set<string>): string[] => {
+  if (count === 0) return [];
+  const selected: string[] = [];
+  for (const candidate of candidates) {
+    if (used.has(candidate)) continue;
+    used.add(candidate);
+    selected.push(candidate);
+    if (selected.length === count) break;
+  }
+  return selected;
+};
+
+const manifestCleanupRecords = (manifest: PublicationManifest): ManifestCleanup[] => [
+  ...manifest.cleanup,
+  ...manifest.tombstones.flatMap((tombstone) => tombstone.cleanup)
+];
+
+const findManifestCleanup = (manifest: PublicationManifest, cleanupId: string): ManifestCleanup | undefined =>
+  manifestCleanupRecords(manifest).find((cleanup) => cleanup.cleanupId === cleanupId);
+
+const sameCleanupRecord = (left: ManifestCleanup, right: ManifestCleanup): boolean => JSON.stringify(left) === JSON.stringify(right);
 
 const operationCanBeRecovered = (operation: ManifestOperation, now: string): boolean => {
   const startedAt = Date.parse(operation.startedAt);
@@ -985,7 +1264,10 @@ const manifestIdentifierSet = (manifest: PublicationManifest): Set<string> => {
       revision.assets.forEach((asset) => ids.add(asset.assetId));
     }
   }
-  manifest.tombstones.forEach((tombstone) => ids.add(tombstone.publicId));
+  manifest.tombstones.forEach((tombstone) => {
+    ids.add(tombstone.publicId);
+    tombstone.cleanup.forEach((cleanup) => ids.add(cleanup.cleanupId));
+  });
   manifest.operations.forEach((operation) => { ids.add(operation.operationId); ids.add(operation.publicId); });
   manifest.cleanup.forEach((cleanup) => ids.add(cleanup.cleanupId));
   return ids;
@@ -994,7 +1276,8 @@ const manifestIdentifierSet = (manifest: PublicationManifest): Set<string> => {
 const manifestReferencesFolder = (manifest: PublicationManifest, folderId: string): boolean =>
   manifest.entries.some((entry) => entry.publicFolderId === folderId || entry.revisions.some((revision) =>
     revision.snapshotFolderId === folderId || revision.assetsFolderId === folderId
-  )) || manifest.operations.some((operation) => operation.publicFolderId === folderId || operation.revisionFolderId === folderId);
+  )) || manifest.tombstones.some((tombstone) => tombstone.publicFolderId === folderId) ||
+  manifest.operations.some((operation) => operation.publicFolderId === folderId || operation.revisionFolderId === folderId);
 
 const publicationMarker = (ownerId: string, kind: string): string => `pm1.${ownerId}.${kind}`;
 
@@ -1037,6 +1320,22 @@ const folderMatches = (
   file.name === name && file.mimeType === FOLDER_MIME_TYPE && !file.trashed && file.parentIds.length === 1 && file.parentIds[0] === parentId &&
   markerMatches(file, marker, kind, publicId, operationId);
 
+const cleanupFolderMatches = (file: StoredFile, cleanup: ManifestCleanup, trashed: boolean): boolean =>
+  cleanup.parentFolderId !== null && cleanup.folderName !== null &&
+  file.id === cleanup.folderId && file.name === cleanup.folderName && file.mimeType === FOLDER_MIME_TYPE &&
+  file.trashed === trashed && file.parentIds.length === 1 && file.parentIds[0] === cleanup.parentFolderId &&
+  file.appProperties?.nxtPublicationAssetId === undefined &&
+  (cleanup.kind === "revision"
+    ? file.appProperties?.nxtPublicationOperation === cleanup.operationId
+    : file.appProperties?.nxtPublicationOperation === undefined) &&
+  markerMatches(
+    file,
+    cleanup.marker,
+    cleanup.kind === "public-root" ? "public" : "revision",
+    cleanup.publicId,
+    cleanup.kind === "revision" ? cleanup.operationId ?? undefined : undefined
+  );
+
 const snapshotFileMatches = (file: StoredFile, expected: {
   id: string;
   parentId: string;
@@ -1065,7 +1364,8 @@ const snapshotAssetName = (assetId: string, originalName: string): string => {
 
 const sameOperationSource = (left: ManifestOperation, right: ManifestOperation): boolean =>
   left.operationId === right.operationId && left.publicId === right.publicId && left.sourceNoteId === right.sourceNoteId &&
-  left.epoch === right.epoch && left.sourceVersion === right.sourceVersion && left.sourceChecksum === right.sourceChecksum && left.sourcePath === right.sourcePath;
+  left.epoch === right.epoch && left.startedAt === right.startedAt && left.sourceVersion === right.sourceVersion &&
+  left.sourceChecksum === right.sourceChecksum && left.sourcePath === right.sourcePath && left.cleanupSlots === right.cleanupSlots;
 
 const sameOperationState = (left: ManifestOperation, right: ManifestOperation): boolean => JSON.stringify(left) === JSON.stringify(right);
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");

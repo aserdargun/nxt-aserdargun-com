@@ -95,14 +95,6 @@ export declare const PublicationEntrySchema: z.ZodObject<{
     }, z.core.$strict>>;
 }, z.core.$strict>;
 export type PublicationEntry = z.infer<typeof PublicationEntrySchema>;
-export declare const PublicationTombstoneSchema: z.ZodObject<{
-    publicId: z.ZodString;
-    sourceNoteId: z.ZodUUID;
-    epoch: z.ZodNumber;
-    publicFolderId: z.ZodString;
-    publicFolderVersion: z.ZodString;
-    revokedAt: z.ZodISODateTime;
-}, z.core.$strict>;
 export declare const PublicationOperationSchema: z.ZodObject<{
     operationId: z.ZodString;
     publicId: z.ZodString;
@@ -118,6 +110,7 @@ export declare const PublicationOperationSchema: z.ZodObject<{
     revisionFolderVersion: z.ZodDefault<z.ZodNullable<z.ZodString>>;
     revisionId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
     revisionMarker: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    cleanupSlots: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strict>;
 export declare const PublicationCleanupSchema: z.ZodObject<{
     cleanupId: z.ZodString;
@@ -130,6 +123,34 @@ export declare const PublicationCleanupSchema: z.ZodObject<{
         revision: "revision";
     }>;
     queuedAt: z.ZodISODateTime;
+    ownershipVersion: z.ZodDefault<z.ZodNullable<z.ZodLiteral<1>>>;
+    parentFolderId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    folderName: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    operationId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+}, z.core.$strict>;
+export declare const PublicationTombstoneSchema: z.ZodObject<{
+    publicId: z.ZodString;
+    sourceNoteId: z.ZodUUID;
+    epoch: z.ZodNumber;
+    publicFolderId: z.ZodString;
+    publicFolderVersion: z.ZodString;
+    revokedAt: z.ZodISODateTime;
+    cleanup: z.ZodDefault<z.ZodArray<z.ZodObject<{
+        cleanupId: z.ZodString;
+        publicId: z.ZodString;
+        folderId: z.ZodString;
+        expectedVersion: z.ZodString;
+        marker: z.ZodString;
+        kind: z.ZodEnum<{
+            "public-root": "public-root";
+            revision: "revision";
+        }>;
+        queuedAt: z.ZodISODateTime;
+        ownershipVersion: z.ZodDefault<z.ZodNullable<z.ZodLiteral<1>>>;
+        parentFolderId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        folderName: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        operationId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+    }, z.core.$strict>>>;
 }, z.core.$strict>;
 export declare const PublicationManifestSchema: z.ZodObject<{
     schemaVersion: z.ZodLiteral<1>;
@@ -182,6 +203,22 @@ export declare const PublicationManifestSchema: z.ZodObject<{
         publicFolderId: z.ZodString;
         publicFolderVersion: z.ZodString;
         revokedAt: z.ZodISODateTime;
+        cleanup: z.ZodDefault<z.ZodArray<z.ZodObject<{
+            cleanupId: z.ZodString;
+            publicId: z.ZodString;
+            folderId: z.ZodString;
+            expectedVersion: z.ZodString;
+            marker: z.ZodString;
+            kind: z.ZodEnum<{
+                "public-root": "public-root";
+                revision: "revision";
+            }>;
+            queuedAt: z.ZodISODateTime;
+            ownershipVersion: z.ZodDefault<z.ZodNullable<z.ZodLiteral<1>>>;
+            parentFolderId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+            folderName: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+            operationId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        }, z.core.$strict>>>;
     }, z.core.$strict>>>;
     operations: z.ZodDefault<z.ZodArray<z.ZodObject<{
         operationId: z.ZodString;
@@ -198,6 +235,7 @@ export declare const PublicationManifestSchema: z.ZodObject<{
         revisionFolderVersion: z.ZodDefault<z.ZodNullable<z.ZodString>>;
         revisionId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
         revisionMarker: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        cleanupSlots: z.ZodDefault<z.ZodNumber>;
     }, z.core.$strict>>>;
     cleanup: z.ZodDefault<z.ZodArray<z.ZodObject<{
         cleanupId: z.ZodString;
@@ -210,7 +248,12 @@ export declare const PublicationManifestSchema: z.ZodObject<{
             revision: "revision";
         }>;
         queuedAt: z.ZodISODateTime;
+        ownershipVersion: z.ZodDefault<z.ZodNullable<z.ZodLiteral<1>>>;
+        parentFolderId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        folderName: z.ZodDefault<z.ZodNullable<z.ZodString>>;
+        operationId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
     }, z.core.$strict>>>;
+    cleanupOffset: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strict>;
 export type PublicationManifest = z.infer<typeof PublicationManifestSchema>;
 //# sourceMappingURL=publication.d.ts.map

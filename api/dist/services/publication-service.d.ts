@@ -34,6 +34,7 @@ export declare class PublicationService {
     }): Promise<{
         revoked: true;
     }>;
+    private observePublicationCausality;
     private reservePublish;
     private ensurePublicFolder;
     private ensureOwnedFolder;
@@ -50,6 +51,9 @@ export declare class PublicationService {
     private updateOperation;
     private abandonOperation;
     private processCleanup;
+    private verifyCleanupTarget;
+    private assertUniqueCleanupChild;
+    private clearCleanupRecord;
     private exactChildren;
     private verifyPublishedRoot;
     private assertFolder;

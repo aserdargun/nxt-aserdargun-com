@@ -112,6 +112,57 @@ const publishCurrent = async (fixture: Awaited<ReturnType<typeof setup>>) => {
   return fixture.service.publish({ noteId, expectedVersion: note.version });
 };
 
+type CleanupView = PublicationManifest["cleanup"][number] & {
+  parentFolderId?: string | null;
+  folderName?: string | null;
+  operationId?: string | null;
+};
+
+const idFor = (value: number): string => {
+  const bytes = new Uint8Array(16);
+  new DataView(bytes.buffer).setUint32(12, value);
+  return Buffer.from(bytes).toString("base64url");
+};
+
+const unresolvedCleanup = (index: number): PublicationManifest["cleanup"][number] => ({
+  cleanupId: idFor(index + 1),
+  publicId: "Q".repeat(22),
+  folderId: `missing-cleanup-${index}`,
+  expectedVersion: "1",
+  marker: `pm1.${"Q".repeat(22)}.revision`,
+  kind: "revision",
+  queuedAt: "2026-08-24T11:00:00.000Z",
+  ownershipVersion: null,
+  parentFolderId: null,
+  folderName: null,
+  operationId: null
+});
+
+const allCleanup = (manifest: PublicationManifest): CleanupView[] => [
+  ...(manifest.cleanup as CleanupView[]),
+  ...manifest.tombstones.flatMap((tombstone) =>
+    ((tombstone as typeof tombstone & { cleanup?: CleanupView[] }).cleanup ?? []))
+];
+
+const rewriteCleanup = async (
+  fixture: Awaited<ReturnType<typeof setup>>,
+  cleanupId: string,
+  transform: (cleanup: CleanupView) => CleanupView
+): Promise<void> => {
+  await fixture.manifestStore.compareAndSet((manifest) => {
+    const rewrite = (records: CleanupView[]): CleanupView[] => records.map((record) =>
+      record.cleanupId === cleanupId ? transform(record) : record);
+    return {
+      ...manifest,
+      cleanup: rewrite(manifest.cleanup as CleanupView[]),
+      tombstones: manifest.tombstones.map((tombstone) => {
+        const owned = (tombstone as typeof tombstone & { cleanup?: CleanupView[] }).cleanup;
+        return owned === undefined ? tombstone : { ...tombstone, cleanup: rewrite(owned) };
+      })
+    } as PublicationManifest;
+  });
+};
+
 describe("immutable publication snapshots", () => {
   it("commits a 128-bit public ID last and exposes only a sanitized frozen projection", async () => {
     const fixture = await setup({ source: sourceFor("Share me", "# Hello\n\n<script>private()</script>\n") });
@@ -147,6 +198,58 @@ describe("immutable publication snapshots", () => {
     const manifest = (await fixture.manifestStore.read()).value;
     expect(manifest.entries).toEqual([]);
     expect(manifest.cleanup.length).toBeLessThanOrEqual(64);
+    expect(manifest.operations).toEqual([]);
+  });
+
+  it("durably owns and cleans both first-publish folders when snapshot creation fails", async () => {
+    let failSnapshot = true;
+    const fixture = await setup({
+      privateStorage: (raw) => delegateStorage(raw, {
+        createBytes: async (input, context) => {
+          if (failSnapshot && input.appProperties?.nxtPublicationKind === "note") {
+            throw new Error("injected first publication failure");
+          }
+          return raw.createBytes(input, context);
+        }
+      })
+    });
+
+    await expect(publishCurrent(fixture)).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+    const failed = (await fixture.manifestStore.read()).value;
+    const queued = allCleanup(failed);
+    expect(failed.entries).toEqual([]);
+    expect(failed.operations).toEqual([]);
+    expect(queued.map((record) => record.kind).sort()).toEqual(["public-root", "revision"]);
+    const publicRoot = queued.find((record) => record.kind === "public-root");
+    const revision = queued.find((record) => record.kind === "revision");
+    expect(publicRoot).toMatchObject({
+      parentFolderId: fixture.ids.published.id,
+      folderName: publicRoot?.publicId,
+      operationId: null
+    });
+    expect(revision).toMatchObject({
+      parentFolderId: publicRoot?.folderId,
+      operationId: expect.stringMatching(/^[A-Za-z0-9_-]{22}$/u)
+    });
+
+    failSnapshot = false;
+    await expect(fixture.service.revoke({ publicId: publicRoot?.publicId ?? "" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect((await fixture.raw.get(revision?.folderId ?? "missing")).trashed).toBe(true);
+    expect((await fixture.raw.get(publicRoot?.folderId ?? "missing")).trashed).toBe(true);
+    expect(allCleanup((await fixture.manifestStore.read()).value)).toEqual([]);
+  });
+
+  it("reserves two cleanup slots before creating a never-published public root", async () => {
+    const fixture = await setup();
+    await fixture.manifestStore.compareAndSet((manifest) => ({
+      ...manifest,
+      cleanup: Array.from({ length: 63 }, (_value, index) => unresolvedCleanup(index))
+    }));
+
+    await expect(publishCurrent(fixture)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await fixture.privateStorage.listChildren({ parentId: fixture.ids.published.id, pageSize: 100 })).files).toEqual([]);
+    const manifest = (await fixture.manifestStore.read()).value;
+    expect(manifest.cleanup).toHaveLength(63);
     expect(manifest.operations).toEqual([]);
   });
 
@@ -318,7 +421,72 @@ describe("immutable publication snapshots", () => {
     expect((await fixture.reader.getNote(first.publicId))?.title).toBe("Share me again");
   });
 
+  it("queues and recoverably trashes the immutable revision evicted by the thirty-third publish", async () => {
+    const fixture = await setup();
+    const first = await publishCurrent(fixture);
+    const firstManifest = (await fixture.manifestStore.read()).value;
+    const firstRevision = firstManifest.entries[0]?.revisions[0];
+    if (firstRevision === undefined) throw new Error("missing first bounded-history revision");
+
+    for (let revisionNumber = 2; revisionNumber <= 33; revisionNumber += 1) {
+      const opened = await fixture.vault.getNote(noteId);
+      const updated = await fixture.vault.updateNote({
+        noteId,
+        expectedVersion: opened.version,
+        source: sourceFor(`Revision ${revisionNumber}`, `# Revision ${revisionNumber}\n`)
+      });
+      await fixture.service.publish({ noteId, expectedVersion: updated.version });
+    }
+
+    const bounded = (await fixture.manifestStore.read()).value;
+    expect(bounded.entries[0]?.publicId).toBe(first.publicId);
+    expect(bounded.entries[0]?.revisions).toHaveLength(32);
+    expect(bounded.entries[0]?.revisions.some((revision) => revision.snapshotFolderId === firstRevision.snapshotFolderId)).toBe(false);
+    const eviction = allCleanup(bounded).find((record) => record.folderId === firstRevision.snapshotFolderId);
+    expect(eviction).toMatchObject({
+      kind: "revision",
+      expectedVersion: firstRevision.snapshotFolderVersion,
+      marker: firstRevision.snapshotMarker,
+      operationId: firstRevision.operationId
+    });
+
+    await expect(fixture.service.publish({ noteId, expectedVersion: "not-the-current-version" })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect((await fixture.raw.get(firstRevision.snapshotFolderId)).trashed).toBe(true);
+    expect(allCleanup((await fixture.manifestStore.read()).value).some((record) => record.cleanupId === eviction?.cleanupId)).toBe(false);
+  }, 30_000);
+
   it("revokes the manifest first and keeps the URL revoked when conditional Trash is ambiguous", async () => {
+    let failTrash = false;
+    const fixture = await setup({
+      privateStorage: (raw) => delegateStorage(raw, {
+        trash: async (input, context) => {
+          if (failTrash) {
+            await raw.trash(input, context);
+            throw new StorageMutationOutcomeUnknownError(input.fileId);
+          }
+          return raw.trash(input, context);
+        }
+      })
+    });
+    const publication = await publishCurrent(fixture);
+    const before = (await fixture.manifestStore.read()).value;
+    const active = before.entries[0]?.revisions.find((revision) => revision.revisionId === before.entries[0]?.activeRevisionId);
+    if (active === undefined) throw new Error("missing accepted ambiguous Trash fixture");
+    failTrash = true;
+    await expect(fixture.service.revoke({ publicId: publication.publicId })).resolves.toEqual({ revoked: true });
+    expect(await fixture.reader.getNote(publication.publicId)).toBeNull();
+    const manifest = (await fixture.manifestStore.read()).value;
+    expect(manifest.entries).toEqual([]);
+    expect(manifest.tombstones[0]?.publicId).toBe(publication.publicId);
+    expect(allCleanup(manifest).length).toBeGreaterThan(0);
+    expect(await fixture.raw.get(active.snapshotFolderId)).toMatchObject({ trashed: true });
+
+    failTrash = false;
+    await fixture.service.revoke({ publicId: publication.publicId });
+    expect(allCleanup((await fixture.manifestStore.read()).value)).toEqual([]);
+  });
+
+  it("keeps revoke dark and losslessly owns its snapshots when the unresolved cleanup queue is full", async () => {
     let failTrash = false;
     const fixture = await setup({
       privateStorage: (raw) => delegateStorage(raw, {
@@ -329,13 +497,36 @@ describe("immutable publication snapshots", () => {
       })
     });
     const publication = await publishCurrent(fixture);
+    const published = (await fixture.manifestStore.read()).value;
+    const active = published.entries[0]?.revisions.find((revision) => revision.revisionId === published.entries[0]?.activeRevisionId);
+    if (active === undefined) throw new Error("missing full-queue revoke fixture");
+    const unresolved = Array.from({ length: 64 }, (_value, index) => unresolvedCleanup(index));
+    await fixture.manifestStore.compareAndSet((manifest) => ({ ...manifest, cleanup: unresolved }));
     failTrash = true;
+
     await expect(fixture.service.revoke({ publicId: publication.publicId })).resolves.toEqual({ revoked: true });
     expect(await fixture.reader.getNote(publication.publicId)).toBeNull();
-    const manifest = (await fixture.manifestStore.read()).value;
-    expect(manifest.entries).toEqual([]);
-    expect(manifest.tombstones[0]?.publicId).toBe(publication.publicId);
-    expect(manifest.cleanup.length).toBeGreaterThan(0);
+    const revoked = (await fixture.manifestStore.read()).value;
+    expect(revoked.entries).toEqual([]);
+    expect(revoked.cleanup.map((record) => record.cleanupId)).toEqual(unresolved.map((record) => record.cleanupId));
+    const owned = allCleanup(revoked).filter((record) => record.folderId === active.snapshotFolderId);
+    expect(owned).toHaveLength(1);
+    expect(owned[0]).toMatchObject({
+      publicId: publication.publicId,
+      parentFolderId: revoked.tombstones[0]?.publicFolderId,
+      folderName: active.revisionId,
+      operationId: active.operationId,
+      expectedVersion: active.snapshotFolderVersion
+    });
+
+    failTrash = false;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await fixture.service.revoke({ publicId: publication.publicId });
+    }
+    const recovered = (await fixture.manifestStore.read()).value;
+    expect(await fixture.raw.get(active.snapshotFolderId)).toMatchObject({ trashed: true });
+    expect(recovered.cleanup.map((record) => record.cleanupId)).toEqual(unresolved.map((record) => record.cleanupId));
+    expect(allCleanup(recovered).some((record) => record.folderId === active.snapshotFolderId)).toBe(false);
   });
 
   it("makes the public URL dark before a successful snapshot Trash can finish", async () => {
@@ -384,7 +575,7 @@ describe("immutable publication snapshots", () => {
     });
     const publication = await publishCurrent(fixture);
     await fixture.service.revoke({ publicId: publication.publicId });
-    const queued = (await fixture.manifestStore.read()).value.cleanup[0];
+    const queued = allCleanup((await fixture.manifestStore.read()).value)[0];
     if (queued === undefined) throw new Error("missing cleanup fence");
     const folder = await fixture.raw.get(queued.folderId);
     const changed = await fixture.raw.move({
@@ -398,7 +589,166 @@ describe("immutable publication snapshots", () => {
 
     await fixture.service.revoke({ publicId: publication.publicId });
     expect(await fixture.raw.get(changed.id)).toMatchObject({ trashed: false, version: changed.version });
-    expect((await fixture.manifestStore.read()).value.cleanup).toContainEqual(expect.objectContaining({ cleanupId: queued.cleanupId }));
+    expect(allCleanup((await fixture.manifestStore.read()).value)).toContainEqual(expect.objectContaining({ cleanupId: queued.cleanupId }));
+  });
+
+  it("never trashes a copied-marker folder from the wrong ancestry", async () => {
+    let failTrash = true;
+    const fixture = await setup({
+      privateStorage: (raw) => delegateStorage(raw, {
+        trash: async (input, context) => {
+          if (failTrash) throw new StorageMutationOutcomeUnknownError(input.fileId);
+          return raw.trash(input, context);
+        }
+      })
+    });
+    const publication = await publishCurrent(fixture);
+    await fixture.service.revoke({ publicId: publication.publicId });
+    const queued = allCleanup((await fixture.manifestStore.read()).value)[0];
+    if (queued === undefined) throw new Error("missing copied-marker cleanup fixture");
+    const original = await fixture.raw.get(queued.folderId);
+    const holding = await fixture.raw.createFolder({ parentId: "private", name: "copied-marker-holding" });
+    const copied = await fixture.raw.createFolder({
+      parentId: holding.id,
+      name: original.name,
+      appProperties: { ...original.appProperties }
+    });
+    await rewriteCleanup(fixture, queued.cleanupId, (record) => ({
+      ...record,
+      folderId: copied.id,
+      expectedVersion: copied.version
+    }));
+    failTrash = false;
+
+    await fixture.service.revoke({ publicId: publication.publicId });
+    expect(await fixture.raw.get(copied.id)).toMatchObject({ trashed: false });
+    expect(allCleanup((await fixture.manifestStore.read()).value)).toContainEqual(expect.objectContaining({ cleanupId: queued.cleanupId }));
+  });
+
+  it.each([
+    ["ordinary file", "text/plain"],
+    ["shortcut", "application/vnd.google-apps.shortcut"]
+  ])("never trashes a copied-marker %s in place of the owned folder", async (_label, mimeType) => {
+    let failTrash = true;
+    const fixture = await setup({
+      privateStorage: (raw) => delegateStorage(raw, {
+        trash: async (input, context) => {
+          if (failTrash) throw new StorageMutationOutcomeUnknownError(input.fileId);
+          return raw.trash(input, context);
+        }
+      })
+    });
+    const publication = await publishCurrent(fixture);
+    await fixture.service.revoke({ publicId: publication.publicId });
+    const queued = allCleanup((await fixture.manifestStore.read()).value)[0];
+    if (queued === undefined) throw new Error("missing wrong-type cleanup fixture");
+    const original = await fixture.raw.get(queued.folderId);
+    const copied = await fixture.raw.createBytes({
+      parentId: original.parentIds[0] as string,
+      name: original.name,
+      mimeType,
+      bytes: Uint8Array.of(1),
+      appProperties: { ...original.appProperties }
+    });
+    await rewriteCleanup(fixture, queued.cleanupId, (record) => ({
+      ...record,
+      folderId: copied.id,
+      expectedVersion: copied.version
+    }));
+    failTrash = false;
+
+    await fixture.service.revoke({ publicId: publication.publicId });
+    expect(await fixture.raw.get(copied.id)).toMatchObject({ trashed: false });
+    expect(allCleanup((await fixture.manifestStore.read()).value)).toContainEqual(expect.objectContaining({ cleanupId: queued.cleanupId }));
+  });
+
+  it("never trashes an owned marker after its exact queued name changed", async () => {
+    let failTrash = true;
+    const fixture = await setup({
+      privateStorage: (raw) => delegateStorage(raw, {
+        trash: async (input, context) => {
+          if (failTrash) throw new StorageMutationOutcomeUnknownError(input.fileId);
+          return raw.trash(input, context);
+        }
+      })
+    });
+    const publication = await publishCurrent(fixture);
+    await fixture.service.revoke({ publicId: publication.publicId });
+    const queued = allCleanup((await fixture.manifestStore.read()).value)[0];
+    if (queued === undefined) throw new Error("missing changed-name cleanup fixture");
+    const original = await fixture.raw.get(queued.folderId);
+    const changed = await fixture.raw.move({
+      fileId: original.id,
+      fromParentId: original.parentIds[0] as string,
+      toParentId: original.parentIds[0] as string,
+      newName: `${original.name}-changed`,
+      expectedVersion: original.version
+    });
+    await rewriteCleanup(fixture, queued.cleanupId, (record) => ({ ...record, expectedVersion: changed.version }));
+    failTrash = false;
+
+    await fixture.service.revoke({ publicId: publication.publicId });
+    expect(await fixture.raw.get(changed.id)).toMatchObject({ trashed: false, name: changed.name });
+    expect(allCleanup((await fixture.manifestStore.read()).value)).toContainEqual(expect.objectContaining({ cleanupId: queued.cleanupId }));
+  });
+
+  it("keeps cleanup durable when the exact post-Trash readback is missing", async () => {
+    let failTrash = true;
+    const readbackFailure: { targetId?: string } = {};
+    const fixture = await setup({
+      privateStorage: (raw) => delegateStorage(raw, {
+        get: async (fileId, context) => {
+          const file = await raw.get(fileId, context);
+          if (fileId === readbackFailure.targetId && file.trashed && context?.allowTrashed === true) {
+            throw new Error("injected missing post-Trash readback");
+          }
+          return file;
+        },
+        trash: async (input, context) => {
+          if (failTrash) throw new StorageMutationOutcomeUnknownError(input.fileId);
+          return raw.trash(input, context);
+        }
+      })
+    });
+    const publication = await publishCurrent(fixture);
+    await fixture.service.revoke({ publicId: publication.publicId });
+    const queued = allCleanup((await fixture.manifestStore.read()).value)[0];
+    if (queued === undefined) throw new Error("missing post-Trash cleanup fixture");
+    readbackFailure.targetId = queued.folderId;
+    failTrash = false;
+
+    await fixture.service.revoke({ publicId: publication.publicId });
+    expect(await fixture.raw.get(queued.folderId)).toMatchObject({ trashed: true });
+    expect(allCleanup((await fixture.manifestStore.read()).value)).toContainEqual(expect.objectContaining({ cleanupId: queued.cleanupId }));
+  });
+
+  it("never trashes cleanup through a published root moved away from the verified private boundary", async () => {
+    let failTrash = true;
+    const fixture = await setup({
+      privateStorage: (raw) => delegateStorage(raw, {
+        trash: async (input, context) => {
+          if (failTrash) throw new StorageMutationOutcomeUnknownError(input.fileId);
+          return raw.trash(input, context);
+        }
+      })
+    });
+    const publication = await publishCurrent(fixture);
+    await fixture.service.revoke({ publicId: publication.publicId });
+    const queued = allCleanup((await fixture.manifestStore.read()).value)[0];
+    if (queued === undefined) throw new Error("missing moved-root cleanup fixture");
+    const holding = await fixture.raw.createFolder({ parentId: "private", name: "moved-published-holding" });
+    const published = await fixture.raw.get(fixture.ids.published.id);
+    await fixture.raw.move({
+      fileId: published.id,
+      fromParentId: "private",
+      toParentId: holding.id,
+      expectedVersion: published.version
+    });
+    failTrash = false;
+
+    await fixture.service.revoke({ publicId: publication.publicId });
+    expect(await fixture.raw.get(queued.folderId)).toMatchObject({ trashed: false });
+    expect(allCleanup((await fixture.manifestStore.read()).value)).toContainEqual(expect.objectContaining({ cleanupId: queued.cleanupId }));
   });
 
   it("fails public reads closed for corrupt manifests and wrong snapshot ancestry", async () => {
@@ -463,6 +813,7 @@ describe("immutable publication snapshots", () => {
     });
     await fixture.manifestStore.compareAndSet((manifest) => ({
       ...manifest,
+      cleanup: Array.from({ length: 62 }, (_value, index) => unresolvedCleanup(index)),
       operations: [{
         operationId: oldOperationId,
         publicId,
@@ -477,7 +828,8 @@ describe("immutable publication snapshots", () => {
         revisionFolderId: staleRevision.id,
         revisionFolderVersion: staleRevision.version,
         revisionId: staleRevision.name,
-        revisionMarker
+        revisionMarker,
+        cleanupSlots: 2
       }]
     }));
 
@@ -486,6 +838,10 @@ describe("immutable publication snapshots", () => {
     const manifest = (await fixture.manifestStore.read()).value;
     expect(manifest.operations).toEqual([]);
     expect(manifest.entries[0]?.publicId).toBe(publicId);
+    expect(manifest.cleanup).toHaveLength(63);
+    expect(manifest.cleanup.slice(0, 62).map((record) => record.cleanupId)).toEqual(
+      Array.from({ length: 62 }, (_value, index) => unresolvedCleanup(index).cleanupId)
+    );
     expect(manifest.cleanup).toContainEqual(expect.objectContaining({ folderId: staleRevision.id, marker: revisionMarker }));
     expect(await fixture.reader.getNote(publicId)).toMatchObject({ title: "Share me" });
   });
@@ -500,6 +856,68 @@ describe("immutable publication snapshots", () => {
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
     expect((await fixture.manifestStore.read()).value.entries).toHaveLength(1);
+  });
+
+  it("fences a publish that began source resolution before an accepted revoke", async () => {
+    const fixture = await setup();
+    const first = await publishCurrent(fixture);
+    const opened = await fixture.vault.getNote(noteId);
+    const updated = await fixture.vault.updateNote({
+      noteId,
+      expectedVersion: opened.version,
+      source: sourceFor("Pre-reservation race", "# Must stay revoked\n")
+    });
+    let release!: () => void;
+    let signal!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { signal = resolve; });
+    let paused = false;
+    const delayedVault = {
+      getNote: async (requestedNoteId: string) => {
+        if (!paused) {
+          paused = true;
+          signal();
+          await gate;
+        }
+        return fixture.vault.getNote(requestedNoteId);
+      }
+    };
+    const publishing = new PublicationService({
+      storage: fixture.privateStorage,
+      manifestStore: fixture.manifestStore,
+      indexStore: fixture.indexStore,
+      vault: delayedVault,
+      attachments: fixture.attachments,
+      privateRootId: "private",
+      publishedRootId: fixture.ids.published.id,
+      now: () => new Date("2026-08-24T12:01:00.000Z")
+    });
+
+    const racingPublish = publishing.publish({ noteId, expectedVersion: updated.version });
+    await entered;
+    await fixture.service.revoke({ publicId: first.publicId });
+    release();
+
+    await expect(racingPublish).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await fixture.reader.getNote(first.publicId)).toBeNull();
+    const manifest = (await fixture.manifestStore.read()).value;
+    expect(manifest.entries).toEqual([]);
+    expect(manifest.tombstones).toContainEqual(expect.objectContaining({ publicId: first.publicId }));
+  });
+
+  it("allows a publish explicitly begun after a completed revoke to reuse the stable public ID", async () => {
+    const fixture = await setup();
+    const first = await publishCurrent(fixture);
+    await fixture.service.revoke({ publicId: first.publicId });
+    expect(await fixture.reader.getNote(first.publicId)).toBeNull();
+
+    const opened = await fixture.vault.getNote(noteId);
+    const republished = await fixture.service.publish({ noteId, expectedVersion: opened.version });
+    expect(republished.publicId).toBe(first.publicId);
+    expect(await fixture.reader.getNote(first.publicId)).toMatchObject({ title: "Share me" });
+    const manifest = (await fixture.manifestStore.read()).value;
+    expect(manifest.entries[0]).toMatchObject({ publicId: first.publicId, epoch: 3 });
+    expect(manifest.tombstones).toEqual([]);
   });
 
   it("lets an accepted revoke fence an older in-flight republish", async () => {
