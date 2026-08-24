@@ -641,6 +641,13 @@ export class AttachmentService {
       await this.markAttachmentConflict(mutation).catch(() => undefined);
       return;
     }
+    // The projection was already committed under this fence. Replaying Drive
+    // I/O here can only create a duplicate side effect; the terminal cleanup
+    // is the bounded removal of this exact owned intent.
+    if (mutation.phase === "index-applied") {
+      await this.clearOwnedMutation(mutation);
+      return;
+    }
     const context = { ...this.context(), allowTrashed: true };
     try {
       const attachment = this.recordFromMutation(mutation);
