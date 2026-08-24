@@ -207,35 +207,37 @@ const validJpeg = (bytes) => {
 const validWebp = (bytes) => {
     if (bytes.length < 20 || ascii(bytes, 0, 4) !== "RIFF" || ascii(bytes, 8, 4) !== "WEBP" || u32le(bytes, 4) !== bytes.length - 8)
         return false;
-    let offset = 12;
-    let sawImage = false;
-    while (offset + 8 <= bytes.length) {
-        const type = ascii(bytes, offset, 4);
-        const length = u32le(bytes, offset + 4);
-        if (type === undefined || length === undefined || length > bytes.length - offset - 8)
-            return false;
-        // VP8X carries only extended metadata.  It cannot by itself prove that
-        // this is an image, so require an actual bounded VP8/VP8L frame too.
-        if (type === "VP8 " && validVp8(bytes.subarray(offset + 8, offset + 8 + length)))
-            sawImage = true;
-        if (type === "VP8L" && validVp8l(bytes.subarray(offset + 8, offset + 8 + length)))
-            sawImage = true;
-        offset += 8 + length + (length % 2);
-    }
-    return sawImage && offset === bytes.length;
+    // Conservatively inline only one exact lossy VP8 image chunk. Extended and
+    // lossless containers remain downloads until their complete bitstreams can
+    // be proved with the same bounded parser.
+    if (ascii(bytes, 12, 4) !== "VP8 ")
+        return false;
+    const length = u32le(bytes, 16);
+    if (length === undefined)
+        return false;
+    const dataStart = 20;
+    const dataEnd = dataStart + length;
+    const paddedEnd = dataEnd + (length % 2);
+    if (dataEnd > bytes.length || paddedEnd !== bytes.length)
+        return false;
+    if (length % 2 === 1 && bytes[dataEnd] !== 0)
+        return false;
+    return validVp8(bytes.subarray(dataStart, dataEnd));
 };
 const validVp8 = (bytes) => {
-    if (bytes.length < 11 || (bytes[0] & 1) !== 0 || !equal(bytes, 3, [0x9d, 0x01, 0x2a]))
+    if (bytes.length < 12)
+        return false;
+    const frameTag = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16);
+    const keyFrame = (frameTag & 1) === 0;
+    const version = (frameTag >>> 1) & 0x07;
+    const showFrame = ((frameTag >>> 4) & 1) === 1;
+    const firstPartitionSize = frameTag >>> 5;
+    if (!keyFrame || version > 3 || !showFrame || firstPartitionSize === 0 || !equal(bytes, 3, [0x9d, 0x01, 0x2a]))
         return false;
     const width = (bytes[6] | ((bytes[7] & 0x3f) << 8));
     const height = (bytes[8] | ((bytes[9] & 0x3f) << 8));
-    return width > 0 && height > 0;
-};
-const validVp8l = (bytes) => {
-    // A five-byte VP8L prefix contains dimensions but no decodable lossless
-    // image stream. Until a bounded full VP8L parser exists, keep it download.
-    void bytes;
-    return false;
+    const firstPartitionEnd = 10 + firstPartitionSize;
+    return width > 0 && height > 0 && firstPartitionEnd < bytes.length;
 };
 const validGif = (bytes) => {
     if (bytes.length < 14 || (ascii(bytes, 0, 6) !== "GIF87a" && ascii(bytes, 0, 6) !== "GIF89a"))
@@ -307,56 +309,363 @@ const skipGifSubBlocks = (bytes, initial, requirePayload) => {
     }
     return false;
 };
+const MAX_PDF_XREF_ENTRIES = 10_000;
+const MAX_PDF_PARSE_DEPTH = 32;
+const MAX_PDF_TOKENS = 100_000;
 const validPdf = (bytes) => {
-    if (bytes.length < 64 || ascii(bytes, 0, 5) !== "%PDF-")
+    if (bytes.length < 64 || bytes.length > MAX_ATTACHMENT_BYTES || ascii(bytes, 0, 5) !== "%PDF-")
         return false;
     const text = new TextDecoder("latin1").decode(bytes);
-    if (!/^%PDF-[12]\.[0-9](?:\r?\n|\r)/u.test(text))
+    const header = /^%PDF-[12]\.[0-9](?:\r\n|\n|\r)/u.exec(text);
+    if (header === null)
         return false;
-    const terminal = /(?:\r?\n)startxref\r?\n(\d+)\r?\n%%EOF[\t \r\n]*$/u.exec(text);
+    const terminal = /startxref[\t\n\f\r ]+(\d+)[\t\n\f\r ]+%%EOF[\t\n\f\r ]*$/u.exec(text);
     if (terminal === null)
         return false;
     const xrefOffset = Number(terminal[1]);
-    if (!Number.isSafeInteger(xrefOffset) || xrefOffset < 0 || xrefOffset >= bytes.length || text.slice(xrefOffset, xrefOffset + 4) !== "xref")
+    if (!Number.isSafeInteger(xrefOffset) || xrefOffset < header[0].length || xrefOffset >= text.length || text.slice(xrefOffset, xrefOffset + 4) !== "xref")
         return false;
-    const section = /^xref\r?\n(\d+)\s+(\d+)\r?\n/u.exec(text.slice(xrefOffset));
-    if (section === null)
+    const parsedXref = parseClassicXref(text, xrefOffset);
+    if (parsedXref === undefined || parsedXref.startxref !== xrefOffset || parsedXref.end !== text.length)
         return false;
-    const first = Number(section[1]);
-    const count = Number(section[2]);
-    if (!Number.isSafeInteger(first) || !Number.isSafeInteger(count) || count < 2 || count > 100_000)
+    const { entries, trailer } = parsedXref;
+    if (entries.size < 2 || entries.size > MAX_PDF_XREF_ENTRIES)
         return false;
-    let cursor = xrefOffset + section[0].length;
-    const entries = [];
-    for (let index = 0; index < count; index += 1) {
-        const line = /^(\d{10}) (\d{5}) ([nf]) \r?\n/u.exec(text.slice(cursor));
-        if (line === null)
+    const size = trailer.entries.get("Size");
+    const root = trailer.entries.get("Root");
+    if (size?.kind !== "number" || !size.integer || size.value < 2 || size.value > MAX_PDF_XREF_ENTRIES ||
+        root?.kind !== "reference" || trailer.entries.has("Prev") || trailer.entries.has("XRefStm"))
+        return false;
+    const highestObjectNumber = Math.max(...entries.keys());
+    if (size.value !== highestObjectNumber + 1)
+        return false;
+    const zero = entries.get(0);
+    if (zero === undefined || zero.active || zero.offset !== 0 || zero.generation !== 65_535)
+        return false;
+    for (const entry of entries.values()) {
+        if (entry.objectNumber < 0 || entry.objectNumber >= size.value)
             return false;
-        entries.push({ offset: Number(line[1]), generation: Number(line[2]), active: line[3] === "n" });
-        cursor += line[0].length;
+        if (entry.active) {
+            if (entry.objectNumber === 0 || entry.generation >= 65_535 || entry.offset < header[0].length || entry.offset >= xrefOffset)
+                return false;
+        }
+        else if (entry.objectNumber !== 0 && (entry.offset < 0 || entry.offset >= size.value || entry.generation > 65_535)) {
+            return false;
+        }
     }
-    if (!text.startsWith("trailer", cursor))
+    const active = [...entries.values()].filter((entry) => entry.active).sort((left, right) => left.offset - right.offset);
+    if (active.length === 0 || active.length > MAX_PDF_XREF_ENTRIES - 1)
         return false;
-    const trailerEnd = text.indexOf(">>", cursor + 7);
-    if (trailerEnd === -1)
+    const objects = new Map();
+    let regionCursor = header[0].length;
+    for (let index = 0; index < active.length; index += 1) {
+        const entry = active[index];
+        const limit = active[index + 1]?.offset ?? xrefOffset;
+        if (entry.offset < regionCursor || limit <= entry.offset || !onlyPdfTrivia(text, regionCursor, entry.offset))
+            return false;
+        const parsed = parseIndirectObject(text, entry, limit);
+        if (parsed === undefined || parsed.end > limit || objects.has(entry.objectNumber))
+            return false;
+        objects.set(entry.objectNumber, { generation: entry.generation, value: parsed.value });
+        regionCursor = parsed.end;
+    }
+    if (!onlyPdfTrivia(text, regionCursor, xrefOffset) || objects.size !== active.length)
         return false;
-    const beforeStartXref = text.slice(trailerEnd + 2, terminal.index);
-    if (!/^(?:[\t \r\n]|%[^\r\n]*(?:\r?\n|\r))*$/u.test(beforeStartXref))
+    const rootObject = objects.get(root.objectNumber);
+    if (rootObject === undefined || rootObject.generation !== root.generation || rootObject.value.kind !== "dictionary")
         return false;
-    const root = /\/Root\s+(\d+)\s+(\d+)\s+R/u.exec(text.slice(cursor, trailerEnd + 2));
-    if (root === null)
+    const rootType = rootObject.value.entries.get("Type");
+    if (rootType?.kind !== "name" || rootType.value !== "Catalog")
         return false;
-    const objectNumber = Number(root[1]);
-    const generation = Number(root[2]);
-    const entry = entries[objectNumber - first];
-    if (entry === undefined || !entry.active || entry.generation !== generation || entry.offset < 0 || entry.offset >= xrefOffset)
-        return false;
-    const objectStart = `${objectNumber} ${generation} obj`;
-    if (!text.startsWith(objectStart, entry.offset))
-        return false;
-    const objectEnd = text.indexOf("endobj", entry.offset + objectStart.length);
-    return objectEnd !== -1 && /\/Type\s*\/Catalog\b/u.test(text.slice(entry.offset, objectEnd));
+    return [...objects.values(), { generation: 0, value: trailer }].every(({ value }) => pdfReferences(value).every((reference) => {
+        const target = objects.get(reference.objectNumber);
+        return target !== undefined && target.generation === reference.generation;
+    }));
 };
+const parseClassicXref = (text, xrefOffset) => {
+    let cursor = xrefOffset + 4;
+    cursor = consumePdfLineEnd(text, cursor);
+    if (cursor < 0)
+        return undefined;
+    const entries = new Map();
+    while (entries.size <= MAX_PDF_XREF_ENTRIES) {
+        cursor = skipPdfTrivia(text, cursor, text.length);
+        if (text.startsWith("trailer", cursor) && pdfDelimited(text, cursor + 7))
+            break;
+        const headerEnd = pdfLineEnd(text, cursor);
+        if (headerEnd === undefined)
+            return undefined;
+        const subsection = /^(\d+)[\t ]+(\d+)[\t ]*$/u.exec(text.slice(cursor, headerEnd.contentEnd));
+        if (subsection === null)
+            return undefined;
+        const first = Number(subsection[1]);
+        const count = Number(subsection[2]);
+        if (!Number.isSafeInteger(first) || !Number.isSafeInteger(count) || first < 0 || count < 1 || first + count > MAX_PDF_XREF_ENTRIES || entries.size + count > MAX_PDF_XREF_ENTRIES)
+            return undefined;
+        cursor = headerEnd.next;
+        for (let index = 0; index < count; index += 1) {
+            const entryEnd = pdfLineEnd(text, cursor);
+            if (entryEnd === undefined)
+                return undefined;
+            const line = /^(\d{10}) (\d{5}) ([nf]) $/u.exec(text.slice(cursor, entryEnd.contentEnd));
+            const objectNumber = first + index;
+            if (line === null || entries.has(objectNumber))
+                return undefined;
+            entries.set(objectNumber, {
+                objectNumber,
+                offset: Number(line[1]),
+                generation: Number(line[2]),
+                active: line[3] === "n"
+            });
+            cursor = entryEnd.next;
+        }
+    }
+    if (!text.startsWith("trailer", cursor) || !pdfDelimited(text, cursor + 7))
+        return undefined;
+    const parser = new PdfParser(text, cursor + 7, text.length);
+    const trailer = parser.parseValue();
+    if (trailer?.kind !== "dictionary")
+        return undefined;
+    parser.skipTrivia();
+    if (!parser.consumeKeyword("startxref") || !isPdfWhitespace(text.charCodeAt(parser.position)))
+        return undefined;
+    parser.skipWhitespace();
+    const start = parser.position;
+    while (parser.position < text.length && isAsciiDigit(text.charCodeAt(parser.position)))
+        parser.position += 1;
+    if (parser.position === start)
+        return undefined;
+    const startxref = Number(text.slice(start, parser.position));
+    if (!Number.isSafeInteger(startxref) || !isPdfWhitespace(text.charCodeAt(parser.position)))
+        return undefined;
+    parser.skipWhitespace();
+    if (!text.startsWith("%%EOF", parser.position))
+        return undefined;
+    parser.position += 5;
+    parser.skipWhitespace();
+    return parser.position === text.length ? { entries, trailer, startxref, end: parser.position } : undefined;
+};
+const parseIndirectObject = (text, entry, limit) => {
+    const header = new RegExp(`${entry.objectNumber}[\\x00\\t\\n\\f\\r ]+${entry.generation}[\\x00\\t\\n\\f\\r ]+obj(?=[\\x00\\t\\n\\f\\r %<\\[(/])`, "uy");
+    header.lastIndex = entry.offset;
+    const matched = header.exec(text);
+    if (matched === null)
+        return undefined;
+    const parser = new PdfParser(text, header.lastIndex, limit);
+    const value = parser.parseValue();
+    if (value === undefined)
+        return undefined;
+    parser.skipTrivia();
+    if (!parser.consumeKeyword("endobj"))
+        return undefined;
+    return { value, end: parser.position };
+};
+class PdfParser {
+    text;
+    position;
+    limit;
+    tokens = 0;
+    constructor(text, position, limit) {
+        this.text = text;
+        this.position = position;
+        this.limit = limit;
+    }
+    parseValue(depth = 0) {
+        if (depth > MAX_PDF_PARSE_DEPTH || this.tokens >= MAX_PDF_TOKENS)
+            return undefined;
+        this.tokens += 1;
+        this.skipTrivia();
+        if (this.position >= this.limit)
+            return undefined;
+        if (this.text.startsWith("<<", this.position))
+            return this.parseDictionary(depth + 1);
+        const character = this.text[this.position];
+        if (character === "[")
+            return this.parseArray(depth + 1);
+        if (character === "/")
+            return this.parseName();
+        if (character === "(")
+            return this.parseLiteralString();
+        if (character === "<")
+            return this.parseHexString();
+        if (this.consumeKeyword("true"))
+            return { kind: "boolean", value: true };
+        if (this.consumeKeyword("false"))
+            return { kind: "boolean", value: false };
+        if (this.consumeKeyword("null"))
+            return { kind: "null" };
+        return this.parseNumberOrReference();
+    }
+    skipTrivia() {
+        this.position = skipPdfTrivia(this.text, this.position, this.limit);
+    }
+    skipWhitespace() {
+        while (this.position < this.limit && isPdfWhitespace(this.text.charCodeAt(this.position)))
+            this.position += 1;
+    }
+    consumeKeyword(keyword) {
+        if (!this.text.startsWith(keyword, this.position) || !pdfDelimited(this.text, this.position + keyword.length))
+            return false;
+        this.position += keyword.length;
+        return true;
+    }
+    parseDictionary(depth) {
+        this.position += 2;
+        const entries = new Map();
+        for (;;) {
+            this.skipTrivia();
+            if (this.text.startsWith(">>", this.position)) {
+                this.position += 2;
+                return { kind: "dictionary", entries };
+            }
+            const key = this.parseName();
+            if (key === undefined || entries.has(key.value))
+                return undefined;
+            const value = this.parseValue(depth);
+            if (value === undefined)
+                return undefined;
+            entries.set(key.value, value);
+        }
+    }
+    parseArray(depth) {
+        this.position += 1;
+        const items = [];
+        while (items.length <= MAX_PDF_TOKENS) {
+            this.skipTrivia();
+            if (this.text[this.position] === "]") {
+                this.position += 1;
+                return { kind: "array", items };
+            }
+            const value = this.parseValue(depth);
+            if (value === undefined)
+                return undefined;
+            items.push(value);
+        }
+        return undefined;
+    }
+    parseName() {
+        if (this.text[this.position] !== "/")
+            return undefined;
+        this.position += 1;
+        const start = this.position;
+        while (this.position < this.limit && !isPdfWhitespace(this.text.charCodeAt(this.position)) && !isPdfDelimiter(this.text[this.position]))
+            this.position += 1;
+        const raw = this.text.slice(start, this.position);
+        if (raw.length === 0 || /#(?![0-9A-Fa-f]{2})/u.test(raw))
+            return undefined;
+        return { kind: "name", value: raw.replace(/#([0-9A-Fa-f]{2})/gu, (_match, value) => String.fromCharCode(Number.parseInt(value, 16))) };
+    }
+    parseLiteralString() {
+        this.position += 1;
+        let depth = 1;
+        while (this.position < this.limit) {
+            const character = this.text[this.position++];
+            if (character === "\\") {
+                if (this.position >= this.limit)
+                    return undefined;
+                if (this.text[this.position] === "\r" && this.text[this.position + 1] === "\n")
+                    this.position += 2;
+                else
+                    this.position += 1;
+                continue;
+            }
+            if (character === "(")
+                depth += 1;
+            else if (character === ")") {
+                depth -= 1;
+                if (depth === 0)
+                    return { kind: "string" };
+            }
+        }
+        return undefined;
+    }
+    parseHexString() {
+        this.position += 1;
+        while (this.position < this.limit) {
+            const character = this.text[this.position++];
+            if (character === ">")
+                return { kind: "string" };
+            const code = character?.charCodeAt(0) ?? -1;
+            const hexadecimal = (code >= 48 && code <= 57) || (code >= 65 && code <= 70) || (code >= 97 && code <= 102);
+            if (!hexadecimal && !isPdfWhitespace(code))
+                return undefined;
+        }
+        return undefined;
+    }
+    parseNumberOrReference() {
+        const first = this.readRegularToken();
+        if (first === undefined || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/u.test(first))
+            return undefined;
+        const value = Number(first);
+        if (!Number.isFinite(value))
+            return undefined;
+        const integer = /^[+-]?\d+$/u.test(first);
+        const afterFirst = this.position;
+        if (integer && value >= 0 && Number.isSafeInteger(value)) {
+            this.skipTrivia();
+            const second = this.readRegularToken();
+            if (second !== undefined && /^\d+$/u.test(second)) {
+                const generation = Number(second);
+                this.skipTrivia();
+                if (generation <= 65_535 && this.consumeKeyword("R"))
+                    return { kind: "reference", objectNumber: value, generation };
+            }
+            this.position = afterFirst;
+        }
+        return { kind: "number", value, integer };
+    }
+    readRegularToken() {
+        const start = this.position;
+        while (this.position < this.limit && !isPdfWhitespace(this.text.charCodeAt(this.position)) && !isPdfDelimiter(this.text[this.position]))
+            this.position += 1;
+        return this.position === start ? undefined : this.text.slice(start, this.position);
+    }
+}
+const pdfReferences = (value) => {
+    if (value.kind === "reference")
+        return [{ objectNumber: value.objectNumber, generation: value.generation }];
+    if (value.kind === "array")
+        return value.items.flatMap(pdfReferences);
+    if (value.kind === "dictionary")
+        return [...value.entries.values()].flatMap(pdfReferences);
+    return [];
+};
+const onlyPdfTrivia = (text, start, end) => start <= end && skipPdfTrivia(text, start, end) === end;
+const skipPdfTrivia = (text, initial, limit) => {
+    let cursor = initial;
+    while (cursor < limit) {
+        if (isPdfWhitespace(text.charCodeAt(cursor))) {
+            cursor += 1;
+            continue;
+        }
+        if (text[cursor] !== "%")
+            break;
+        cursor += 1;
+        while (cursor < limit && text[cursor] !== "\r" && text[cursor] !== "\n")
+            cursor += 1;
+    }
+    return cursor;
+};
+const pdfLineEnd = (text, start) => {
+    for (let cursor = start; cursor < text.length; cursor += 1) {
+        if (text[cursor] === "\n")
+            return { contentEnd: cursor, next: cursor + 1 };
+        if (text[cursor] === "\r")
+            return { contentEnd: cursor, next: text[cursor + 1] === "\n" ? cursor + 2 : cursor + 1 };
+    }
+    return undefined;
+};
+const consumePdfLineEnd = (text, cursor) => {
+    if (text[cursor] === "\n")
+        return cursor + 1;
+    if (text[cursor] === "\r")
+        return text[cursor + 1] === "\n" ? cursor + 2 : cursor + 1;
+    return -1;
+};
+const pdfDelimited = (text, cursor) => cursor >= text.length || isPdfWhitespace(text.charCodeAt(cursor)) || isPdfDelimiter(text[cursor]);
+const isPdfWhitespace = (code) => code === 0 || code === 9 || code === 10 || code === 12 || code === 13 || code === 32;
+const isPdfDelimiter = (character) => character !== undefined && "()<>[]{}/%".includes(character);
+const isAsciiDigit = (code) => code >= 48 && code <= 57;
 const equal = (bytes, offset, expected) => expected.every((value, index) => bytes[offset + index] === value);
 const ascii = (bytes, offset, length) => offset + length <= bytes.length ? String.fromCharCode(...bytes.slice(offset, offset + length)) : undefined;
 const u32be = (bytes, offset) => offset + 4 <= bytes.length ? (((bytes[offset] * 0x1000000) + ((bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3])) >>> 0) : undefined;

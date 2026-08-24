@@ -2,15 +2,17 @@ import { createHash, createHmac, randomUUID } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { VaultIndexSchema, type VaultPendingMutation } from "@nxt/contracts";
+import { VaultIndexSchema } from "@nxt/contracts";
+import { parseNote, serializeNote } from "@nxt/domain";
 import { describe, expect, it } from "vitest";
+import { AttachmentService } from "../src/services/attachment-service.js";
 import { RescanService } from "../src/services/rescan-service.js";
 import { SystemFileStore } from "../src/services/system-file-store.js";
 import { GoogleDriveAdapter } from "../src/storage/google-drive-adapter.js";
 import type { GoogleDriveClient, GoogleDriveUpdateInput } from "../src/storage/google-drive-client.js";
 import { LocalDriveAdapter } from "../src/storage/local-drive-adapter.js";
 import { RootBoundaryStorage } from "../src/storage/root-boundary.js";
-import { StorageVersionConflictError, type StoragePort, type StoredFile } from "../src/storage/storage-port.js";
+import { StorageMutationOutcomeUnknownError, StorageVersionConflictError, type StoragePort, type StoredFile } from "../src/storage/storage-port.js";
 
 const delegate = (storage: StoragePort, overrides: Partial<StoragePort>): StoragePort => ({
   get: overrides.get ?? storage.get.bind(storage),
@@ -708,65 +710,203 @@ describe("persisted rescan staging", () => {
     expect(state?.recoveries[0]).toMatchObject({ path: "Notes/000-Broken.md", rawSource });
   });
 
-  it("deliberately rebuilds actual state and reclaims conflict capacity across more than 256 sequential conflicts", async () => {
+  it("reclaims more than 256 terminal attachment conflicts through bounded fresh-instance rescans", async () => {
     const fixture = await setup();
-    const secret = "persisted-rescan-cursor-secret-32-bytes";
-    const recoveredPaths: string[] = [];
-    const seedConflicts = async (count: number, offset: number): Promise<string[]> => {
-      const snapshot = await fixture.indexStore.read();
-      const rawIds: string[] = [];
-      const pendingMutations = Array.from({ length: count }, (_, index): VaultPendingMutation => {
-        const id = randomUUID();
-        rawIds.push(id);
-        return {
-          id,
-          operation: "move-folder",
-          folderId: `raw-folder-${offset + index}`,
-          oldPath: `Notes/External-${String(offset + index).padStart(3, "0")}`,
-          newPath: `Notes/Intended-${String(offset + index).padStart(3, "0")}`,
-          expectedVersion: "1",
-          ownerId: randomUUID(),
-          fence: 2,
-          phase: "conflicted",
-          createdAt: "2026-08-24T08:00:00.000Z",
-          expiresAt: "2026-08-24T08:15:00.000Z"
-        };
+    const assets = await fixture.storage.createFolder({ parentId: "vault", name: "_assets" });
+    const noteCount = 53;
+    const batchSize = 52;
+    const batchCount = 5;
+    const noteIds = Array.from({ length: noteCount }, () => randomUUID());
+    const noteFiles: Array<{ id: string; name: string }> = [];
+    const created = "2026-08-24T08:00:00.000Z";
+    const sourceFor = (index: number, title = `Lifecycle ${index}`): string => serializeNote({
+      frontmatter: { id: noteIds[index] as string, title, created, updated: created, tags: [], aliases: [] },
+      body: `# Lifecycle ${index}\n`
+    });
+    const entries = [];
+    for (let index = 0; index < noteCount; index += 1) {
+      const name = `Lifecycle-${String(index).padStart(2, "0")}.md`;
+      const file = await fixture.storage.createText({ parentId: fixture.notes.id, name, mimeType: "text/markdown", text: sourceFor(index) });
+      noteFiles.push({ id: file.id, name });
+      entries.push({
+        id: noteIds[index] as string,
+        title: `Lifecycle ${index}`,
+        aliases: [],
+        driveId: file.id,
+        path: `Notes/${name}`,
+        created,
+        updated: created,
+        driveVersion: file.version,
+        tags: [],
+        searchText: `lifecycle ${index}`,
+        excerpt: "",
+        outboundNoteIds: [],
+        unresolvedWikiTargets: [],
+        attachmentReferences: [],
+        attachments: [],
+        backlinks: []
       });
-      await fixture.indexStore.update({ ...snapshot.value, pendingMutations }, snapshot.file.version);
-      return rawIds;
+    }
+    const initial = await fixture.indexStore.read();
+    await fixture.indexStore.update({ ...initial.value, entries }, initial.file.version);
+
+    let operationCount = 0;
+    let ambiguousCreates = true;
+    const countedStorage: StoragePort = {
+      get: async (fileId, context) => { operationCount += 1; return fixture.storage.get(fileId, context); },
+      listChildren: async (input, context) => { operationCount += 1; return fixture.storage.listChildren(input, context); },
+      readText: async (fileId, context) => { operationCount += 1; return fixture.storage.readText(fileId, context); },
+      readBytes: async (fileId, context) => { operationCount += 1; return fixture.storage.readBytes(fileId, context); },
+      createFolder: async (input, context) => { operationCount += 1; return fixture.storage.createFolder(input, context); },
+      createText: async (input, context) => { operationCount += 1; return fixture.storage.createText(input, context); },
+      createBytes: async (input, context) => {
+        operationCount += 1;
+        if (ambiguousCreates) throw new StorageMutationOutcomeUnknownError();
+        return fixture.storage.createBytes(input, context);
+      },
+      updateText: async (input, context) => { operationCount += 1; return fixture.storage.updateText(input, context); },
+      move: async (input, context) => { operationCount += 1; return fixture.storage.move(input, context); },
+      trash: async (input, context) => { operationCount += 1; return fixture.storage.trash(input, context); },
+      listRevisions: async (fileId, context) => { operationCount += 1; return fixture.storage.listRevisions(fileId, context); }
     };
-    const reconcile = async (rawIds: readonly string[]): Promise<void> => {
-      let cursor: string | null = null;
-      let complete: boolean;
-      do {
-        const page = await new RescanService({
-          storage: fixture.storage,
-          indexStore: fixture.indexStore,
-          notesFolderId: fixture.notes.id,
-          cursorSecret: secret
-        }).scanPage({ cursor, limit: 100 });
+    const indexStore = new SystemFileStore({
+      storage: countedStorage,
+      fileId: fixture.indexFile.id,
+      parentId: "private",
+      name: "vault-index.json",
+      schema: VaultIndexSchema
+    });
+    const vault = {
+      getNote: async (noteId: string) => {
+        const index = noteIds.indexOf(noteId);
+        const file = noteFiles[index];
+        if (index < 0 || file === undefined) throw new Error("missing lifecycle note");
+        const current = await countedStorage.readText(file.id);
+        const path = `Notes/${file.name}`;
+        return {
+          note: { ...parseNote(current.text), path },
+          source: current.text,
+          driveId: file.id,
+          version: current.file.version,
+          path,
+          checksum: current.checksum
+        };
+      }
+    };
+    let clock = Date.parse("2026-08-24T12:00:00.000Z");
+    const attachmentService = () => new AttachmentService({
+      storage: countedStorage,
+      indexStore,
+      vault,
+      assetsRootId: assets.id,
+      now: () => new Date(clock)
+    });
+    const secret = "terminal-attachment-rescan-secret-32-bytes";
+    const rescanService = () => new RescanService({
+      storage: countedStorage,
+      indexStore,
+      notesFolderId: fixture.notes.id,
+      cursorSecret: secret,
+      now: () => new Date(clock)
+    });
+    const createAmbiguous = async (noteIndex: number, serial: number): Promise<void> => {
+      operationCount = 0;
+      await expect(attachmentService().upload({
+        noteId: noteIds[noteIndex] as string,
+        name: `terminal-${serial}.png`,
+        declaredMime: "image/png",
+        bytes: Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=", "base64"))
+      })).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+      expect(operationCount).toBeLessThan(100);
+    };
+    const terminalizeAll = async (): Promise<void> => {
+      for (let horizon = 0; horizon < 4; horizon += 1) {
+        clock += 15 * 60 * 1_000 + 1;
+        for (;;) {
+          const before = (await indexStore.read()).value.pendingMutations;
+          const dueBefore = before.filter((mutation) => mutation.phase !== "conflicted" && Date.parse(mutation.reconcileAfter ?? mutation.expiresAt) <= clock).length;
+          if (dueBefore === 0) break;
+          operationCount = 0;
+          await expect(attachmentService().read("missing-lifecycle-asset")).rejects.toMatchObject({ code: "NOT_FOUND" });
+          const after = (await indexStore.read()).value.pendingMutations;
+          const dueAfter = after.filter((mutation) => mutation.phase !== "conflicted" && Date.parse(mutation.reconcileAfter ?? mutation.expiresAt) <= clock).length;
+          expect(dueBefore - dueAfter).toBeGreaterThan(0);
+          expect(dueBefore - dueAfter).toBeLessThanOrEqual(8);
+          expect(operationCount).toBeLessThan(800);
+        }
+        if ((await indexStore.read()).value.pendingMutations.every((mutation) => mutation.phase === "conflicted")) return;
+      }
+      throw new Error("attachment conflicts did not become terminal within the bounded horizons");
+    };
+    // Make Drive reality differ from the stale index so the first rescan must
+    // rebuild the actual note projection, not merely clear reservations.
+    const staleFile = await fixture.storage.get(noteFiles[0]!.id);
+    await fixture.storage.updateText({ fileId: staleFile.id, expectedVersion: staleFile.version, mimeType: "text/markdown", text: sourceFor(0, "Actual Drive Title") });
+
+    let terminalConflicts = 0;
+    let carriedLiveMutation = false;
+    for (let batch = 0; batch < batchCount; batch += 1) {
+      const createCount = carriedLiveMutation ? batchSize - 1 : batchSize;
+      for (let index = 0; index < createCount; index += 1) await createAmbiguous(index, terminalConflicts + index);
+      await terminalizeAll();
+      const terminal = (await indexStore.read()).value.pendingMutations;
+      expect(terminal).toHaveLength(batchSize);
+      expect(terminal.every((mutation) => mutation.operation === "create-attachment" && mutation.phase === "conflicted")).toBe(true);
+      const capturedIds = terminal.map((mutation) => mutation.id);
+      const rawSecrets = terminal.flatMap((mutation) => [
+        mutation.id,
+        mutation.ownerId,
+        mutation.recoveryClaimId,
+        mutation.parentId,
+        mutation.driveId,
+        mutation.attachmentMarker
+      ]).filter((value): value is string => value !== undefined);
+      terminalConflicts += terminal.length;
+
+      operationCount = 0;
+      const started = await rescanService().scanPage({ cursor: null, limit: 100 });
+      expect(operationCount).toBeLessThanOrEqual(100);
+      if (batch === 0) {
+        await createAmbiguous(noteCount - 1, terminalConflicts);
+        carriedLiveMutation = true;
+      } else {
+        carriedLiveMutation = false;
+      }
+      const pages = [started];
+      let page = started;
+      while (!page.complete) {
+        operationCount = 0;
+        page = await rescanService().scanPage({ cursor: page.cursor, limit: 100 });
+        expect(operationCount).toBeLessThanOrEqual(100);
         expect(page.records.length + page.recoveries.length).toBeLessThanOrEqual(100);
-        expect(page.recoveries.every((recovery) =>
-          recovery.error === "External change detected. Rescan is reconciling the index." && recovery.rawSource === ""
-        )).toBe(true);
-        const serialized = JSON.stringify(page);
-        for (const rawId of rawIds) expect(serialized).not.toContain(rawId);
-        expect(serialized).not.toContain("raw-folder-");
-        recoveredPaths.push(...page.recoveries.map((recovery) => recovery.path));
-        cursor = page.cursor;
-        complete = page.complete;
-      } while (!complete);
-      expect((await fixture.indexStore.read()).value.pendingMutations).toEqual([]);
-    };
+        pages.push(page);
+        expect(pages.length).toBeLessThan(20);
+      }
+      const recoveries = pages.flatMap((candidate) => candidate.recoveries);
+      expect(recoveries).toHaveLength(batchSize);
+      expect(recoveries.every((recovery) => recovery.path === "Notes" && recovery.rawSource === "" && recovery.error === "External change detected. Rescan is reconciling the index.")).toBe(true);
+      expect(recoveries.every((recovery) => Object.keys(recovery).sort().join(",") === "error,path,rawSource")).toBe(true);
+      const serialized = JSON.stringify(pages);
+      for (const rawSecret of rawSecrets) expect(serialized).not.toContain(rawSecret);
+      const after = (await indexStore.read()).value;
+      expect(after.pendingMutations.some((mutation) => capturedIds.includes(mutation.id))).toBe(false);
+      expect(after.pendingMutations).toHaveLength(carriedLiveMutation ? 1 : 0);
+      if (batch === 0) expect(after.entries.find((entry) => entry.id === noteIds[0])?.title).toBe("Actual Drive Title");
+    }
 
-    const firstBatch = await seedConflicts(256, 0);
-    await reconcile(firstBatch);
-    const secondBatch = await seedConflicts(44, 256);
-    await reconcile(secondBatch);
-
-    expect(new Set(recoveredPaths).size).toBe(300);
-    expect((await fixture.indexStore.read()).value.entries).toEqual([]);
-  });
+    expect(terminalConflicts).toBe(260);
+    expect((await indexStore.read()).value.entries).toHaveLength(noteCount);
+    ambiguousCreates = false;
+    operationCount = 0;
+    await expect(attachmentService().upload({
+      noteId: noteIds[0] as string,
+      name: "after-terminal-recovery.png",
+      declaredMime: "image/png",
+      bytes: Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=", "base64"))
+    })).resolves.toMatchObject({ name: "after-terminal-recovery.png", disposition: "inline" });
+    expect(operationCount).toBeLessThan(100);
+    expect((await indexStore.read()).value.pendingMutations).toEqual([]);
+  }, 120_000);
 });
 
 const createRescanGoogleDrive = () => {

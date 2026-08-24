@@ -11,22 +11,41 @@ import {
 
 const validPng = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=", "base64"));
 const validGif = Uint8Array.from(Buffer.from("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==", "base64"));
-// A bounded VP8 key-frame container. The policy intentionally validates an
-// image payload rather than accepting a VP8X/VP8L metadata shell.
-const validWebp = Uint8Array.from([
-  ...new TextEncoder().encode("RIFF"), 24, 0, 0, 0, ...new TextEncoder().encode("WEBPVP8 "),
-  11, 0, 0, 0, 0, 0, 0, 0x9d, 0x01, 0x2a, 1, 0, 1, 0, 0, 0
-]);
+// A real 1x1 lossy WebP produced by cwebp 1.6.0. Its VP8 frame declares a
+// ten-byte first partition and retains a non-empty token partition.
+const validWebp = Uint8Array.from(Buffer.from("UklGRiYAAABXRUJQVlA4IBoAAABQAQCdASoBAAEAAgA0JZwABAAAAP75HbIQAA==", "base64"));
 const minimalJpeg = Uint8Array.from([
   0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 1, 0, 1, 1, 1, 0x11, 0,
   0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0, 0, 0xff, 0xd9
 ]);
-const classicPdf = (): Uint8Array => {
-  const header = "%PDF-1.4\n";
-  const object = "1 0 obj\n<< /Type /Catalog >>\nendobj\n";
-  const offset = new TextEncoder().encode(header).byteLength;
-  const xref = offset + new TextEncoder().encode(object).byteLength;
-  return new TextEncoder().encode(`${header}${object}xref\n0 2\n0000000000 65535 f \n${offset.toString().padStart(10, "0")} 00000 n \ntrailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+const classicPdf = (changes: {
+  beforeXref?: string;
+  betweenTrailerAndStartxref?: string;
+  mutateXref?: (xref: string, offsets: readonly number[]) => string;
+  trailer?: string;
+  trailing?: string;
+  extraObject?: string;
+} = {}): Uint8Array => {
+  const header = "%PDF-1.4\n%\u00e2\u00e3\u00cf\u00d3\n";
+  const objects = [
+    "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+    "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+    "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] >>\nendobj\n",
+    ...(changes.extraObject === undefined ? [] : [changes.extraObject])
+  ];
+  const offsets: number[] = [];
+  let body = header;
+  for (const object of objects) {
+    offsets.push(Buffer.byteLength(body, "latin1"));
+    body += object;
+  }
+  body += changes.beforeXref ?? "";
+  const xrefOffset = Buffer.byteLength(body, "latin1");
+  const lines = ["0000000000 65535 f ", ...offsets.map((offset) => `${offset.toString().padStart(10, "0")} 00000 n `)];
+  let xref = `xref\n0 ${lines.length}\n${lines.join("\n")}\n`;
+  xref = changes.mutateXref?.(xref, offsets) ?? xref;
+  const trailer = changes.trailer ?? `<< /Size ${lines.length} /Root 1 0 R >>`;
+  return Uint8Array.from(Buffer.from(`${body}${xref}trailer\n${trailer}\n${changes.betweenTrailerAndStartxref ?? ""}startxref\n${xrefOffset}\n%%EOF\n${changes.trailing ?? ""}`, "latin1"));
 };
 
 describe("attachment policy", () => {
@@ -60,24 +79,80 @@ describe("attachment policy", () => {
       .resolves.toMatchObject({ mimeType: "image/png", disposition: "download" });
   });
 
-  it("requires real WebP/GIF image payloads and a classic-xref PDF", async () => {
-    const metadataOnlyWebp = Uint8Array.from([...new TextEncoder().encode("RIFF\u0012\u0000\u0000\u0000WEBPVP8X\n\u0000\u0000\u0000"), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    const gifWithoutImage = Uint8Array.from([...validGif.slice(0, 13), 0x3b]);
+  it("requires a bounded VP8 key frame rather than a header shell or polyglot", async () => {
+    const webp = (payload: readonly number[], declaredLength = payload.length, trailing: readonly number[] = []): Uint8Array => {
+      const riffLength = 4 + 8 + declaredLength + (declaredLength % 2);
+      return Uint8Array.from([
+        ...new TextEncoder().encode("RIFF"), riffLength & 0xff, (riffLength >>> 8) & 0xff, 0, 0,
+        ...new TextEncoder().encode("WEBPVP8 "), declaredLength & 0xff, (declaredLength >>> 8) & 0xff, 0, 0,
+        ...payload, ...(payload.length % 2 === 0 ? [] : [0]), ...trailing
+      ]);
+    };
+    const shell = [0x10, 0, 0, 0x9d, 0x01, 0x2a, 1, 0, 1, 0, 0];
+    const zeroPartitionWithNoise = webp([...shell, 0, 0, 0, 0, 0xaa, 0x55]);
+    const truncatedPartition = webp([0x50, 0x0d, 0, ...shell.slice(3), 1, 2, 3]);
+    const invalidSync = Uint8Array.from(validWebp);
+    invalidSync[23] = 0;
+    const invalidDimensions = Uint8Array.from(validWebp);
+    invalidDimensions[26] = 0;
+    invalidDimensions[27] = 0;
+    const invalidVersion = Uint8Array.from(validWebp);
+    invalidVersion[20] = invalidVersion[20]! | 0x0e;
+    const hiddenFrame = Uint8Array.from(validWebp);
+    hiddenFrame[20] = hiddenFrame[20]! & ~0x10;
+    const badChunkLength = Uint8Array.from(validWebp);
+    badChunkLength[16] = badChunkLength[16]! + 1;
+    const trailingPolyglot = new Uint8Array([...validWebp, ...new TextEncoder().encode("<script>alert(1)</script>")]);
+
+    await expect(detectAttachment({ name: "image.webp", declaredMime: "image/webp", bytes: validWebp }))
+      .resolves.toMatchObject({ mimeType: "image/webp", disposition: "inline" });
+    for (const bytes of [webp(shell), zeroPartitionWithNoise, truncatedPartition, invalidSync, invalidDimensions, invalidVersion, hiddenFrame, badChunkLength, trailingPolyglot]) {
+      await expect(detectAttachment({ name: "image.webp", declaredMime: "image/webp", bytes }))
+        .resolves.toMatchObject({ mimeType: "image/webp", disposition: "download" });
+    }
+  });
+
+  it("accepts only a coherent bounded classic-xref PDF object graph", async () => {
     const tokenPdf = new TextEncoder().encode("%PDF-1.4\nxref\ntrailer\n<< /Root 1 0 R >>\nstartxref\n0\n%%EOF\n");
-    const vp8lHeaderOnly = Uint8Array.from([...new TextEncoder().encode("RIFF\u0012\u0000\u0000\u0000WEBPVP8L"), 5, 0, 0, 0, 0x2f, 0, 0, 0, 0, 0]);
+    const injectedBeforeXref = classicPdf({ beforeXref: "<script>before-xref</script>\n" });
+    const badCount = classicPdf({ mutateXref: (xref) => xref.replace("0 4", "0 5") });
+    const badOffset = classicPdf({ mutateXref: (xref, offsets) => xref.replace(offsets[0]!.toString().padStart(10, "0"), (offsets[0]! + 1).toString().padStart(10, "0")) });
+    const badGeneration = classicPdf({ mutateXref: (xref) => xref.replace(" 00000 n \n", " 00001 n \n") });
+    const badRoot = classicPdf({ trailer: "<< /Size 4 /Root 9 0 R >>" });
+    const badSize = classicPdf({ trailer: "<< /Size 3 /Root 1 0 R >>" });
+    const wrongRootType = classicPdf({
+      extraObject: "4 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n",
+      trailer: "<< /Size 5 /Root 4 0 R >>"
+    });
+    const duplicateSubsection = classicPdf({ mutateXref: (xref, offsets) => `${xref}1 1\n${offsets[0]!.toString().padStart(10, "0")} 00000 n \n` });
+    const impossibleActive = classicPdf({ mutateXref: (xref) => `${xref}4 1\n9999999999 00000 n \n`, trailer: "<< /Size 5 /Root 1 0 R >>" });
+    const activeObjectZero = classicPdf({ mutateXref: (xref) => xref.replace("0000000000 65535 f ", "0000000000 00000 n ") });
+    const scriptBeforeStartxref = classicPdf({ betweenTrailerAndStartxref: "<script>polyglot</script>\n" });
+    const streamPdf = classicPdf({
+      extraObject: "4 0 obj\n<< /Length 1 >>\nstream\nx\nendstream\nendobj\n",
+      trailer: "<< /Size 5 /Root 1 0 R >>"
+    });
+    const truncated = classicPdf().slice(0, -8);
+    const trailingPolyglot = classicPdf({ trailing: "<script>after-eof</script>" });
+
+    await expect(detectAttachment({ name: "file.pdf", declaredMime: "application/pdf", bytes: classicPdf() }))
+      .resolves.toMatchObject({ mimeType: "application/pdf", disposition: "inline" });
+    for (const bytes of [
+      tokenPdf, injectedBeforeXref, badCount, badOffset, badGeneration, badRoot, badSize, wrongRootType,
+      duplicateSubsection, impossibleActive, activeObjectZero, scriptBeforeStartxref, streamPdf, truncated, trailingPolyglot
+    ]) {
+      await expect(detectAttachment({ name: "file.pdf", declaredMime: "application/pdf", bytes }))
+        .resolves.toMatchObject({ mimeType: "application/pdf", disposition: "download" });
+    }
+  });
+
+  it("still requires real GIF/JPEG payload boundaries", async () => {
+    const gifWithoutImage = Uint8Array.from([...validGif.slice(0, 13), 0x3b]);
     const invalidLzw = Uint8Array.from(validGif);
     invalidLzw[invalidLzw.length - 5] = 255;
-    const classic = new TextDecoder().decode(classicPdf());
-    const injectedPdf = new TextEncoder().encode(classic.replace("\nstartxref", "\n<script>polyglot</script>\nstartxref"));
-    await expect(detectAttachment({ name: "image.webp", declaredMime: "image/webp", bytes: validWebp })).resolves.toMatchObject({ disposition: "inline" });
-    await expect(detectAttachment({ name: "image.webp", declaredMime: "image/webp", bytes: metadataOnlyWebp })).resolves.toMatchObject({ disposition: "download" });
-    await expect(detectAttachment({ name: "image.webp", declaredMime: "image/webp", bytes: vp8lHeaderOnly })).resolves.toMatchObject({ disposition: "download" });
     await expect(detectAttachment({ name: "image.gif", declaredMime: "image/gif", bytes: validGif })).resolves.toMatchObject({ disposition: "inline" });
     await expect(detectAttachment({ name: "image.gif", declaredMime: "image/gif", bytes: gifWithoutImage })).resolves.toMatchObject({ disposition: "download" });
     await expect(detectAttachment({ name: "image.gif", declaredMime: "image/gif", bytes: invalidLzw })).resolves.toMatchObject({ disposition: "download" });
-    await expect(detectAttachment({ name: "file.pdf", declaredMime: "application/pdf", bytes: classicPdf() })).resolves.toMatchObject({ disposition: "inline" });
-    await expect(detectAttachment({ name: "file.pdf", declaredMime: "application/pdf", bytes: tokenPdf })).resolves.toMatchObject({ disposition: "download" });
-    await expect(detectAttachment({ name: "file.pdf", declaredMime: "application/pdf", bytes: injectedPdf })).resolves.toMatchObject({ disposition: "download" });
     await expect(detectAttachment({ name: "image.jpg", declaredMime: "image/jpeg", bytes: minimalJpeg })).resolves.toMatchObject({ disposition: "inline" });
     await expect(detectAttachment({ name: "image.jpg", declaredMime: "image/jpeg", bytes: minimalJpeg.slice(0, -1) })).resolves.toMatchObject({ disposition: "download" });
   });

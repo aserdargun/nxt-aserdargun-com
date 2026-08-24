@@ -76,6 +76,7 @@ export declare class AttachmentService {
     private handleFailure;
     private reconcileRecoverableMutations;
     private claimRecovery;
+    private renewRecoveryLease;
     private reconcileUpload;
     private finalizeRecoveredUpload;
     private reconcileTrash;
@@ -100,6 +101,8 @@ export declare class AttachmentService {
     private hasValidRecoveryTimes;
     private recoveryDueAt;
     private hasLiveLease;
+    private hasExactOwnership;
+    private hasExactMutationState;
     private terminalizeMalformedRecovery;
 }
 export {};

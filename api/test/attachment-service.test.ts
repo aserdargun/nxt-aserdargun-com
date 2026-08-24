@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HttpRequest } from "@azure/functions";
-import { VaultIndexSchema, type VaultIndex } from "@nxt/contracts";
+import { VaultIndexSchema, type VaultIndex, type VaultPendingMutation } from "@nxt/contracts";
 import { parseNote, renderMarkdown, serializeNote } from "@nxt/domain";
 import { describe, expect, it, vi } from "vitest";
 import { createAttachmentHandlers } from "../src/functions/attachments.js";
@@ -14,7 +14,6 @@ import { AttachmentService } from "../src/services/attachment-service.js";
 import { SystemFileStore } from "../src/services/system-file-store.js";
 import { LocalDriveAdapter } from "../src/storage/local-drive-adapter.js";
 import {
-  StorageMutationNotAppliedError,
   StorageMutationOutcomeUnknownError,
   type StoragePort
 } from "../src/storage/storage-port.js";
@@ -90,6 +89,113 @@ const setup = async (options: { source?: string; storageOverride?: (storage: Sto
   };
   const service = new AttachmentService({ storage, indexStore, vault, assetsRootId: assets.id });
   return { raw, storage, service, indexStore, vault, ids: { notes, assets, note, indexFile } };
+};
+
+const delegateStorage = (storage: StoragePort, overrides: Partial<StoragePort>): StoragePort => ({
+  get: overrides.get ?? storage.get.bind(storage),
+  listChildren: overrides.listChildren ?? storage.listChildren.bind(storage),
+  readText: overrides.readText ?? storage.readText.bind(storage),
+  readBytes: overrides.readBytes ?? storage.readBytes.bind(storage),
+  createFolder: overrides.createFolder ?? storage.createFolder.bind(storage),
+  createText: overrides.createText ?? storage.createText.bind(storage),
+  createBytes: overrides.createBytes ?? storage.createBytes.bind(storage),
+  updateText: overrides.updateText ?? storage.updateText.bind(storage),
+  move: overrides.move ?? storage.move.bind(storage),
+  trash: overrides.trash ?? storage.trash.bind(storage),
+  listRevisions: overrides.listRevisions ?? storage.listRevisions.bind(storage)
+});
+
+type AttachmentRecoveryProbe = {
+  claimRecovery(candidate: VaultPendingMutation): Promise<VaultPendingMutation | undefined>;
+  reconcileUpload(mutation: VaultPendingMutation): Promise<void>;
+  renewRecoveryLease(mutation: VaultPendingMutation): Promise<VaultPendingMutation>;
+  clearOwnedMutation(mutation: VaultPendingMutation): Promise<void>;
+};
+
+const recoveryProbe = (service: AttachmentService): AttachmentRecoveryProbe => service as unknown as AttachmentRecoveryProbe;
+const recoveryClaimId = (mutation: VaultPendingMutation | undefined): string | undefined =>
+  (mutation as (VaultPendingMutation & { recoveryClaimId?: string }) | undefined)?.recoveryClaimId;
+
+const createClaimBarrierStore = (fixture: Awaited<ReturnType<typeof setup>>) => {
+  let armed = false;
+  let arrivals = 0;
+  let release!: () => void;
+  let transformCalls = 0;
+  const barrier = new Promise<void>((resolve) => { release = resolve; });
+  const storage = delegateStorage(fixture.raw, {
+    updateText: async (input, context) => {
+      if (armed && input.fileId === fixture.ids.indexFile.id && arrivals < 2) {
+        arrivals += 1;
+        if (arrivals === 2) release();
+        await barrier;
+      }
+      return fixture.raw.updateText(input, context);
+    }
+  });
+  const store = new SystemFileStore<VaultIndex>({
+    storage,
+    fileId: fixture.ids.indexFile.id,
+    parentId: "private",
+    name: "vault-index.json",
+    schema: VaultIndexSchema
+  });
+  const compareAndSet = store.compareAndSet.bind(store);
+  store.compareAndSet = ((transform, options) => compareAndSet((index) => {
+    transformCalls += 1;
+    return transform(index);
+  }, options)) as typeof store.compareAndSet;
+  return {
+    store,
+    arm: () => { armed = true; },
+    transformCalls: () => transformCalls
+  };
+};
+
+const createPausedClaimStore = (fixture: Awaited<ReturnType<typeof setup>>) => {
+  const store = new SystemFileStore<VaultIndex>({
+    storage: fixture.raw,
+    fileId: fixture.ids.indexFile.id,
+    parentId: "private",
+    name: "vault-index.json",
+    schema: VaultIndexSchema
+  });
+  let release!: () => void;
+  let signal!: () => void;
+  let paused = true;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const entered = new Promise<void>((resolve) => { signal = resolve; });
+  const compareAndSet = store.compareAndSet.bind(store);
+  store.compareAndSet = (async (transform, options) => {
+    if (paused) {
+      paused = false;
+      signal();
+      await gate;
+    }
+    return compareAndSet(transform, options);
+  }) as typeof store.compareAndSet;
+  return { store, entered, release };
+};
+
+const seedAmbiguousUpload = async (fixture: Awaited<ReturnType<typeof setup>>, clock: { value: number }, apply: boolean) => {
+  const storage = delegateStorage(fixture.raw, {
+    createBytes: async (input, context) => {
+      if (!apply) throw new StorageMutationOutcomeUnknownError();
+      const created = await fixture.raw.createBytes(input, context);
+      throw new StorageMutationOutcomeUnknownError(created.id);
+    }
+  });
+  const service = new AttachmentService({
+    storage,
+    indexStore: fixture.indexStore,
+    vault: fixture.vault,
+    assetsRootId: fixture.ids.assets.id,
+    now: () => new Date(clock.value)
+  });
+  await expect(service.upload({ noteId, name: "ambiguous.png", declaredMime: "image/png", bytes: png }))
+    .rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+  const mutation = (await fixture.indexStore.read()).value.pendingMutations[0];
+  if (mutation === undefined) throw new Error("ambiguous upload did not persist its mutation");
+  return mutation;
 };
 
 describe("AttachmentService", () => {
@@ -319,22 +425,125 @@ describe("AttachmentService", () => {
     expect((await indexStore.read()).value.pendingMutations[0]).toMatchObject({ phase: "conflicted" });
   });
 
-  it("reclaims expired un-applied upload fences across more than 256 sequential failures", async () => {
-    const { raw, indexStore, vault, ids } = await setup();
-    const unavailable: StoragePort = {
-      get: raw.get.bind(raw), listChildren: raw.listChildren.bind(raw), readText: raw.readText.bind(raw), readBytes: raw.readBytes.bind(raw),
-      createFolder: raw.createFolder.bind(raw), createText: raw.createText.bind(raw),
-      createBytes: async () => { throw new StorageMutationNotAppliedError(); },
-      updateText: raw.updateText.bind(raw), move: raw.move.bind(raw), trash: raw.trash.bind(raw), listRevisions: raw.listRevisions.bind(raw)
-    };
-    const failing = new AttachmentService({ storage: unavailable, indexStore, vault, assetsRootId: ids.assets.id });
-    for (let index = 0; index < 257; index += 1) {
-      await expect(failing.upload({ noteId, name: `retry-${index}.png`, declaredMime: "image/png", bytes: png })).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
-    }
-    const recovered = new AttachmentService({ storage: raw, indexStore, vault, assetsRootId: ids.assets.id });
-    await expect(recovered.upload({ noteId, name: "after-recovery.png", declaredMime: "image/png", bytes: png })).resolves.toMatchObject({ name: "after-recovery.png" });
-    expect((await indexStore.read()).value.pendingMutations).toHaveLength(0);
-  }, 20_000);
+  it.each(["same-service", "cross-service"] as const)("grants exactly one %s concurrent recovery claim from one candidate", async (mode) => {
+    const fixture = await setup();
+    const clock = { value: Date.parse("2026-08-24T12:00:00.000Z") };
+    const candidate = await seedAmbiguousUpload(fixture, clock, false);
+    const barrier = createClaimBarrierStore(fixture);
+    const first = new AttachmentService({ storage: fixture.raw, indexStore: barrier.store, vault: fixture.vault, assetsRootId: fixture.ids.assets.id, now: () => new Date(clock.value) });
+    const second = mode === "same-service"
+      ? first
+      : new AttachmentService({ storage: fixture.raw, indexStore: barrier.store, vault: fixture.vault, assetsRootId: fixture.ids.assets.id, now: () => new Date(clock.value) });
+
+    barrier.arm();
+    const claims = await Promise.all([
+      recoveryProbe(first).claimRecovery(candidate),
+      recoveryProbe(second).claimRecovery(candidate)
+    ]);
+    const accepted = claims.filter((claim): claim is VaultPendingMutation => claim !== undefined);
+    const committed = (await fixture.indexStore.read()).value.pendingMutations[0];
+
+    expect(accepted).toHaveLength(1);
+    expect(recoveryClaimId(accepted[0])).toMatch(/^rc1\.[A-Za-z0-9_-]{22}$/u);
+    expect(committed).toMatchObject({
+      id: candidate.id,
+      ownerId: accepted[0]?.ownerId,
+      fence: candidate.fence + 1,
+      expiresAt: accepted[0]?.expiresAt,
+      reconcileAfter: accepted[0]?.reconcileAfter,
+      recoveryClaimId: recoveryClaimId(accepted[0])
+    });
+    expect(barrier.transformCalls()).toBeGreaterThanOrEqual(3);
+  });
+
+  it("keeps a claim bound across lease renewal and rejects a stale snapshot, a CAS loser, and token tampering", async () => {
+    const fixture = await setup();
+    const ownerClock = { value: Date.parse("2026-08-24T12:00:00.000Z") };
+    const candidate = await seedAmbiguousUpload(fixture, ownerClock, false);
+    const owner = new AttachmentService({ storage: fixture.raw, indexStore: fixture.indexStore, vault: fixture.vault, assetsRootId: fixture.ids.assets.id, now: () => new Date(ownerClock.value) });
+    const claimed = await recoveryProbe(owner).claimRecovery(candidate);
+    if (claimed === undefined) throw new Error("expected the initial recovery claim");
+    const paused = createPausedClaimStore(fixture);
+    const loserClock = Date.parse(claimed.expiresAt) + 1;
+    const loser = new AttachmentService({ storage: fixture.raw, indexStore: paused.store, vault: fixture.vault, assetsRootId: fixture.ids.assets.id, now: () => new Date(loserClock) });
+
+    const losingClaim = recoveryProbe(loser).claimRecovery(claimed);
+    await paused.entered;
+    ownerClock.value += 1_000;
+    const renewed = await recoveryProbe(owner).renewRecoveryLease(claimed);
+    paused.release();
+
+    await expect(losingClaim).resolves.toBeUndefined();
+    expect(renewed.fence).toBe(claimed.fence + 1);
+    expect(recoveryClaimId(renewed)).toBe(recoveryClaimId(claimed));
+    expect(Date.parse(renewed.expiresAt)).toBeGreaterThan(Date.parse(claimed.expiresAt));
+    await recoveryProbe(owner).clearOwnedMutation(claimed);
+    expect((await fixture.indexStore.read()).value.pendingMutations).toHaveLength(1);
+
+    const forgedClaimId = `rc1.${"z".repeat(22)}`;
+    await fixture.indexStore.compareAndSet((index) => ({
+      ...index,
+      generation: index.generation + 1,
+      pendingMutations: index.pendingMutations.map((mutation) => mutation.id === renewed.id
+        ? { ...mutation, recoveryClaimId: forgedClaimId }
+        : mutation)
+    }));
+    await recoveryProbe(owner).clearOwnedMutation(renewed);
+    expect((await fixture.indexStore.read()).value.pendingMutations[0]).toMatchObject({ recoveryClaimId: forgedClaimId });
+  });
+
+  it("allows only one concurrent claimant to finalize an exact ambiguous upload", async () => {
+    const fixture = await setup();
+    const clock = { value: Date.parse("2026-08-24T12:00:00.000Z") };
+    const candidate = await seedAmbiguousUpload(fixture, clock, true);
+    const barrier = createClaimBarrierStore(fixture);
+    const service = new AttachmentService({ storage: fixture.raw, indexStore: barrier.store, vault: fixture.vault, assetsRootId: fixture.ids.assets.id, now: () => new Date(clock.value) });
+
+    barrier.arm();
+    const claims = (await Promise.all([
+      recoveryProbe(service).claimRecovery(candidate),
+      recoveryProbe(service).claimRecovery(candidate)
+    ])).filter((claim): claim is VaultPendingMutation => claim !== undefined);
+    await Promise.all(claims.map((claim) => recoveryProbe(service).reconcileUpload(claim)));
+
+    expect(claims).toHaveLength(1);
+    expect((await fixture.indexStore.read()).value.entries[0]?.attachments).toHaveLength(1);
+    expect((await fixture.indexStore.read()).value.pendingMutations).toHaveLength(0);
+  });
+
+  it("allows only one concurrent claimant to conditionally Trash exact duplicate artifacts", async () => {
+    const fixture = await setup();
+    const clock = { value: Date.parse("2026-08-24T12:00:00.000Z") };
+    const candidate = await seedAmbiguousUpload(fixture, clock, true);
+    if (candidate.parentId === undefined || candidate.attachmentMarker === undefined) throw new Error("missing exact upload identity");
+    await fixture.raw.createBytes({
+      parentId: candidate.parentId,
+      name: candidate.targetName as string,
+      mimeType: candidate.attachmentMimeType as string,
+      bytes: png,
+      appProperties: { nxtAttachmentMutation: candidate.attachmentMarker }
+    });
+    let trashCalls = 0;
+    const storage = delegateStorage(fixture.raw, {
+      trash: async (input, context) => {
+        trashCalls += 1;
+        return fixture.raw.trash(input, context);
+      }
+    });
+    const barrier = createClaimBarrierStore(fixture);
+    const service = new AttachmentService({ storage, indexStore: barrier.store, vault: fixture.vault, assetsRootId: fixture.ids.assets.id, now: () => new Date(clock.value) });
+
+    barrier.arm();
+    const claims = (await Promise.all([
+      recoveryProbe(service).claimRecovery(candidate),
+      recoveryProbe(service).claimRecovery(candidate)
+    ])).filter((claim): claim is VaultPendingMutation => claim !== undefined);
+    await Promise.all(claims.map((claim) => recoveryProbe(service).reconcileUpload(claim)));
+
+    expect(claims).toHaveLength(1);
+    expect(trashCalls).toBe(2);
+    expect((await fixture.indexStore.read()).value.pendingMutations).toHaveLength(0);
+  });
 
   it("rejects a readback mismatch without projecting an attachment", async () => {
     const { raw, indexStore, ids, vault } = await setup();

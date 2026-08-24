@@ -239,6 +239,22 @@ it("keeps folder pending names at 255 and attachment pending names at 180 code p
   expect(VaultPendingMutationSchema.safeParse({ ...base, operation: "create-attachment", targetName: "a".repeat(181) }).success).toBe(false);
 });
 
+it("bounds the private per-claim attachment recovery identity", () => {
+  const mutation = {
+    id: "00000000-0000-4000-8000-000000000001",
+    ownerId: "00000000-0000-4000-8000-000000000002",
+    operation: "create-attachment" as const,
+    phase: "outcome-unknown" as const,
+    fence: 3,
+    createdAt: "2026-08-24T00:00:00.000Z",
+    expiresAt: "2026-08-24T00:15:00.000Z",
+    recoveryClaimId: `rc1.${"a".repeat(22)}`
+  };
+  expect(VaultPendingMutationSchema.safeParse(mutation).success).toBe(true);
+  expect(VaultPendingMutationSchema.safeParse({ ...mutation, recoveryClaimId: `rc1.${"a".repeat(23)}` }).success).toBe(false);
+  expect(VaultPendingMutationSchema.safeParse({ ...mutation, recoveryClaimId: "raw-owner-token" }).success).toBe(false);
+});
+
 it("uses NFC Unicode code points, not UTF-16 units, for every folder name boundary", () => {
   const name = "🙂".repeat(255);
   expect(CreateFolderRequestSchema.safeParse({ parentId: `v1.${"a".repeat(16)}.${"b".repeat(8)}.${"c".repeat(22)}`, name }).success).toBe(true);

@@ -50,6 +50,7 @@ export interface AttachmentDelivery {
 
 type AttachmentOwner = Pick<VaultService, "getNote">;
 type IndexedAttachment = { noteId: string; attachment: VaultAttachment };
+type RecoveryClaimedMutation = VaultPendingMutation & { ownerId: string; recoveryClaimId: string };
 
 export class AttachmentService {
   private readonly ownerId = randomUUID();
@@ -107,14 +108,15 @@ export class AttachmentService {
     });
     await this.reserve(mutation);
     let createdId: string | undefined;
-    let activeFence = mutation.fence;
+    let activeMutation = mutation;
     try {
-      const inflight = await this.beginDriveMutation(mutation.id, activeFence);
-      activeFence = inflight.fence;
+      const inflight = await this.beginDriveMutation(activeMutation);
+      activeMutation = inflight;
       await this.assertOwnedMutation(inflight, "drive-inflight");
       const created = await this.options.storage.createBytes({ parentId: folder.id, name, mimeType: detected.mimeType, bytes: input.bytes, appProperties: { nxtAttachmentMutation: marker } }, context);
       createdId = created.id;
-      const applied = await this.markDriveApplied(mutation.id, inflight.fence, created.id);
+      const applied = await this.markDriveApplied(inflight, created.id);
+      activeMutation = applied;
       const verified = await this.verifyReadback({
         driveId: created.id,
         noteId: input.noteId,
@@ -132,10 +134,10 @@ export class AttachmentService {
         version: verified.file.version,
         marker
       };
-      await this.finalizeUpload(mutation.id, applied.fence, input.noteId, result, owner.driveId);
+      await this.finalizeUpload(applied, input.noteId, result, owner.driveId);
       return result;
     } catch (error) {
-      await this.handleFailure(mutation.id, activeFence, error, createdId, createdId === undefined);
+      await this.handleFailure(activeMutation, error, createdId, createdId === undefined);
       throw toApiError(error);
     }
   }
@@ -198,11 +200,11 @@ export class AttachmentService {
       });
       await this.reserve(mutation);
       let driveStarted = false;
-      let activeFence = mutation.fence;
+      let activeMutation = mutation;
       try {
         const reserved = await this.assertTrashReservationCurrent(mutation, record, input.referenceId);
-        const inflight = await this.beginDriveMutation(mutation.id, reserved.fence);
-        activeFence = inflight.fence;
+        const inflight = await this.beginDriveMutation(reserved);
+        activeMutation = inflight;
         await this.assertOwnedMutation(inflight, "drive-inflight");
         driveStarted = true;
         const trashed = await this.options.storage.trash({ fileId: input.assetId, expectedVersion: record.version as string }, context);
@@ -211,12 +213,14 @@ export class AttachmentService {
           trashed.parentIds.length !== 1 || trashed.parentIds[0] !== folder.id || trashed.mimeType !== record.mimeType ||
           trashed.size !== record.size || trashed.appProperties?.nxtAttachmentMutation !== record.marker || trashed.version === record.version
         ) throw new ApiResponseError("DRIVE_UNAVAILABLE");
-        const applied = await this.markDriveApplied(mutation.id, inflight.fence, input.assetId);
-        await this.applyTrashProjection(mutation.id, applied.fence, current.noteId, input.assetId);
-        await this.clearMutation(mutation.id, applied.fence);
+        const applied = await this.markDriveApplied(inflight, input.assetId);
+        activeMutation = applied;
+        const indexedMutation = await this.applyTrashProjection(applied, current.noteId, input.assetId);
+        activeMutation = indexedMutation;
+        await this.clearMutation(indexedMutation);
         return { trashed: true };
       } catch (error) {
-        await this.handleFailure(mutation.id, activeFence, error, input.assetId, !driveStarted);
+        await this.handleFailure(activeMutation, error, input.assetId, !driveStarted);
         throw toApiError(error);
       }
     });
@@ -273,7 +277,7 @@ export class AttachmentService {
     const index = await this.options.indexStore.read();
     const reservation = index.value.pendingMutations.find((candidate) => candidate.id === mutation.id);
     if (
-      reservation === undefined || reservation.ownerId !== this.ownerId || reservation.fence !== mutation.fence || !this.hasLiveLease(reservation) ||
+      reservation === undefined || !this.hasExactMutationState(reservation, mutation) || !this.hasLiveLease(reservation) ||
       reservation.phase !== "reserved" || this.indexReferencesAttachment(index.value, mutation.noteId as string, record.name, opaqueId) ||
       attachmentIsReferenced({ source: owner.source, notePath: owner.path, noteId: mutation.noteId as string, name: record.name, ...(opaqueId === undefined ? {} : { opaqueId }) })
     ) throw new ApiResponseError("CONFLICT");
@@ -406,8 +410,8 @@ export class AttachmentService {
     });
   }
 
-  private async beginDriveMutation(mutationId: string, expectedFence?: number): Promise<VaultPendingMutation> {
-    return this.updateMutation(mutationId, expectedFence, (mutation) => ({
+  private async beginDriveMutation(expected: VaultPendingMutation): Promise<VaultPendingMutation> {
+    return this.updateMutation(expected, (mutation) => ({
       ...mutation,
       fence: mutation.fence + 1,
       phase: "drive-inflight",
@@ -416,34 +420,37 @@ export class AttachmentService {
     }));
   }
 
-  private async markDriveApplied(mutationId: string, expectedFence: number | undefined, driveId: string): Promise<VaultPendingMutation> {
-    return this.updateMutation(mutationId, expectedFence, (mutation) => ({ ...mutation, driveId, phase: "drive-applied", reconcileAfter: new Date(this.now().getTime() + MUTATION_TTL_MS).toISOString() }));
+  private async markDriveApplied(expected: VaultPendingMutation, driveId: string): Promise<VaultPendingMutation> {
+    return this.updateMutation(expected, (mutation) => ({ ...mutation, driveId, phase: "drive-applied", reconcileAfter: new Date(this.now().getTime() + MUTATION_TTL_MS).toISOString() }));
   }
 
-  private async updateMutation(mutationId: string, expectedFence: number | undefined, update: (mutation: VaultPendingMutation) => VaultPendingMutation): Promise<VaultPendingMutation> {
-    await this.options.indexStore.compareAndSet((index) => {
-      const found = index.pendingMutations.find((mutation) => mutation.id === mutationId && mutation.ownerId === this.ownerId && (expectedFence === undefined || mutation.fence === expectedFence));
+  private async updateMutation(expected: VaultPendingMutation, update: (mutation: VaultPendingMutation) => VaultPendingMutation): Promise<VaultPendingMutation> {
+    let expectedResult: VaultPendingMutation | undefined;
+    const committed = await this.options.indexStore.compareAndSet((index) => {
+      const found = index.pendingMutations.find((mutation) => mutation.id === expected.id && this.hasExactMutationState(mutation, expected));
       if (found === undefined || !this.hasLiveLease(found)) throw new ApiResponseError("CONFLICT");
-      return bump(index, { pendingMutations: index.pendingMutations.map((mutation) => mutation.id === mutationId ? update(found) : mutation) });
+      expectedResult = update(found);
+      return bump(index, { pendingMutations: index.pendingMutations.map((mutation) => mutation.id === expected.id ? expectedResult as VaultPendingMutation : mutation) });
     });
-    const current = await this.options.indexStore.read();
-    // Never reuse a callback-local value after CAS.  A phase transition may
-    // deliberately renew its fence, so the committed re-read is authoritative.
-    const committed = current.value.pendingMutations.find((mutation) => mutation.id === mutationId && mutation.ownerId === this.ownerId);
-    if (committed === undefined) throw new ApiResponseError("CONFLICT");
-    return committed;
-  }
-
-  private async assertOwnedMutation(mutation: VaultPendingMutation, phase?: VaultPendingMutation["phase"]): Promise<VaultPendingMutation> {
-    const index = await this.options.indexStore.read();
-    const current = index.value.pendingMutations.find((candidate) => candidate.id === mutation.id && candidate.ownerId === this.ownerId && candidate.fence === mutation.fence);
-    if (current === undefined || !this.hasLiveLease(current) || (phase !== undefined && current.phase !== phase)) throw new ApiResponseError("CONFLICT");
+    const current = committed.value.pendingMutations.find((mutation) => mutation.id === expected.id);
+    if (
+      expectedResult === undefined || current === undefined || !this.hasExactMutationState(current, expectedResult) ||
+      current.phase !== expectedResult.phase || current.expiresAt !== expectedResult.expiresAt ||
+      current.reconcileAfter !== expectedResult.reconcileAfter || current.driveId !== expectedResult.driveId
+    ) throw new ApiResponseError("CONFLICT");
     return current;
   }
 
-  private async finalizeUpload(mutationId: string, expectedFence: number, noteId: string, record: AttachmentRecord, expectedNoteDriveId: string): Promise<void> {
+  private async assertOwnedMutation<T extends VaultPendingMutation>(mutation: T, phase?: VaultPendingMutation["phase"]): Promise<T> {
+    const index = await this.options.indexStore.read();
+    const current = index.value.pendingMutations.find((candidate) => candidate.id === mutation.id && this.hasExactMutationState(candidate, mutation));
+    if (current === undefined || !this.hasLiveLease(current) || (phase !== undefined && current.phase !== phase)) throw new ApiResponseError("CONFLICT");
+    return current as T;
+  }
+
+  private async finalizeUpload(expected: VaultPendingMutation, noteId: string, record: AttachmentRecord, expectedNoteDriveId: string): Promise<void> {
     await this.options.indexStore.compareAndSet((index) => {
-      const mutation = index.pendingMutations.find((candidate) => candidate.id === mutationId && candidate.ownerId === this.ownerId && candidate.fence === expectedFence && candidate.phase === "drive-applied");
+      const mutation = index.pendingMutations.find((candidate) => candidate.id === expected.id && this.hasExactMutationState(candidate, expected) && candidate.phase === "drive-applied");
       const entry = index.entries.find((candidate) => candidate.id === noteId);
       if (mutation === undefined || !this.hasLiveLease(mutation) || entry === undefined || entry.driveId !== expectedNoteDriveId || entry.attachments.some((attachment) => attachment.driveId === record.driveId || sameName(attachment.name, record.name))) {
         throw new ApiResponseError("CONFLICT");
@@ -451,46 +458,50 @@ export class AttachmentService {
       const attachment: VaultAttachment = { ...record };
       return bump(index, {
         entries: index.entries.map((candidate) => candidate.id === noteId ? { ...candidate, attachments: [...candidate.attachments, attachment] } : candidate),
-        pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutationId)
+        pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== expected.id)
       });
     });
   }
 
-  private async applyTrashProjection(mutationId: string, expectedFence: number, noteId: string, assetId: string): Promise<void> {
-    await this.options.indexStore.compareAndSet((index) => {
-      const mutation = index.pendingMutations.find((candidate) => candidate.id === mutationId && candidate.ownerId === this.ownerId && candidate.fence === expectedFence && candidate.phase === "drive-applied");
+  private async applyTrashProjection(expected: VaultPendingMutation, noteId: string, assetId: string): Promise<VaultPendingMutation> {
+    const committed = await this.options.indexStore.compareAndSet((index) => {
+      const mutation = index.pendingMutations.find((candidate) => candidate.id === expected.id && this.hasExactMutationState(candidate, expected) && candidate.phase === "drive-applied");
       if (mutation === undefined || !this.hasLiveLease(mutation)) throw new ApiResponseError("CONFLICT");
       return bump(index, {
         entries: index.entries.map((entry) => entry.id === noteId ? { ...entry, attachments: entry.attachments.filter((attachment) => attachment.driveId !== assetId) } : entry),
-        pendingMutations: index.pendingMutations.map((candidate) => candidate.id === mutationId ? { ...candidate, phase: "index-applied" } : candidate)
+        pendingMutations: index.pendingMutations.map((candidate) => candidate.id === expected.id ? { ...candidate, phase: "index-applied" } : candidate)
       });
     });
+    const indexedExpected: VaultPendingMutation = { ...expected, phase: "index-applied" };
+    const current = committed.value.pendingMutations.find((candidate) => candidate.id === expected.id && this.hasExactMutationState(candidate, indexedExpected));
+    if (current === undefined || !this.hasLiveLease(current)) throw new ApiResponseError("CONFLICT");
+    return current;
   }
 
-  private async clearMutation(mutationId: string, expectedFence?: number): Promise<void> {
+  private async clearMutation(expected: VaultPendingMutation): Promise<void> {
     await this.options.indexStore.compareAndSet((index) => {
-      const current = index.pendingMutations.find((candidate) => candidate.id === mutationId);
+      const current = index.pendingMutations.find((candidate) => candidate.id === expected.id);
       if (current === undefined) return index;
-      if (current.ownerId !== this.ownerId || !this.hasLiveLease(current) || (expectedFence !== undefined && current.fence !== expectedFence)) throw new ApiResponseError("CONFLICT");
-      return bump(index, { pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutationId) });
+      if (!this.hasExactMutationState(current, expected) || !this.hasLiveLease(current)) throw new ApiResponseError("CONFLICT");
+      return bump(index, { pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== expected.id) });
     });
   }
 
-  private async handleFailure(mutationId: string, expectedFence: number, error: unknown, knownDriveId?: string, knownNotApplied = false): Promise<void> {
+  private async handleFailure(expected: VaultPendingMutation, error: unknown, knownDriveId?: string, knownNotApplied = false): Promise<void> {
     if (knownNotApplied && error instanceof ApiResponseError) {
-      await this.clearMutation(mutationId, expectedFence).catch(() => undefined);
+      await this.clearMutation(expected).catch(() => undefined);
       return;
     }
     if (error instanceof StorageMutationNotAppliedError) {
-      await this.clearMutation(mutationId, expectedFence).catch(() => undefined);
+      await this.clearMutation(expected).catch(() => undefined);
       return;
     }
     const driveId = error instanceof StorageMutationOutcomeUnknownError ? error.fileId ?? knownDriveId : knownDriveId;
     await this.options.indexStore.compareAndSet((index) => {
-      const current = index.pendingMutations.find((mutation) => mutation.id === mutationId && mutation.ownerId === this.ownerId && mutation.fence === expectedFence);
+      const current = index.pendingMutations.find((mutation) => mutation.id === expected.id && this.hasExactMutationState(mutation, expected));
       if (current === undefined || !this.hasLiveLease(current)) return index;
       return bump(index, {
-        pendingMutations: index.pendingMutations.map((mutation) => mutation.id === mutationId ? {
+        pendingMutations: index.pendingMutations.map((mutation) => mutation.id === expected.id ? {
           ...mutation,
           fence: mutation.fence + 1,
           ...(driveId === undefined ? {} : { driveId }),
@@ -524,36 +535,57 @@ export class AttachmentService {
     }
   }
 
-  private async claimRecovery(candidate: VaultPendingMutation): Promise<VaultPendingMutation | undefined> {
+  private async claimRecovery(candidate: VaultPendingMutation): Promise<RecoveryClaimedMutation | undefined> {
     const now = this.now().getTime();
     const lease = new Date(now + MUTATION_TTL_MS).toISOString();
-    await this.options.indexStore.compareAndSet((index) => {
-      const current = index.pendingMutations.find((mutation) => mutation.id === candidate.id);
-      if (current === undefined) return index;
-      if (!this.hasValidRecoveryTimes(current)) {
-        return bump(index, { pendingMutations: index.pendingMutations.map((mutation) => mutation.id === candidate.id ? { ...mutation, phase: "conflicted", reconcileAfter: lease, expiresAt: lease } : mutation) });
-      }
-      if (
-        current.fence !== candidate.fence || current.ownerId !== candidate.ownerId || current.phase !== candidate.phase ||
-        current.reconcileAfter !== candidate.reconcileAfter || current.expiresAt !== candidate.expiresAt ||
-        current.phase === "conflicted" || (this.recoveryDueAt(current) as number) > now
-      ) return index;
-      const claimed: VaultPendingMutation = {
-        ...current,
-        ownerId: this.ownerId,
-        fence: current.fence + 1,
-        phase: current.phase === "drive-inflight" ? "outcome-unknown" : current.phase,
-        expiresAt: lease,
-        reconcileAfter: lease
-      };
-      return bump(index, { pendingMutations: index.pendingMutations.map((mutation) => mutation.id === candidate.id ? claimed : mutation) });
-    }).catch(() => undefined);
-    const committed = await this.options.indexStore.read();
-    const claimed = committed.value.pendingMutations.find((mutation) => mutation.id === candidate.id && mutation.ownerId === this.ownerId && mutation.fence === candidate.fence + 1);
+    const recoveryClaimId = `rc1.${randomBytes(16).toString("base64url")}`;
+    const expectedFence = candidate.fence + 1;
+    const expectedPhase = candidate.phase === "drive-inflight" ? "outcome-unknown" : candidate.phase;
+    let committed: Awaited<ReturnType<SystemFileStore<VaultIndex>["compareAndSet"]>>;
+    try {
+      committed = await this.options.indexStore.compareAndSet((index) => {
+        const current = index.pendingMutations.find((mutation) => mutation.id === candidate.id);
+        if (
+          current === undefined || !this.hasValidRecoveryTimes(current) ||
+          current.fence !== candidate.fence || current.ownerId !== candidate.ownerId ||
+          current.recoveryClaimId !== candidate.recoveryClaimId || current.phase !== candidate.phase ||
+          current.reconcileAfter !== candidate.reconcileAfter || current.expiresAt !== candidate.expiresAt ||
+          current.phase === "conflicted" || (this.recoveryDueAt(current) as number) > now
+        ) return index;
+        const claimed: RecoveryClaimedMutation = {
+          ...current,
+          ownerId: this.ownerId,
+          recoveryClaimId,
+          fence: expectedFence,
+          phase: expectedPhase,
+          expiresAt: lease,
+          reconcileAfter: lease
+        };
+        return bump(index, { pendingMutations: index.pendingMutations.map((mutation) => mutation.id === candidate.id ? claimed : mutation) });
+      });
+    } catch {
+      return undefined;
+    }
+    const claimed = committed.value.pendingMutations.find((mutation): mutation is RecoveryClaimedMutation =>
+      mutation.id === candidate.id && mutation.ownerId === this.ownerId && mutation.recoveryClaimId === recoveryClaimId &&
+      mutation.fence === expectedFence && mutation.phase === expectedPhase && mutation.expiresAt === lease && mutation.reconcileAfter === lease
+    );
     return claimed !== undefined && this.hasLiveLease(claimed) ? claimed : undefined;
   }
 
-  private async reconcileUpload(mutation: VaultPendingMutation): Promise<void> {
+  private async renewRecoveryLease<T extends RecoveryClaimedMutation>(mutation: T): Promise<T> {
+    const lease = new Date(this.now().getTime() + MUTATION_TTL_MS).toISOString();
+    const renewed = await this.updateMutation(mutation, (current) => ({
+      ...current,
+      fence: current.fence + 1,
+      expiresAt: lease,
+      reconcileAfter: lease
+    }));
+    if (renewed.recoveryClaimId !== mutation.recoveryClaimId || renewed.ownerId !== mutation.ownerId) throw new ApiResponseError("CONFLICT");
+    return renewed as T;
+  }
+
+  private async reconcileUpload(mutation: RecoveryClaimedMutation): Promise<void> {
     if (!this.hasUploadIdentity(mutation)) {
       await this.markAttachmentConflict(mutation).catch(() => undefined);
       return;
@@ -564,63 +596,68 @@ export class AttachmentService {
       await this.clearOwnedMutation(mutation);
       return;
     }
+    let activeMutation = mutation;
     const context = this.context();
     try {
-      await this.assertOwnedMutation(mutation);
-      const folder = await this.existingAssetFolder(mutation.noteId, context);
-      if (folder.id !== mutation.parentId) throw new ApiResponseError("DRIVE_UNAVAILABLE");
-      const candidates = (await this.listAll(folder.id, context)).filter((file) => !file.trashed && sameName(file.name, mutation.targetName));
+      activeMutation = await this.assertOwnedMutation(activeMutation);
+      const folder = await this.existingAssetFolder(activeMutation.noteId, context);
+      if (folder.id !== activeMutation.parentId) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+      const candidates = (await this.listAll(folder.id, context)).filter((file) => !file.trashed && sameName(file.name, activeMutation.targetName));
       if (candidates.length === 0) {
-        await this.rescheduleUnknownUpload(mutation);
+        await this.rescheduleUnknownUpload(activeMutation);
         return;
       }
-      if (mutation.driveId !== undefined && !candidates.some((candidate) => candidate.id === mutation.driveId)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+      if (activeMutation.driveId !== undefined && !candidates.some((candidate) => candidate.id === activeMutation.driveId)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
       const exact: AttachmentRecord[] = [];
       for (const candidate of candidates) {
-        const record = await this.recoverExactUploadRecord(mutation, candidate.id, folder.id, context);
+        const record = await this.recoverExactUploadRecord(activeMutation, candidate.id, folder.id, context);
         if (record !== undefined) exact.push(record);
       }
       if (exact.length === 1 && candidates.length === 1) {
         const record = exact[0] as AttachmentRecord;
-        const projection = await this.uploadProjectionState(mutation, record);
+        const projection = await this.uploadProjectionState(activeMutation, record);
         if (projection === "already-applied") {
-          await this.clearOwnedMutation(mutation);
+          await this.clearOwnedMutation(activeMutation);
           return;
         }
         if (projection === "name-conflict") {
-          await this.assertOwnedMutation(mutation);
+          activeMutation = await this.renewRecoveryLease(activeMutation);
+          if (await this.uploadProjectionState(activeMutation, record) !== "name-conflict") throw new ApiResponseError("CONFLICT");
+          activeMutation = await this.assertOwnedMutation(activeMutation);
           const trashed = await this.options.storage.trash({ fileId: record.driveId, expectedVersion: record.version as string }, context);
-          if (trashed.id === record.driveId && trashed.trashed) await this.clearOwnedMutation(mutation);
+          if (trashed.id === record.driveId && trashed.trashed) await this.clearOwnedMutation(activeMutation);
           return;
         }
-        await this.finalizeRecoveredUpload(mutation, record);
+        await this.finalizeRecoveredUpload(activeMutation, record);
         return;
       }
       // Duplicate matching artifacts are never exposed.  They can only be
       // quarantined after every candidate proves it is this mutation's exact,
       // unindexed artifact; unrelated or ambiguous files retain the fence.
-      if (exact.length === candidates.length && exact.length > 1 && await this.areUnindexedArtifacts(mutation, exact)) {
+      if (exact.length === candidates.length && exact.length > 1 && await this.areUnindexedArtifacts(activeMutation, exact)) {
         for (const record of exact) {
-          await this.assertOwnedMutation(mutation);
+          activeMutation = await this.renewRecoveryLease(activeMutation);
+          if (!await this.areUnindexedArtifacts(activeMutation, exact)) throw new ApiResponseError("CONFLICT");
+          activeMutation = await this.assertOwnedMutation(activeMutation);
           const trashed = await this.options.storage.trash({ fileId: record.driveId, expectedVersion: record.version as string }, context);
           if (!trashed.trashed || trashed.id !== record.driveId) throw new ApiResponseError("DRIVE_UNAVAILABLE");
         }
-        await this.clearOwnedMutation(mutation);
+        await this.clearOwnedMutation(activeMutation);
       } else if (candidates.length > 0) {
         // Identical names and bytes are not ownership. A markerless matching
         // file remains user data and the intent is delegated to rescan.
-        await this.markAttachmentConflict(mutation);
+        await this.markAttachmentConflict(activeMutation);
       }
     } catch {
       // A missing parent, marker mismatch, version drift, or unavailable
       // readback is never replayed blindly. It becomes a terminal rescan item.
-      await this.markAttachmentConflict(mutation).catch(() => undefined);
+      await this.markAttachmentConflict(activeMutation).catch(() => undefined);
     }
   }
 
-  private async finalizeRecoveredUpload(mutation: VaultPendingMutation & { noteId: string }, record: AttachmentRecord): Promise<void> {
+  private async finalizeRecoveredUpload(mutation: RecoveryClaimedMutation & { noteId: string }, record: AttachmentRecord): Promise<void> {
     await this.options.indexStore.compareAndSet((index) => {
-      const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id && candidate.ownerId === this.ownerId && candidate.fence === mutation.fence && candidate.phase !== "conflicted");
+      const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id && this.hasExactMutationState(candidate, mutation) && candidate.phase !== "conflicted");
       const entry = index.entries.find((candidate) => candidate.id === mutation.noteId);
       if (current === undefined || !this.hasLiveLease(current) || entry === undefined) throw new ApiResponseError("CONFLICT");
       const existing = entry.attachments.find((attachment) => attachment.driveId === record.driveId);
@@ -636,7 +673,7 @@ export class AttachmentService {
     });
   }
 
-  private async reconcileTrash(mutation: VaultPendingMutation): Promise<void> {
+  private async reconcileTrash(mutation: RecoveryClaimedMutation): Promise<void> {
     if (!this.hasTrashIdentity(mutation)) {
       await this.markAttachmentConflict(mutation).catch(() => undefined);
       return;
@@ -648,22 +685,26 @@ export class AttachmentService {
       await this.clearOwnedMutation(mutation);
       return;
     }
+    let activeMutation = mutation;
     const context = { ...this.context(), allowTrashed: true };
     try {
-      const attachment = this.recordFromMutation(mutation);
-      const file = await this.verifyTrashReadback(mutation, attachment, context);
+      activeMutation = await this.assertOwnedMutation(activeMutation);
+      const attachment = this.recordFromMutation(activeMutation);
+      const file = await this.verifyTrashReadback(activeMutation, attachment, context);
       if (file.trashed) {
-        const applied = await this.markDriveApplied(mutation.id, mutation.fence, mutation.driveId);
-        await this.applyTrashProjection(mutation.id, applied.fence, mutation.noteId, mutation.driveId);
-        await this.clearMutation(mutation.id, applied.fence);
+        const applied = await this.markDriveApplied(activeMutation, activeMutation.driveId);
+        activeMutation = applied as typeof activeMutation;
+        const indexedMutation = await this.applyTrashProjection(activeMutation, activeMutation.noteId, activeMutation.driveId);
+        activeMutation = indexedMutation as typeof activeMutation;
+        await this.clearMutation(indexedMutation);
         return;
       }
       // The trash did not apply.  Preserve (or restore) the projection and
       // release the expired reservation so retries cannot exhaust capacity.
-      await this.restoreActiveProjection(mutation, attachment);
-      await this.clearOwnedMutation(mutation);
+      await this.restoreActiveProjection(activeMutation, attachment);
+      await this.clearOwnedMutation(activeMutation);
     } catch {
-      await this.markAttachmentConflict(mutation).catch(() => undefined);
+      await this.markAttachmentConflict(activeMutation).catch(() => undefined);
     }
   }
 
@@ -709,9 +750,9 @@ export class AttachmentService {
     return entry.attachments.some((attachment) => sameName(attachment.name, record.name)) ? "name-conflict" : "absent";
   }
 
-  private async restoreActiveProjection(mutation: VaultPendingMutation & { noteId: string }, attachment: AttachmentRecord): Promise<void> {
+  private async restoreActiveProjection(mutation: RecoveryClaimedMutation & { noteId: string }, attachment: AttachmentRecord): Promise<void> {
     await this.options.indexStore.compareAndSet((index) => {
-      const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id && candidate.ownerId === this.ownerId && candidate.fence === mutation.fence);
+      const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id && this.hasExactMutationState(candidate, mutation));
       const entry = index.entries.find((candidate) => candidate.id === mutation.noteId);
       if (current === undefined || !this.hasLiveLease(current) || entry === undefined) throw new ApiResponseError("CONFLICT");
       const byId = entry.attachments.find((candidate) => candidate.driveId === attachment.driveId);
@@ -754,25 +795,25 @@ export class AttachmentService {
     return metadata.id === mutation.driveId && metadata.parentIds.length === 1 && metadata.parentIds[0] === mutation.parentId && metadata.name === mutation.targetName && metadata.mimeType === mutation.attachmentMimeType && metadata.size === mutation.attachmentSize && metadata.appProperties?.nxtAttachmentMutation === mutation.attachmentMarker && (metadata.trashed || metadata.version === mutation.expectedVersion);
   }
 
-  private async clearOwnedMutation(mutation: VaultPendingMutation): Promise<void> {
+  private async clearOwnedMutation(mutation: RecoveryClaimedMutation): Promise<void> {
     await this.options.indexStore.compareAndSet((index) => {
       const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id);
-      if (current === undefined || current.ownerId !== this.ownerId || current.fence !== mutation.fence || !this.hasLiveLease(current)) return index;
+      if (current === undefined || !this.hasExactMutationState(current, mutation) || !this.hasLiveLease(current)) return index;
       return bump(index, { pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutation.id) });
     });
   }
 
-  private async markAttachmentConflict(mutation: VaultPendingMutation): Promise<void> {
+  private async markAttachmentConflict(mutation: RecoveryClaimedMutation): Promise<void> {
     await this.options.indexStore.compareAndSet((index) => {
-      const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id && candidate.ownerId === this.ownerId && candidate.fence === mutation.fence);
+      const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id && this.hasExactMutationState(candidate, mutation));
       if (current === undefined || !this.hasLiveLease(current)) return index;
       return bump(index, { pendingMutations: index.pendingMutations.map((candidate) => candidate.id === mutation.id ? { ...candidate, phase: "conflicted", reconcileAfter: new Date(this.now().getTime() + MUTATION_TTL_MS).toISOString() } : candidate) });
     });
   }
 
-  private async rescheduleUnknownUpload(mutation: VaultPendingMutation): Promise<void> {
+  private async rescheduleUnknownUpload(mutation: RecoveryClaimedMutation): Promise<void> {
     await this.options.indexStore.compareAndSet((index) => {
-      const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id && candidate.ownerId === this.ownerId && candidate.fence === mutation.fence);
+      const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id && this.hasExactMutationState(candidate, mutation));
       if (current === undefined || !this.hasLiveLease(current)) return index;
       const attempts = (current.recoveryAttempts ?? 0) + 1;
       const next = attempts >= 3
@@ -838,18 +879,46 @@ export class AttachmentService {
     return Number.isFinite(expiry) && expiry > this.now().getTime();
   }
 
+  private hasExactOwnership(current: VaultPendingMutation, expected: VaultPendingMutation): boolean {
+    return current.id === expected.id && current.ownerId === this.ownerId && expected.ownerId === this.ownerId &&
+      current.fence === expected.fence && current.recoveryClaimId === expected.recoveryClaimId;
+  }
+
+  private hasExactMutationState(current: VaultPendingMutation, expected: VaultPendingMutation): boolean {
+    return this.hasExactOwnership(current, expected) && current.phase === expected.phase && current.expiresAt === expected.expiresAt &&
+      current.reconcileAfter === expected.reconcileAfter && current.driveId === expected.driveId;
+  }
+
   private async terminalizeMalformedRecovery(candidate: VaultPendingMutation): Promise<void> {
     const horizon = new Date(this.now().getTime() + MUTATION_TTL_MS).toISOString();
-    await this.options.indexStore.compareAndSet((index) => {
-      const current = index.pendingMutations.find((mutation) => mutation.id === candidate.id);
-      if (current === undefined || current.fence !== candidate.fence || current.ownerId !== candidate.ownerId || current.phase !== candidate.phase) return index;
-      return bump(index, { pendingMutations: index.pendingMutations.map((mutation) => mutation.id === candidate.id ? {
-        ...mutation,
-        phase: "conflicted",
-        expiresAt: horizon,
-        reconcileAfter: horizon
-      } : mutation) });
-    }).catch(() => undefined);
+    const recoveryClaimId = `rc1.${randomBytes(16).toString("base64url")}`;
+    const expectedFence = candidate.fence + 1;
+    try {
+      const committed = await this.options.indexStore.compareAndSet((index) => {
+        const current = index.pendingMutations.find((mutation) => mutation.id === candidate.id);
+        if (
+          current === undefined || current.fence !== candidate.fence || current.ownerId !== candidate.ownerId ||
+          current.recoveryClaimId !== candidate.recoveryClaimId || current.phase !== candidate.phase ||
+          current.reconcileAfter !== candidate.reconcileAfter || current.expiresAt !== candidate.expiresAt
+        ) return index;
+        return bump(index, { pendingMutations: index.pendingMutations.map((mutation) => mutation.id === candidate.id ? {
+          ...mutation,
+          ownerId: this.ownerId,
+          recoveryClaimId,
+          fence: expectedFence,
+          phase: "conflicted",
+          expiresAt: horizon,
+          reconcileAfter: horizon
+        } : mutation) });
+      });
+      const terminal = committed.value.pendingMutations.find((mutation) =>
+        mutation.id === candidate.id && mutation.ownerId === this.ownerId && mutation.recoveryClaimId === recoveryClaimId &&
+        mutation.fence === expectedFence && mutation.phase === "conflicted" && mutation.expiresAt === horizon && mutation.reconcileAfter === horizon
+      );
+      if (terminal === undefined) return;
+    } catch {
+      // A competing exact terminal claim owns the record; this caller stops.
+    }
   }
 }
 

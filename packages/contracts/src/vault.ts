@@ -5,6 +5,8 @@ import { AttachmentNameSchema, FolderNameSchema } from "./attachment.js";
 export const DriveIdSchema = z.string().min(1).max(512);
 /** Internal, random, non-user-controlled proof that an artifact came from one attachment intent. */
 export const AttachmentMutationMarkerSchema = z.string().regex(/^am1\.[A-Za-z0-9_-]{22}$/u);
+/** Internal, per-CAS proof that one recovery caller owns the committed lease. */
+export const AttachmentRecoveryClaimIdSchema = z.string().regex(/^rc1\.[A-Za-z0-9_-]{22}$/u);
 
 export const VaultAttachmentSchema = z
   .object({
@@ -102,6 +104,7 @@ export const VaultPendingMutationSchema = z
     attachmentReferenceId: z.string().max(512).optional(),
     attachmentMarker: AttachmentMutationMarkerSchema.optional(),
     recoveryAttempts: z.number().int().min(0).max(8).optional(),
+    recoveryClaimId: AttachmentRecoveryClaimIdSchema.optional(),
     source: z.string().max(100_000).optional(),
     ownerId: NoteIdSchema.optional(),
     fence: z.number().int().positive().default(1),

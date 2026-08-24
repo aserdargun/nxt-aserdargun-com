@@ -350,14 +350,23 @@ export class RescanService {
         current.nonce !== receipt.fromNonce || current.expiresAt !== receipt.fromExpiresAt
       ) throw new ApiResponseError("CONFLICT");
       const captured = new Set(state.conflictMutationIds);
+      const capturedMutations = index.pendingMutations.filter((mutation) => captured.has(mutation.id));
       if (
-        index.pendingMutations.some((mutation) => mutation.phase !== "conflicted" || !captured.has(mutation.id)) ||
-        captured.size !== index.pendingMutations.length
+        captured.size !== state.conflictMutationIds.length || capturedMutations.length !== captured.size ||
+        capturedMutations.some((mutation) => mutation.phase !== "conflicted")
       ) throw new ApiResponseError("CONFLICT");
+      // A rescan owns only the exact terminal IDs captured when it started.
+      // Attachment work that begins later remains fenced and its current
+      // projection is rebased onto the rebuilt note index rather than erased.
+      const currentAttachments = new Map(index.entries.map((entry) => [entry.id, entry.attachments] as const));
+      const rebasedEntries = entries.map((entry) => ({
+        ...entry,
+        attachments: currentAttachments.get(entry.id) ?? entry.attachments
+      }));
       return {
         ...index,
         generation: index.generation + 1,
-        entries,
+        entries: rebasedEntries,
         pendingMutations: index.pendingMutations.filter((mutation) => !captured.has(mutation.id)),
         rescanState: null,
         lastCompletedRescan: { scanId: state.scanId, baseGeneration: state.baseGeneration, ...receipt }

@@ -2,6 +2,8 @@ import { z } from "zod";
 export declare const DriveIdSchema: z.ZodString;
 /** Internal, random, non-user-controlled proof that an artifact came from one attachment intent. */
 export declare const AttachmentMutationMarkerSchema: z.ZodString;
+/** Internal, per-CAS proof that one recovery caller owns the committed lease. */
+export declare const AttachmentRecoveryClaimIdSchema: z.ZodString;
 export declare const VaultAttachmentSchema: z.ZodObject<{
     driveId: z.ZodString;
     name: z.ZodString;
@@ -117,6 +119,7 @@ export declare const VaultPendingMutationSchema: z.ZodObject<{
     attachmentReferenceId: z.ZodOptional<z.ZodString>;
     attachmentMarker: z.ZodOptional<z.ZodString>;
     recoveryAttempts: z.ZodOptional<z.ZodNumber>;
+    recoveryClaimId: z.ZodOptional<z.ZodString>;
     source: z.ZodOptional<z.ZodString>;
     ownerId: z.ZodOptional<z.ZodUUID>;
     fence: z.ZodDefault<z.ZodNumber>;
@@ -367,6 +370,7 @@ export declare const VaultIndexSchema: z.ZodObject<{
         attachmentReferenceId: z.ZodOptional<z.ZodString>;
         attachmentMarker: z.ZodOptional<z.ZodString>;
         recoveryAttempts: z.ZodOptional<z.ZodNumber>;
+        recoveryClaimId: z.ZodOptional<z.ZodString>;
         source: z.ZodOptional<z.ZodString>;
         ownerId: z.ZodOptional<z.ZodUUID>;
         fence: z.ZodDefault<z.ZodNumber>;
