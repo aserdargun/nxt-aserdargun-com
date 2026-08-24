@@ -20,13 +20,13 @@
   --accent-aqua: #8ec07c;
   --accent-orange: #fe8019;
   --accent-gray: #a89984;
-  --focus: var(--accent-yellow);
+  --focus: var(--yellow);
   --selection: rgb(215 153 33 / 18%);
   --error: var(--red);
   --warning: var(--orange);
   --success: var(--green);
   --link: var(--blue);
-  --code: var(--accent-orange);
+  --code: var(--orange);
 }
 
 :root[data-theme="light"] {
@@ -50,13 +50,13 @@
   --accent-aqua: #427b58;
   --accent-orange: #af3a03;
   --accent-gray: #665c54;
-  --focus: var(--accent-yellow);
+  --focus: var(--yellow);
   --selection: rgb(181 118 20 / 18%);
   --error: var(--red);
   --warning: var(--orange);
   --success: var(--green);
   --link: var(--blue);
-  --code: var(--accent-orange);
+  --code: var(--orange);
 }
 
 :root[data-theme="system"] {
@@ -80,13 +80,13 @@
   --accent-aqua: #8ec07c;
   --accent-orange: #fe8019;
   --accent-gray: #a89984;
-  --focus: var(--accent-yellow);
+  --focus: var(--yellow);
   --selection: rgb(215 153 33 / 18%);
   --error: var(--red);
   --warning: var(--orange);
   --success: var(--green);
   --link: var(--blue);
-  --code: var(--accent-orange);
+  --code: var(--orange);
 }
 
 @media (prefers-color-scheme: light) {
@@ -111,13 +111,13 @@
     --accent-aqua: #427b58;
     --accent-orange: #af3a03;
     --accent-gray: #665c54;
-    --focus: var(--accent-yellow);
+    --focus: var(--yellow);
     --selection: rgb(181 118 20 / 18%);
     --error: var(--red);
     --warning: var(--orange);
     --success: var(--green);
     --link: var(--blue);
-    --code: var(--accent-orange);
+    --code: var(--orange);
   }
 }
 

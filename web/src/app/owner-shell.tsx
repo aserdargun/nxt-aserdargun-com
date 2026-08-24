@@ -15,7 +15,7 @@ import {
   Tags,
   Upload
 } from "lucide-react";
-import { useState, type ComponentType } from "react";
+import { useState, useSyncExternalStore, type ComponentType } from "react";
 
 type Destination = "files" | "editor" | "preview" | "info";
 
@@ -45,6 +45,28 @@ const EDITOR_LINES = [
   "",
   "Backlinks"
 ] as const;
+
+const ACTIVE_NOTE = {
+  path: "Notes / Plans",
+  title: "Plans"
+} as const;
+
+const MOBILE_MEDIA_QUERY = "(max-width: 767px)";
+
+const mobileViewportSnapshot = (): boolean =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  window.matchMedia(MOBILE_MEDIA_QUERY).matches;
+
+const subscribeToMobileViewport = (onChange: () => void): (() => void) => {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return () => {};
+  const query = window.matchMedia(MOBILE_MEDIA_QUERY);
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
+};
+
+const useMobileViewport = (): boolean =>
+  useSyncExternalStore(subscribeToMobileViewport, mobileViewportSnapshot, () => false);
 
 interface DestinationNavigationProps {
   readonly label: "Desktop destinations" | "Mobile destinations";
@@ -85,6 +107,21 @@ const SaveStatus = (): React.JSX.Element => (
   </output>
 );
 
+const ActiveNotePath = ({
+  className,
+  path,
+  withIcon = false
+}: {
+  readonly className: string;
+  readonly path: string;
+  readonly withIcon?: boolean;
+}): React.JSX.Element => (
+  <div className={className} aria-label={`Active note path: ${path}`} title={path}>
+    {withIcon ? <Folder size={18} strokeWidth={1.75} aria-hidden /> : null}
+    <span>{path}</span>
+  </div>
+);
+
 const ShellHeader = ({
   activeDestination,
   onSelect
@@ -93,13 +130,18 @@ const ShellHeader = ({
   readonly onSelect: (destination: Destination) => void;
 }): React.JSX.Element => (
   <header className="shell-header">
-    <span className="brand shell-brand">NXT</span>
-    <DestinationNavigation
-      label="Desktop destinations"
-      activeDestination={activeDestination}
-      onSelect={onSelect}
-    />
-    <span className="mobile-title">Plans</span>
+    <div className="shell-header-explorer">
+      <span className="brand shell-brand">NXT</span>
+      <DestinationNavigation
+        label="Desktop destinations"
+        activeDestination={activeDestination}
+        onSelect={onSelect}
+      />
+    </div>
+    <span className="mobile-title">{ACTIVE_NOTE.title}</span>
+    <button className="mobile-more touch-target" type="button" aria-label="Info" onClick={() => onSelect("info")}>
+      <MoreVertical size={23} strokeWidth={1.75} aria-hidden />
+    </button>
     <div className="shell-actions" aria-label="Editor actions">
       <button className="text-action touch-target" type="button">
         <Paperclip size={19} strokeWidth={1.75} aria-hidden />
@@ -110,19 +152,13 @@ const ShellHeader = ({
         <span>Publish</span>
       </button>
     </div>
-    <button className="mobile-more touch-target" type="button" aria-label="Info" onClick={() => onSelect("info")}>
-      <MoreVertical size={23} strokeWidth={1.75} aria-hidden />
-    </button>
-    <div className="mobile-path" aria-label="Active note path">
-      <Folder size={18} strokeWidth={1.75} aria-hidden />
-      <span>Notes / Plans</span>
-    </div>
+    <ActiveNotePath className="mobile-path" path={ACTIVE_NOTE.path} withIcon />
     <SaveStatus />
   </header>
 );
 
-const ExplorerRegion = (): React.JSX.Element => (
-  <section className="workspace-region explorer-region" role="region" aria-label="Files">
+const ExplorerRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Element => (
+  <section className="workspace-region explorer-region" role="region" aria-label="Files" hidden={hidden}>
     <div className="search-row">
       <Search size={18} strokeWidth={1.75} aria-hidden />
       <input aria-label="Files" placeholder="Files" />
@@ -166,10 +202,10 @@ const ExplorerRegion = (): React.JSX.Element => (
   </section>
 );
 
-const EditorRegion = (): React.JSX.Element => (
-  <section className="workspace-region editor-region" role="region" aria-label="Editor">
+const EditorRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Element => (
+  <section className="workspace-region editor-region" role="region" aria-label="Editor" hidden={hidden}>
     <div className="region-toolbar">
-      <span className="desktop-path" aria-label="Active note path">Notes / Plans</span>
+      <ActiveNotePath className="desktop-path" path={ACTIVE_NOTE.path} />
       <span className="region-label">Editor</span>
     </div>
     <div className="editor-canvas" aria-label="Editor">
@@ -183,8 +219,8 @@ const EditorRegion = (): React.JSX.Element => (
   </section>
 );
 
-const PreviewRegion = (): React.JSX.Element => (
-  <section className="context-region preview-region" role="region" aria-label="Preview">
+const PreviewRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Element => (
+  <section className="context-region preview-region" role="region" aria-label="Preview" hidden={hidden}>
     <div className="context-tabs" role="tablist" aria-label="Preview">
       <button className="context-tab touch-target active" type="button" role="tab" aria-selected="true">Preview</button>
       <button className="context-tab touch-target" type="button" role="tab" aria-selected="false">Outline</button>
@@ -205,8 +241,8 @@ const PreviewRegion = (): React.JSX.Element => (
   </section>
 );
 
-const InfoRegion = (): React.JSX.Element => (
-  <section className="context-region info-region" role="region" aria-label="Info">
+const InfoRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Element => (
+  <section className="context-region info-region" role="region" aria-label="Info" hidden={hidden}>
     <div className="region-toolbar"><span className="region-label">Info</span></div>
     <div className="info-content">
       <h1>Info</h1>
@@ -218,6 +254,9 @@ const InfoRegion = (): React.JSX.Element => (
 
 export const OwnerShell = (): React.JSX.Element => {
   const [activeDestination, setActiveDestination] = useState<Destination>("editor");
+  const isMobileViewport = useMobileViewport();
+  const isHidden = (destination: Destination): boolean =>
+    isMobileViewport && activeDestination !== destination;
 
   return (
     <div
@@ -227,11 +266,11 @@ export const OwnerShell = (): React.JSX.Element => {
     >
       <ShellHeader activeDestination={activeDestination} onSelect={setActiveDestination} />
       <main className="workspace" aria-label="NXT workspace">
-        <ExplorerRegion />
-        <EditorRegion />
+        <ExplorerRegion hidden={isHidden("files")} />
+        <EditorRegion hidden={isHidden("editor")} />
         <div className="context-column">
-          <PreviewRegion />
-          <InfoRegion />
+          <PreviewRegion hidden={isHidden("preview")} />
+          <InfoRegion hidden={isHidden("info")} />
         </div>
       </main>
       <footer className="shell-status" aria-label="Info">

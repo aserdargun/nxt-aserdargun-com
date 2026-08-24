@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { build } from "vite";
 import { OwnerShell } from "../app/owner-shell";
 import { ThemeProvider, useTheme } from "../app/providers";
@@ -18,6 +18,94 @@ const FORBIDDEN_PRIVATE_MARKERS = [
   "GOOGLE_REFRESH_TOKEN",
   "NXT_PRIVATE_DRIVE_FOLDER_ID"
 ] as const;
+
+interface StyleRuleSnapshot {
+  readonly media: string | undefined;
+  readonly selectors: readonly string[];
+  readonly style: CSSStyleDeclaration;
+}
+
+const collectStyleRules = (
+  rules: CSSRuleList,
+  media: string | undefined = undefined,
+  collected: StyleRuleSnapshot[] = []
+): StyleRuleSnapshot[] => {
+  for (const rule of rules) {
+    if (rule.type === CSSRule.STYLE_RULE) {
+      const styleRule = rule as CSSStyleRule;
+      collected.push({
+        media,
+        selectors: styleRule.selectorText.split(",").map((selector) => selector.trim()),
+        style: styleRule.style
+      });
+    } else if (rule.type === CSSRule.MEDIA_RULE) {
+      const mediaRule = rule as CSSMediaRule;
+      collectStyleRules(mediaRule.cssRules, mediaRule.conditionText, collected);
+    }
+  }
+  return collected;
+};
+
+const parseStyleRules = (css: string): StyleRuleSnapshot[] => {
+  const style = document.createElement("style");
+  style.dataset.testTheme = "true";
+  style.textContent = css;
+  document.head.append(style);
+  return collectStyleRules(style.sheet?.cssRules ?? ([] as unknown as CSSRuleList));
+};
+
+const getStyleRule = (
+  rules: readonly StyleRuleSnapshot[],
+  selector: string,
+  media?: string
+): CSSStyleDeclaration => {
+  const matches = rules.filter(
+    (rule) =>
+      rule.selectors.includes(selector) &&
+      (media === undefined ? rule.media === undefined : rule.media?.includes(media) === true)
+  );
+  expect(matches, `Expected one ${selector} rule in ${media ?? "the base stylesheet"}`).toHaveLength(1);
+  const match = matches[0];
+  if (match === undefined) throw new Error(`Missing CSS rule for ${selector}.`);
+  return match.style;
+};
+
+const getCascadingStyleRule = (
+  rules: readonly StyleRuleSnapshot[],
+  selector: string,
+  property: string,
+  media?: string
+): CSSStyleDeclaration => {
+  const matches = rules.filter(
+    (rule) =>
+      rule.selectors.includes(selector) &&
+      rule.style.getPropertyValue(property).trim() !== "" &&
+      (media === undefined ? rule.media === undefined : rule.media?.includes(media) === true)
+  );
+  expect(
+    matches,
+    `Expected ${selector} to define ${property} in ${media ?? "the base stylesheet"}`
+  ).not.toHaveLength(0);
+  const match = matches.at(-1);
+  if (match === undefined) throw new Error(`Missing ${property} rule for ${selector}.`);
+  return match.style;
+};
+
+const useMobileViewport = (matches: boolean): void => {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string): MediaQueryList => ({
+      matches,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(() => true)
+    }))
+  );
+};
 
 const readTree = async (directory: string): Promise<string> => {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -43,6 +131,7 @@ const ThemeHarness = (): React.JSX.Element => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   document.documentElement.removeAttribute("data-theme");
   document.head.querySelectorAll("style[data-test-theme]").forEach((style) => style.remove());
 });
@@ -61,23 +150,61 @@ describe("responsive owner shell", () => {
     expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
   });
 
-  it("switches the single mobile destination while preserving all shell regions", async () => {
+  it("exposes only the selected mobile destination after every destination click", async () => {
+    useMobileViewport(true);
     const user = userEvent.setup();
     render(<OwnerShell />);
-    const shell = screen.getByTestId("owner-shell");
     const mobile = screen.getByRole("navigation", { name: "Mobile destinations" });
 
-    expect(shell).toHaveAttribute("data-mobile-destination", "editor");
-    await user.click(within(mobile).getByRole("button", { name: "Preview" }));
+    const expectOnlySurface = (selected: (typeof DESTINATIONS)[number]): void => {
+      for (const name of DESTINATIONS) {
+        const exposed = screen.queryByRole("region", { name });
+        if (name === selected) {
+          expect(exposed).toBeVisible();
+        } else {
+          expect(exposed).not.toBeInTheDocument();
+        }
+        const preserved = document.querySelector(
+          `section[role="region"][aria-label="${name}"]`
+        );
+        expect(preserved).toBeInTheDocument();
+        if (name === selected) {
+          expect(preserved).not.toHaveAttribute("hidden");
+        } else {
+          expect(preserved).toHaveAttribute("hidden");
+        }
+      }
+    };
 
-    expect(shell).toHaveAttribute("data-mobile-destination", "preview");
-    expect(within(mobile).getByRole("button", { name: "Preview" })).toHaveAttribute(
-      "aria-pressed",
-      "true"
-    );
-    expect(screen.getByRole("region", { name: "Editor" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Preview" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Info" })).toBeInTheDocument();
+    expectOnlySurface("Editor");
+    for (const destination of ["Files", "Preview", "Info", "Editor"] as const) {
+      await user.click(within(mobile).getByRole("button", { name: destination }));
+      expectOnlySurface(destination);
+      expect(within(mobile).getByRole("button", { name: destination })).toHaveAttribute(
+        "aria-pressed",
+        "true"
+      );
+    }
+  });
+
+  it("keeps every workspace region exposed concurrently on desktop", () => {
+    useMobileViewport(false);
+    render(<OwnerShell />);
+
+    for (const name of DESTINATIONS) {
+      expect(screen.getByRole("region", { name })).toBeVisible();
+    }
+  });
+
+  it("exposes the complete active note path from the same visible value", () => {
+    render(<OwnerShell />);
+
+    const paths = screen.getAllByLabelText("Active note path: Notes / Plans");
+    expect(paths).toHaveLength(2);
+    for (const path of paths) {
+      expect(path).toHaveTextContent("Notes / Plans");
+      expect(path).toHaveAttribute("title", "Notes / Plans");
+    }
   });
 
   it("uses semantic landmarks, direct actions, and a polite live save status", () => {
@@ -108,34 +235,51 @@ describe("Gruvbox theme contract", () => {
     expect(document.documentElement).toHaveAttribute("data-theme", "system");
   });
 
-  it("parses exact dark colors, semantic tokens, and all eight accents", () => {
-    const style = document.createElement("style");
-    style.dataset.testTheme = "true";
-    style.textContent = gruvboxCss;
-    document.head.append(style);
-    document.documentElement.dataset.theme = "dark";
-    const tokens = getComputedStyle(document.documentElement);
+  it("locks focus and code semantics to yellow and orange in every theme branch", () => {
+    const rules = parseStyleRules(gruvboxCss);
+    const branches = [
+      [":root[data-theme=\"dark\"]", undefined, "#d79921", "#d65d0e"],
+      [":root[data-theme=\"light\"]", undefined, "#b57614", "#af3a03"],
+      [":root[data-theme=\"system\"]", undefined, "#d79921", "#d65d0e"],
+      [":root[data-theme=\"system\"]", "prefers-color-scheme: light", "#b57614", "#af3a03"]
+    ] as const;
 
-    expect(tokens.getPropertyValue("--bg").trim()).toBe("#282828");
-    expect(tokens.getPropertyValue("--surface").trim()).toBe("#32302f");
-    expect(tokens.getPropertyValue("--panel").trim()).toBe("#3c3836");
-    expect(tokens.getPropertyValue("--border").trim()).toBe("#504945");
-    expect(tokens.getPropertyValue("--text").trim()).toBe("#ebdbb2");
-    expect(tokens.getPropertyValue("--muted").trim()).toBe("#a89984");
-    for (const semantic of [
-      "focus",
-      "selection",
-      "error",
-      "warning",
-      "success",
-      "link",
-      "code"
-    ]) {
-      expect(tokens.getPropertyValue(`--${semantic}`).trim()).not.toBe("");
+    for (const [selector, media, yellow, orange] of branches) {
+      const style = getStyleRule(rules, selector, media);
+      expect(style.getPropertyValue("--yellow").trim()).toBe(yellow);
+      expect(style.getPropertyValue("--orange").trim()).toBe(orange);
+      expect(style.getPropertyValue("--focus").trim()).toBe("var(--yellow)");
+      expect(style.getPropertyValue("--code").trim()).toBe("var(--orange)");
+      for (const accent of ["red", "green", "yellow", "blue", "purple", "aqua", "orange", "gray"]) {
+        expect(style.getPropertyValue(`--accent-${accent}`).trim()).not.toBe("");
+      }
     }
-    for (const accent of ["red", "green", "yellow", "blue", "purple", "aqua", "orange", "gray"]) {
-      expect(tokens.getPropertyValue(`--accent-${accent}`).trim()).not.toBe("");
+  });
+
+  it("routes headings, selected/action chrome, focus, and code through locked semantics", () => {
+    const rules = parseStyleRules(`${gruvboxCss}\n${layoutCss}`);
+    const yellowUsages = [
+      [".brand", "color"],
+      [".primary-link", "color"],
+      [".destination-button[aria-pressed=\"true\"]", "color"],
+      [".publish-action", "color"],
+      [".explorer-section h2", "color"],
+      [".tree-row.selected::before", "background"],
+      [".source-heading", "color"],
+      [".context-tab.active::after", "background"]
+    ] as const;
+
+    for (const [selector, property] of yellowUsages) {
+      expect(
+        getCascadingStyleRule(rules, selector, property).getPropertyValue(property).trim()
+      ).toBe("var(--yellow)");
     }
+    expect(getStyleRule(rules, "button:focus-visible").getPropertyValue("outline").trim()).toContain(
+      "var(--focus)"
+    );
+    expect(getStyleRule(rules, ".preview-content code").getPropertyValue("color").trim()).toBe(
+      "var(--code)"
+    );
   });
 
   it("ships parsed focus, 44px target, reduced-motion, system-theme, and overflow rules", () => {
@@ -162,6 +306,59 @@ describe("Gruvbox theme contract", () => {
     expect(cssRules).toMatch(
       /\.editor-region\s*>\s*\.region-toolbar\s*\{\s*display:\s*none;/u
     );
+  });
+
+  it("aligns desktop header groups to the explorer, editor, and context tracks", () => {
+    const rules = parseStyleRules(layoutCss);
+
+    expect(getStyleRule(rules, ".shell-header").getPropertyValue("grid-template-columns").trim()).toBe(
+      "23fr 47fr 30fr"
+    );
+    expect(getStyleRule(rules, ".shell-header-explorer").getPropertyValue("grid-column").trim()).toBe(
+      "1"
+    );
+    const actions = getStyleRule(rules, ".shell-actions");
+    expect(actions.getPropertyValue("grid-column").trim()).toBe("2");
+    expect(actions.getPropertyValue("justify-content").trim()).toBe("flex-end");
+    const save = getStyleRule(rules, ".save-status");
+    expect(save.getPropertyValue("grid-column").trim()).toBe("3");
+    expect(save.getPropertyValue("justify-self").trim()).toBe("end");
+  });
+
+  it("locks each mobile control and active-destination treatment to the accepted sizes", () => {
+    const rules = parseStyleRules(layoutCss);
+    const mobile = "max-width: 767px";
+
+    expect(getStyleRule(rules, ".search-row input", mobile).getPropertyValue("height").trim()).toBe(
+      "44px"
+    );
+    for (const selector of [".shell-actions svg", ".mobile-path svg", ".explorer-region svg"]) {
+      const style = getStyleRule(rules, selector, mobile);
+      expect(style.getPropertyValue("width").trim()).toBe("22px");
+      expect(style.getPropertyValue("height").trim()).toBe("22px");
+    }
+    const bottomIcon = getStyleRule(rules, ".mobile-destinations svg", mobile);
+    expect(bottomIcon.getPropertyValue("width").trim()).toBe("24px");
+    expect(bottomIcon.getPropertyValue("height").trim()).toBe("24px");
+    const actions = getStyleRule(rules, ".text-action", mobile);
+    expect(actions.getPropertyValue("min-height").trim()).toBe("44px");
+    const destination = getStyleRule(rules, ".mobile-destinations .destination-button", mobile);
+    expect(destination.getPropertyValue("min-height").trim()).toBe("44px");
+    expect(destination.getPropertyValue("font-size").trim()).toBe("13px");
+    const active = getStyleRule(
+      rules,
+      ".mobile-destinations .destination-button[aria-pressed=\"true\"]",
+      mobile
+    );
+    expect(active.getPropertyValue("color").trim()).toBe("var(--yellow)");
+    expect(active.getPropertyValue("background").trim()).toBe("transparent");
+    expect(
+      getStyleRule(
+        rules,
+        ".mobile-destinations .destination-button[aria-pressed=\"true\"]::after",
+        mobile
+      ).getPropertyValue("background").trim()
+    ).toBe("var(--yellow)");
   });
 });
 
