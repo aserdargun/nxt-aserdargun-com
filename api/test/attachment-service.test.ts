@@ -14,6 +14,7 @@ import { AttachmentService } from "../src/services/attachment-service.js";
 import { SystemFileStore } from "../src/services/system-file-store.js";
 import { LocalDriveAdapter } from "../src/storage/local-drive-adapter.js";
 import {
+  StorageMutationNotAppliedError,
   StorageMutationOutcomeUnknownError,
   type StoragePort
 } from "../src/storage/storage-port.js";
@@ -122,6 +123,11 @@ describe("AttachmentService", () => {
       size: png.byteLength,
       disposition: "inline"
     }]);
+    expect(stored.file.appProperties?.nxtAttachmentMutation).toMatch(/^am1\.[A-Za-z0-9_-]{22}$/u);
+    expect((await indexStore.read()).value.entries[0]?.attachments[0]).toMatchObject({
+      marker: stored.file.appProperties?.nxtAttachmentMutation,
+      version: stored.file.version
+    });
   });
 
   it("rejects a configured asset root unless it is the exact _assets folder", async () => {
@@ -289,7 +295,7 @@ describe("AttachmentService", () => {
     await expect(recovered.read(assetId)).resolves.toMatchObject({ name: "recover.png", mimeType: "image/png", disposition: "inline" });
   });
 
-  it("quarantines multiple exact unindexed artifacts rather than exposing an ambiguous upload", async () => {
+  it("never trashes an unmarked lookalike while reconciling an ambiguous upload", async () => {
     const { raw, indexStore, ids, vault } = await setup();
     const storage: StoragePort = {
       get: raw.get.bind(raw), listChildren: raw.listChildren.bind(raw), readText: raw.readText.bind(raw), readBytes: raw.readBytes.bind(raw),
@@ -308,9 +314,9 @@ describe("AttachmentService", () => {
     const recovered = new AttachmentService({ storage: raw, indexStore, vault, assetsRootId: ids.assets.id });
 
     await expect(recovered.read(mutation.driveId)).rejects.toMatchObject({ code: "NOT_FOUND" });
-    expect((await raw.get(mutation.driveId)).trashed).toBe(true);
-    expect((await raw.get(duplicate.id)).trashed).toBe(true);
-    expect((await indexStore.read()).value.pendingMutations).toHaveLength(0);
+    expect((await raw.get(mutation.driveId)).trashed).toBe(false);
+    expect((await raw.get(duplicate.id)).trashed).toBe(false);
+    expect((await indexStore.read()).value.pendingMutations[0]).toMatchObject({ phase: "conflicted" });
   });
 
   it("reclaims expired un-applied upload fences across more than 256 sequential failures", async () => {
@@ -318,7 +324,7 @@ describe("AttachmentService", () => {
     const unavailable: StoragePort = {
       get: raw.get.bind(raw), listChildren: raw.listChildren.bind(raw), readText: raw.readText.bind(raw), readBytes: raw.readBytes.bind(raw),
       createFolder: raw.createFolder.bind(raw), createText: raw.createText.bind(raw),
-      createBytes: async () => { throw new StorageMutationOutcomeUnknownError(); },
+      createBytes: async () => { throw new StorageMutationNotAppliedError(); },
       updateText: raw.updateText.bind(raw), move: raw.move.bind(raw), trash: raw.trash.bind(raw), listRevisions: raw.listRevisions.bind(raw)
     };
     const failing = new AttachmentService({ storage: unavailable, indexStore, vault, assetsRootId: ids.assets.id });

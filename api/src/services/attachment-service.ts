@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { NoteIdSchema, type VaultAttachment, type VaultIndex, type VaultPendingMutation } from "@nxt/contracts";
 import { attachmentIsReferenced, projectionReferencesAttachment } from "@nxt/domain";
 import { ApiResponseError } from "../http/api-response.js";
@@ -37,6 +37,8 @@ export interface AttachmentRecord {
   size: number;
   checksum: string;
   disposition: AttachmentDisposition;
+  version?: string | undefined;
+  marker?: string | undefined;
 }
 
 export interface AttachmentDelivery {
@@ -91,6 +93,7 @@ export class AttachmentService {
     const folder = await this.assetFolder(input.noteId, context);
     const name = resolveAttachmentName(normalizeAttachmentName(input.name), (await this.listAll(folder.id, context)).map((file) => file.name));
     const detected = await detectAttachment({ name, declaredMime: input.declaredMime, bytes: input.bytes });
+    const marker = `am1.${randomBytes(16).toString("base64url")}`;
     const mutation = this.newMutation({
       operation: "create-attachment",
       noteId: input.noteId,
@@ -99,20 +102,22 @@ export class AttachmentService {
       expectedChecksum: checksum(input.bytes),
       attachmentMimeType: detected.mimeType,
       attachmentSize: input.bytes.byteLength,
-      attachmentDisposition: detected.disposition
+      attachmentDisposition: detected.disposition,
+      attachmentMarker: marker
     });
     await this.reserve(mutation);
     let createdId: string | undefined;
     try {
-      await this.beginDriveMutation(mutation.id);
-      const created = await this.options.storage.createBytes({ parentId: folder.id, name, mimeType: detected.mimeType, bytes: input.bytes }, context);
+      const inflight = await this.beginDriveMutation(mutation.id, mutation.fence);
+      await this.assertOwnedMutation(inflight, "drive-inflight");
+      const created = await this.options.storage.createBytes({ parentId: folder.id, name, mimeType: detected.mimeType, bytes: input.bytes, appProperties: { nxtAttachmentMutation: marker } }, context);
       createdId = created.id;
-      await this.markDriveApplied(mutation.id, created.id);
+      const applied = await this.markDriveApplied(mutation.id, inflight.fence, created.id);
       const verified = await this.verifyReadback({
         driveId: created.id,
         noteId: input.noteId,
         folderId: folder.id,
-        attachment: { driveId: created.id, name, mimeType: detected.mimeType, size: input.bytes.byteLength, checksum: checksum(input.bytes), disposition: detected.disposition },
+        attachment: { driveId: created.id, name, mimeType: detected.mimeType, size: input.bytes.byteLength, checksum: checksum(input.bytes), disposition: detected.disposition, version: created.version, marker },
         context
       });
       const result: AttachmentRecord = {
@@ -121,9 +126,11 @@ export class AttachmentService {
         mimeType: verified.mimeType,
         size: verified.file.size,
         checksum: verified.checksum,
-        disposition: detected.disposition
+        disposition: detected.disposition,
+        version: verified.file.version,
+        marker
       };
-      await this.finalizeUpload(mutation.id, input.noteId, result, owner.driveId);
+      await this.finalizeUpload(mutation.id, applied.fence, input.noteId, result, owner.driveId);
       return result;
     } catch (error) {
       await this.handleFailure(mutation.id, error, createdId, createdId === undefined);
@@ -184,22 +191,25 @@ export class AttachmentService {
         attachmentMimeType: record.mimeType,
         attachmentSize: record.size,
         attachmentDisposition: record.disposition,
-        attachmentReferenceId: input.referenceId
+        attachmentReferenceId: input.referenceId,
+        attachmentMarker: record.marker
       });
       await this.reserve(mutation);
       let driveStarted = false;
       try {
-        await this.assertTrashReservationCurrent(mutation, record, input.referenceId);
-        await this.beginDriveMutation(mutation.id);
+        const reserved = await this.assertTrashReservationCurrent(mutation, record, input.referenceId);
+        const inflight = await this.beginDriveMutation(mutation.id, reserved.fence);
+        await this.assertOwnedMutation(inflight, "drive-inflight");
         driveStarted = true;
-        const trashed = await this.options.storage.trash(input.assetId, context);
+        const trashed = await this.options.storage.trash(input.assetId, context, record.version);
         if (
           trashed.id !== input.assetId || !trashed.trashed || trashed.name !== record.name ||
-          trashed.parentIds.length !== 1 || trashed.parentIds[0] !== folder.id
+          trashed.parentIds.length !== 1 || trashed.parentIds[0] !== folder.id || trashed.mimeType !== record.mimeType ||
+          trashed.size !== record.size || trashed.appProperties?.nxtAttachmentMutation !== record.marker || trashed.version === record.version
         ) throw new ApiResponseError("DRIVE_UNAVAILABLE");
-        await this.markDriveApplied(mutation.id, input.assetId);
-        await this.applyTrashProjection(mutation.id, current.noteId, input.assetId);
-        await this.clearMutation(mutation.id);
+        const applied = await this.markDriveApplied(mutation.id, inflight.fence, input.assetId);
+        await this.applyTrashProjection(mutation.id, applied.fence, current.noteId, input.assetId);
+        await this.clearMutation(mutation.id, applied.fence);
         return { trashed: true };
       } catch (error) {
         await this.handleFailure(mutation.id, error, input.assetId, !driveStarted);
@@ -253,7 +263,7 @@ export class AttachmentService {
     return index.entries.some((entry) => entry.id !== noteId && projectionReferencesAttachment(entry.attachmentReferences, { noteId, name, ...(opaqueId === undefined ? {} : { opaqueId }) }));
   }
 
-  private async assertTrashReservationCurrent(mutation: VaultPendingMutation, record: AttachmentRecord, opaqueId?: string): Promise<void> {
+  private async assertTrashReservationCurrent(mutation: VaultPendingMutation, record: AttachmentRecord, opaqueId?: string): Promise<VaultPendingMutation> {
     const owner = await this.getOwnedNote(mutation.noteId as string);
     if (owner.checksum !== mutation.originalChecksum || owner.path !== mutation.oldPath) throw new ApiResponseError("CONFLICT");
     const index = await this.options.indexStore.read();
@@ -263,6 +273,7 @@ export class AttachmentService {
       reservation.phase !== "reserved" || this.indexReferencesAttachment(index.value, mutation.noteId as string, record.name, opaqueId) ||
       attachmentIsReferenced({ source: owner.source, notePath: owner.path, noteId: mutation.noteId as string, name: record.name, ...(opaqueId === undefined ? {} : { opaqueId }) })
     ) throw new ApiResponseError("CONFLICT");
+    return reservation;
   }
 
   private async assetFolder(noteId: string, context: StorageOperationContext): Promise<StoredFile> {
@@ -338,7 +349,9 @@ export class AttachmentService {
       file.trashed || file.mimeType === FOLDER_MIME_TYPE || file.mimeType === SHORTCUT_MIME_TYPE ||
       file.parentIds.length !== 1 || file.parentIds[0] !== input.folderId || file.name !== input.attachment.name ||
       file.size !== input.attachment.size || file.size !== bytes.byteLength || bytes.byteLength > MAX_ATTACHMENT_BYTES ||
-      readbackChecksum !== checksum(bytes) || readbackChecksum !== input.attachment.checksum
+      readbackChecksum !== checksum(bytes) || readbackChecksum !== input.attachment.checksum ||
+      (input.attachment.version !== undefined && file.version !== input.attachment.version) ||
+      (input.attachment.marker !== undefined && file.appProperties?.nxtAttachmentMutation !== input.attachment.marker)
     ) throw new ApiResponseError("DRIVE_UNAVAILABLE");
     const detected = await detectAttachment({ name: file.name, declaredMime: file.mimeType, bytes });
     if (detected.mimeType !== input.attachment.mimeType || file.mimeType !== input.attachment.mimeType) {
@@ -349,12 +362,12 @@ export class AttachmentService {
   }
 
   private toRecord(attachment: VaultAttachment): AttachmentRecord {
-    if (attachment.checksum === undefined || attachment.disposition === undefined) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+    if (attachment.checksum === undefined || attachment.disposition === undefined || attachment.version === undefined || attachment.marker === undefined) throw new ApiResponseError("DRIVE_UNAVAILABLE");
     if (attachment.size > MAX_ATTACHMENT_BYTES) throw new ApiResponseError("TOO_LARGE");
-    return { ...attachment, checksum: attachment.checksum, disposition: attachment.disposition };
+    return { driveId: attachment.driveId, name: attachment.name, mimeType: attachment.mimeType, size: attachment.size, checksum: attachment.checksum, disposition: attachment.disposition, version: attachment.version, marker: attachment.marker };
   }
 
-  private newMutation(changes: Pick<VaultPendingMutation, "operation" | "noteId" | "driveId" | "parentId" | "targetName" | "expectedChecksum" | "originalChecksum" | "oldPath" | "expectedVersion" | "preflightGeneration" | "attachmentMimeType" | "attachmentSize" | "attachmentDisposition" | "attachmentReferenceId">): VaultPendingMutation {
+  private newMutation(changes: Pick<VaultPendingMutation, "operation" | "noteId" | "driveId" | "parentId" | "targetName" | "expectedChecksum" | "originalChecksum" | "oldPath" | "expectedVersion" | "preflightGeneration" | "attachmentMimeType" | "attachmentSize" | "attachmentDisposition" | "attachmentReferenceId" | "attachmentMarker">): VaultPendingMutation {
     const now = this.now();
     return {
       id: this.options.createId?.() ?? randomUUID(),
@@ -371,7 +384,11 @@ export class AttachmentService {
     await this.options.indexStore.compareAndSet((index) => {
       if (!index.entries.some((entry) => entry.id === mutation.noteId)) throw new ApiResponseError("NOT_FOUND");
       if (mutation.operation === "trash-attachment") {
-        if (mutation.preflightGeneration !== index.generation || this.indexReferencesAttachment(index, mutation.noteId as string, mutation.targetName as string, mutation.attachmentReferenceId)) {
+        if (
+          mutation.preflightGeneration !== index.generation ||
+          this.indexReferencesAttachment(index, mutation.noteId as string, mutation.targetName as string, mutation.attachmentReferenceId) ||
+          index.pendingMutations.some((candidate) => candidate.phase !== "conflicted" && (candidate.operation === "create-note" || candidate.operation === "update-note" || candidate.operation === "move-note"))
+        ) {
           throw new ApiResponseError("CONFLICT");
         }
       }
@@ -385,8 +402,8 @@ export class AttachmentService {
     });
   }
 
-  private async beginDriveMutation(mutationId: string): Promise<void> {
-    await this.updateMutation(mutationId, (mutation) => ({
+  private async beginDriveMutation(mutationId: string, expectedFence?: number): Promise<VaultPendingMutation> {
+    return this.updateMutation(mutationId, expectedFence, (mutation) => ({
       ...mutation,
       phase: "drive-inflight",
       expiresAt: new Date(this.now().getTime() + MUTATION_TTL_MS).toISOString(),
@@ -394,21 +411,32 @@ export class AttachmentService {
     }));
   }
 
-  private async markDriveApplied(mutationId: string, driveId: string): Promise<void> {
-    await this.updateMutation(mutationId, (mutation) => ({ ...mutation, driveId, phase: "drive-applied", reconcileAfter: this.now().toISOString() }));
+  private async markDriveApplied(mutationId: string, expectedFence: number | undefined, driveId: string): Promise<VaultPendingMutation> {
+    return this.updateMutation(mutationId, expectedFence, (mutation) => ({ ...mutation, driveId, phase: "drive-applied", reconcileAfter: new Date(this.now().getTime() + MUTATION_TTL_MS).toISOString() }));
   }
 
-  private async updateMutation(mutationId: string, update: (mutation: VaultPendingMutation) => VaultPendingMutation): Promise<void> {
+  private async updateMutation(mutationId: string, expectedFence: number | undefined, update: (mutation: VaultPendingMutation) => VaultPendingMutation): Promise<VaultPendingMutation> {
     await this.options.indexStore.compareAndSet((index) => {
-      const found = index.pendingMutations.find((mutation) => mutation.id === mutationId && mutation.ownerId === this.ownerId);
+      const found = index.pendingMutations.find((mutation) => mutation.id === mutationId && mutation.ownerId === this.ownerId && (expectedFence === undefined || mutation.fence === expectedFence));
       if (found === undefined) throw new ApiResponseError("CONFLICT");
       return bump(index, { pendingMutations: index.pendingMutations.map((mutation) => mutation.id === mutationId ? update(found) : mutation) });
     });
+    const current = await this.options.indexStore.read();
+    const committed = current.value.pendingMutations.find((mutation) => mutation.id === mutationId && mutation.ownerId === this.ownerId && (expectedFence === undefined || mutation.fence === expectedFence));
+    if (committed === undefined) throw new ApiResponseError("CONFLICT");
+    return committed;
   }
 
-  private async finalizeUpload(mutationId: string, noteId: string, record: AttachmentRecord, expectedNoteDriveId: string): Promise<void> {
+  private async assertOwnedMutation(mutation: VaultPendingMutation, phase?: VaultPendingMutation["phase"]): Promise<VaultPendingMutation> {
+    const index = await this.options.indexStore.read();
+    const current = index.value.pendingMutations.find((candidate) => candidate.id === mutation.id && candidate.ownerId === this.ownerId && candidate.fence === mutation.fence);
+    if (current === undefined || (phase !== undefined && current.phase !== phase)) throw new ApiResponseError("CONFLICT");
+    return current;
+  }
+
+  private async finalizeUpload(mutationId: string, expectedFence: number, noteId: string, record: AttachmentRecord, expectedNoteDriveId: string): Promise<void> {
     await this.options.indexStore.compareAndSet((index) => {
-      const mutation = index.pendingMutations.find((candidate) => candidate.id === mutationId && candidate.ownerId === this.ownerId);
+      const mutation = index.pendingMutations.find((candidate) => candidate.id === mutationId && candidate.ownerId === this.ownerId && candidate.fence === expectedFence && candidate.phase === "drive-applied");
       const entry = index.entries.find((candidate) => candidate.id === noteId);
       if (mutation === undefined || entry === undefined || entry.driveId !== expectedNoteDriveId || entry.attachments.some((attachment) => attachment.driveId === record.driveId || sameName(attachment.name, record.name))) {
         throw new ApiResponseError("CONFLICT");
@@ -421,9 +449,9 @@ export class AttachmentService {
     });
   }
 
-  private async applyTrashProjection(mutationId: string, noteId: string, assetId: string): Promise<void> {
+  private async applyTrashProjection(mutationId: string, expectedFence: number, noteId: string, assetId: string): Promise<void> {
     await this.options.indexStore.compareAndSet((index) => {
-      const mutation = index.pendingMutations.find((candidate) => candidate.id === mutationId && candidate.ownerId === this.ownerId);
+      const mutation = index.pendingMutations.find((candidate) => candidate.id === mutationId && candidate.ownerId === this.ownerId && candidate.fence === expectedFence && candidate.phase === "drive-applied");
       if (mutation === undefined) throw new ApiResponseError("CONFLICT");
       return bump(index, {
         entries: index.entries.map((entry) => entry.id === noteId ? { ...entry, attachments: entry.attachments.filter((attachment) => attachment.driveId !== assetId) } : entry),
@@ -432,10 +460,13 @@ export class AttachmentService {
     });
   }
 
-  private async clearMutation(mutationId: string): Promise<void> {
-    await this.options.indexStore.compareAndSet((index) => bump(index, {
-      pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutationId)
-    }));
+  private async clearMutation(mutationId: string, expectedFence?: number): Promise<void> {
+    await this.options.indexStore.compareAndSet((index) => {
+      const current = index.pendingMutations.find((candidate) => candidate.id === mutationId);
+      if (current === undefined) return index;
+      if (current.ownerId !== this.ownerId || (expectedFence !== undefined && current.fence !== expectedFence)) throw new ApiResponseError("CONFLICT");
+      return bump(index, { pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutationId) });
+    });
   }
 
   private async handleFailure(mutationId: string, error: unknown, knownDriveId?: string, knownNotApplied = false): Promise<void> {
@@ -468,10 +499,9 @@ export class AttachmentService {
     const now = this.now().getTime();
     const mutations = snapshot.value.pendingMutations.filter((mutation) => {
       if (mutation.operation !== "create-attachment" && mutation.operation !== "trash-attachment") return false;
-      if (mutation.phase === "reserved") return Date.parse(mutation.expiresAt) <= now;
-      if (mutation.phase === "drive-inflight") return Date.parse(mutation.reconcileAfter ?? mutation.expiresAt) <= now;
-      return true;
-    }).slice(0, MAX_RECOVERY_MUTATIONS);
+      if (mutation.phase === "conflicted") return false;
+      return Date.parse(mutation.reconcileAfter ?? mutation.expiresAt) <= now;
+    }).sort((left, right) => Date.parse(left.reconcileAfter ?? left.expiresAt) - Date.parse(right.reconcileAfter ?? right.expiresAt)).slice(0, MAX_RECOVERY_MUTATIONS);
     for (const candidate of mutations) {
       const mutation = await this.claimRecovery(candidate);
       if (mutation === undefined) continue;
@@ -481,31 +511,41 @@ export class AttachmentService {
   }
 
   private async claimRecovery(candidate: VaultPendingMutation): Promise<VaultPendingMutation | undefined> {
-    let claimed: VaultPendingMutation | undefined;
+    const lease = new Date(this.now().getTime() + MUTATION_TTL_MS).toISOString();
     await this.options.indexStore.compareAndSet((index) => {
       const current = index.pendingMutations.find((mutation) => mutation.id === candidate.id);
       if (current === undefined || current.fence !== candidate.fence) return index;
-      claimed = {
+      const claimed: VaultPendingMutation = {
         ...current,
         ownerId: this.ownerId,
         fence: current.fence + 1,
         phase: current.phase === "drive-inflight" ? "outcome-unknown" : current.phase,
-        reconcileAfter: this.now().toISOString()
+        expiresAt: lease,
+        reconcileAfter: lease
       };
-      return bump(index, { pendingMutations: index.pendingMutations.map((mutation) => mutation.id === candidate.id ? claimed as VaultPendingMutation : mutation) });
+      return bump(index, { pendingMutations: index.pendingMutations.map((mutation) => mutation.id === candidate.id ? claimed : mutation) });
     }).catch(() => undefined);
+    const committed = await this.options.indexStore.read();
+    const claimed = committed.value.pendingMutations.find((mutation) => mutation.id === candidate.id && mutation.ownerId === this.ownerId && mutation.fence === candidate.fence + 1);
     return claimed;
   }
 
   private async reconcileUpload(mutation: VaultPendingMutation): Promise<void> {
     if (!this.hasUploadIdentity(mutation)) return;
+    if (mutation.phase === "reserved") {
+      // No phase boundary reached Drive: never inspect/adopt an identically
+      // named file that appeared while this reservation expired.
+      await this.clearOwnedMutation(mutation);
+      return;
+    }
     const context = this.context();
     try {
+      await this.assertOwnedMutation(mutation);
       const folder = await this.existingAssetFolder(mutation.noteId, context);
       if (folder.id !== mutation.parentId) return;
       const candidates = (await this.listAll(folder.id, context)).filter((file) => !file.trashed && sameName(file.name, mutation.targetName));
       if (candidates.length === 0) {
-        await this.clearOwnedMutation(mutation);
+        await this.rescheduleUnknownUpload(mutation);
         return;
       }
       if (mutation.driveId !== undefined && !candidates.some((candidate) => candidate.id === mutation.driveId)) return;
@@ -522,11 +562,12 @@ export class AttachmentService {
           return;
         }
         if (projection === "name-conflict") {
-          const trashed = await this.options.storage.trash(record.driveId, context);
+          await this.assertOwnedMutation(mutation);
+          const trashed = await this.options.storage.trash(record.driveId, context, record.version);
           if (trashed.id === record.driveId && trashed.trashed) await this.clearOwnedMutation(mutation);
           return;
         }
-        await this.finalizeRecoveredUpload(mutation.id, mutation.noteId, record);
+        await this.finalizeRecoveredUpload(mutation, record);
         return;
       }
       // Duplicate matching artifacts are never exposed.  They can only be
@@ -534,29 +575,35 @@ export class AttachmentService {
       // unindexed artifact; unrelated or ambiguous files retain the fence.
       if (exact.length === candidates.length && exact.length > 1 && await this.areUnindexedArtifacts(mutation, exact)) {
         for (const record of exact) {
-          const trashed = await this.options.storage.trash(record.driveId, context);
+          await this.assertOwnedMutation(mutation);
+          const trashed = await this.options.storage.trash(record.driveId, context, record.version);
           if (!trashed.trashed || trashed.id !== record.driveId) return;
         }
         await this.clearOwnedMutation(mutation);
+      } else if (candidates.length > 0) {
+        // Identical names and bytes are not ownership. A markerless matching
+        // file remains user data and the intent is delegated to rescan.
+        await this.markAttachmentConflict(mutation);
       }
     } catch {
-      // A dependency outage or uncertain readback keeps the fenced intent for
-      // a later owner-triggered recovery; it is never surfaced as an asset.
+      // A missing parent, marker mismatch, version drift, or unavailable
+      // readback is never replayed blindly. It becomes a terminal rescan item.
+      await this.markAttachmentConflict(mutation).catch(() => undefined);
     }
   }
 
-  private async finalizeRecoveredUpload(mutationId: string, noteId: string, record: AttachmentRecord): Promise<void> {
+  private async finalizeRecoveredUpload(mutation: VaultPendingMutation & { noteId: string }, record: AttachmentRecord): Promise<void> {
     await this.options.indexStore.compareAndSet((index) => {
-      const mutation = index.pendingMutations.find((candidate) => candidate.id === mutationId && candidate.ownerId === this.ownerId);
-      const entry = index.entries.find((candidate) => candidate.id === noteId);
-      if (mutation === undefined || entry === undefined) return index;
+      const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id && candidate.ownerId === this.ownerId && candidate.fence === mutation.fence && candidate.phase !== "conflicted");
+      const entry = index.entries.find((candidate) => candidate.id === mutation.noteId);
+      if (current === undefined || entry === undefined) return index;
       if (entry.attachments.some((attachment) => attachment.driveId === record.driveId)) {
-        return bump(index, { pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutationId) });
+        return bump(index, { pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutation.id) });
       }
       if (entry.attachments.some((attachment) => sameName(attachment.name, record.name))) return index;
       return bump(index, {
-        entries: index.entries.map((candidate) => candidate.id === noteId ? { ...candidate, attachments: [...candidate.attachments, record] } : candidate),
-        pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutationId)
+        entries: index.entries.map((candidate) => candidate.id === mutation.noteId ? { ...candidate, attachments: [...candidate.attachments, record] } : candidate),
+        pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutation.id)
       });
     });
   }
@@ -568,8 +615,9 @@ export class AttachmentService {
       const attachment = this.recordFromMutation(mutation);
       const file = await this.verifyTrashReadback(mutation, attachment, context);
       if (file.trashed) {
-        await this.applyTrashProjection(mutation.id, mutation.noteId, mutation.driveId);
-        await this.clearOwnedMutation(mutation);
+        const applied = await this.markDriveApplied(mutation.id, mutation.fence, mutation.driveId);
+        await this.applyTrashProjection(mutation.id, applied.fence, mutation.noteId, mutation.driveId);
+        await this.clearMutation(mutation.id, applied.fence);
         return;
       }
       // The trash did not apply.  Preserve (or restore) the projection and
@@ -577,34 +625,35 @@ export class AttachmentService {
       await this.restoreActiveProjection(mutation, attachment);
       await this.clearOwnedMutation(mutation);
     } catch {
-      // Do not guess at a missing/ambiguous file: retain the fenced intent.
+      await this.markAttachmentConflict(mutation).catch(() => undefined);
     }
   }
 
-  private hasUploadIdentity(mutation: VaultPendingMutation): mutation is VaultPendingMutation & { noteId: string; parentId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition } {
-    return mutation.noteId !== undefined && mutation.parentId !== undefined && mutation.targetName !== undefined && mutation.expectedChecksum !== undefined && mutation.attachmentMimeType !== undefined && mutation.attachmentSize !== undefined && mutation.attachmentDisposition !== undefined;
+  private hasUploadIdentity(mutation: VaultPendingMutation): mutation is VaultPendingMutation & { noteId: string; parentId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition; attachmentMarker: string } {
+    return mutation.noteId !== undefined && mutation.parentId !== undefined && mutation.targetName !== undefined && mutation.expectedChecksum !== undefined && mutation.attachmentMimeType !== undefined && mutation.attachmentSize !== undefined && mutation.attachmentDisposition !== undefined && mutation.attachmentMarker !== undefined;
   }
 
-  private hasTrashIdentity(mutation: VaultPendingMutation): mutation is VaultPendingMutation & { noteId: string; driveId: string; parentId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition } {
-    return mutation.noteId !== undefined && mutation.driveId !== undefined && mutation.parentId !== undefined && mutation.targetName !== undefined && mutation.expectedChecksum !== undefined && mutation.attachmentMimeType !== undefined && mutation.attachmentSize !== undefined && mutation.attachmentDisposition !== undefined;
+  private hasTrashIdentity(mutation: VaultPendingMutation): mutation is VaultPendingMutation & { noteId: string; driveId: string; parentId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition; attachmentMarker: string; expectedVersion: string } {
+    return mutation.noteId !== undefined && mutation.driveId !== undefined && mutation.parentId !== undefined && mutation.targetName !== undefined && mutation.expectedChecksum !== undefined && mutation.attachmentMimeType !== undefined && mutation.attachmentSize !== undefined && mutation.attachmentDisposition !== undefined && mutation.attachmentMarker !== undefined && mutation.expectedVersion !== undefined;
   }
 
-  private recordFromMutation(mutation: VaultPendingMutation & { driveId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition }): AttachmentRecord {
-    return { driveId: mutation.driveId, name: mutation.targetName, checksum: mutation.expectedChecksum, mimeType: mutation.attachmentMimeType, size: mutation.attachmentSize, disposition: mutation.attachmentDisposition };
+  private recordFromMutation(mutation: VaultPendingMutation & { driveId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition; attachmentMarker: string; expectedVersion: string }): AttachmentRecord {
+    return { driveId: mutation.driveId, name: mutation.targetName, checksum: mutation.expectedChecksum, mimeType: mutation.attachmentMimeType, size: mutation.attachmentSize, disposition: mutation.attachmentDisposition, marker: mutation.attachmentMarker, version: mutation.expectedVersion };
   }
 
-  private async recoverExactUploadRecord(mutation: VaultPendingMutation & { noteId: string; parentId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition }, driveId: string, folderId: string, context: StorageOperationContext): Promise<AttachmentRecord | undefined> {
+  private async recoverExactUploadRecord(mutation: VaultPendingMutation & { noteId: string; parentId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition; attachmentMarker: string }, driveId: string, folderId: string, context: StorageOperationContext): Promise<AttachmentRecord | undefined> {
     const record: AttachmentRecord = {
       driveId,
       name: mutation.targetName,
       checksum: mutation.expectedChecksum,
       mimeType: mutation.attachmentMimeType,
       size: mutation.attachmentSize,
-      disposition: mutation.attachmentDisposition
+      disposition: mutation.attachmentDisposition,
+      marker: mutation.attachmentMarker
     };
     try {
-      await this.verifyReadback({ driveId, noteId: mutation.noteId, folderId, attachment: record, context });
-      return record;
+      const verified = await this.verifyReadback({ driveId, noteId: mutation.noteId, folderId, attachment: record, context });
+      return { ...record, version: verified.file.version };
     } catch { return undefined; }
   }
 
@@ -632,7 +681,7 @@ export class AttachmentService {
     });
   }
 
-  private async verifyTrashReadback(mutation: VaultPendingMutation & { driveId: string; parentId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition }, attachment: AttachmentRecord, context: StorageOperationContext): Promise<StoredFile> {
+  private async verifyTrashReadback(mutation: VaultPendingMutation & { driveId: string; parentId: string; targetName: string; expectedChecksum: string; attachmentMimeType: string; attachmentSize: number; attachmentDisposition: AttachmentDisposition; attachmentMarker: string; expectedVersion: string }, attachment: AttachmentRecord, context: StorageOperationContext): Promise<StoredFile> {
     const metadata = await this.options.storage.get(mutation.driveId, context);
     if (!this.matchesTrashMetadata(mutation, metadata)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
     let readback: Awaited<ReturnType<StoragePort["readBytes"]>>;
@@ -649,15 +698,16 @@ export class AttachmentService {
       metadata.id !== file.id || metadata.version !== file.version || file.id !== mutation.driveId ||
       file.parentIds.length !== 1 || file.parentIds[0] !== mutation.parentId || file.name !== mutation.targetName ||
       file.mimeType !== mutation.attachmentMimeType || file.size !== mutation.attachmentSize || readback.bytes.byteLength !== mutation.attachmentSize ||
-      readback.checksum !== mutation.expectedChecksum || checksum(readback.bytes) !== mutation.expectedChecksum
+      readback.checksum !== mutation.expectedChecksum || checksum(readback.bytes) !== mutation.expectedChecksum ||
+      file.appProperties?.nxtAttachmentMutation !== mutation.attachmentMarker || (!file.trashed && file.version !== mutation.expectedVersion)
     ) throw new ApiResponseError("DRIVE_UNAVAILABLE");
     const detected = await detectAttachment({ name: file.name, declaredMime: file.mimeType, bytes: readback.bytes });
     if (detected.mimeType !== attachment.mimeType || (attachment.disposition === "inline" && detected.disposition !== "inline")) throw new ApiResponseError("DRIVE_UNAVAILABLE");
     return file;
   }
 
-  private matchesTrashMetadata(mutation: VaultPendingMutation & { driveId: string; parentId: string; targetName: string; attachmentMimeType: string; attachmentSize: number }, metadata: StoredFile): boolean {
-    return metadata.id === mutation.driveId && metadata.parentIds.length === 1 && metadata.parentIds[0] === mutation.parentId && metadata.name === mutation.targetName && metadata.mimeType === mutation.attachmentMimeType && metadata.size === mutation.attachmentSize;
+  private matchesTrashMetadata(mutation: VaultPendingMutation & { driveId: string; parentId: string; targetName: string; attachmentMimeType: string; attachmentSize: number; attachmentMarker: string; expectedVersion: string }, metadata: StoredFile): boolean {
+    return metadata.id === mutation.driveId && metadata.parentIds.length === 1 && metadata.parentIds[0] === mutation.parentId && metadata.name === mutation.targetName && metadata.mimeType === mutation.attachmentMimeType && metadata.size === mutation.attachmentSize && metadata.appProperties?.nxtAttachmentMutation === mutation.attachmentMarker && (metadata.trashed || metadata.version === mutation.expectedVersion);
   }
 
   private async clearOwnedMutation(mutation: VaultPendingMutation): Promise<void> {
@@ -665,6 +715,26 @@ export class AttachmentService {
       const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id);
       if (current === undefined || current.ownerId !== this.ownerId || current.fence !== mutation.fence) return index;
       return bump(index, { pendingMutations: index.pendingMutations.filter((candidate) => candidate.id !== mutation.id) });
+    });
+  }
+
+  private async markAttachmentConflict(mutation: VaultPendingMutation): Promise<void> {
+    await this.options.indexStore.compareAndSet((index) => {
+      const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id && candidate.ownerId === this.ownerId && candidate.fence === mutation.fence);
+      if (current === undefined) return index;
+      return bump(index, { pendingMutations: index.pendingMutations.map((candidate) => candidate.id === mutation.id ? { ...candidate, phase: "conflicted", reconcileAfter: new Date(this.now().getTime() + MUTATION_TTL_MS).toISOString() } : candidate) });
+    });
+  }
+
+  private async rescheduleUnknownUpload(mutation: VaultPendingMutation): Promise<void> {
+    await this.options.indexStore.compareAndSet((index) => {
+      const current = index.pendingMutations.find((candidate) => candidate.id === mutation.id && candidate.ownerId === this.ownerId && candidate.fence === mutation.fence);
+      if (current === undefined) return index;
+      const attempts = (current.recoveryAttempts ?? 0) + 1;
+      const next = attempts >= 3
+        ? { ...current, phase: "conflicted" as const, recoveryAttempts: attempts, reconcileAfter: new Date(this.now().getTime() + MUTATION_TTL_MS).toISOString() }
+        : { ...current, phase: "outcome-unknown" as const, recoveryAttempts: attempts, expiresAt: new Date(this.now().getTime() + MUTATION_TTL_MS).toISOString(), reconcileAfter: new Date(this.now().getTime() + MUTATION_TTL_MS).toISOString() };
+      return bump(index, { pendingMutations: index.pendingMutations.map((candidate) => candidate.id === mutation.id ? next : candidate) });
     });
   }
 

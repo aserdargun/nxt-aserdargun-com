@@ -104,9 +104,12 @@ export class LocalDriveAdapter {
         return this.mutate(async (metadata) => {
             assertName(input.name);
             assertMimeType(input.mimeType);
+            assertAppProperties(input.appProperties);
             this.getActiveFolder(metadata, input.parentId);
             await this.reconcileUncommittedCreate(metadata, this.nextFileId(metadata));
             const file = this.newFile(metadata, input.parentId, input.name, input.mimeType, "file", input.bytes.byteLength);
+            if (input.appProperties !== undefined)
+                file.appProperties = { ...input.appProperties };
             await this.writeRevision(metadata, file.id, file.version, input.bytes);
             await this.saveMetadata(metadata);
             await this.writeContent(file.id, input.bytes).catch(() => undefined);
@@ -160,10 +163,12 @@ export class LocalDriveAdapter {
             return this.toStoredFile(file);
         });
     }
-    trash(fileId, context) {
+    trash(fileId, context, expectedVersion) {
         context?.operationBudget?.consume();
         return this.mutate(async (metadata) => {
             const file = this.getActiveFile(metadata, fileId);
+            if (expectedVersion !== undefined && file.version !== expectedVersion)
+                throw new StorageVersionConflictError();
             if (file.kind === "root") {
                 throw new Error("cannot trash configured root");
             }
@@ -788,7 +793,8 @@ export class LocalDriveAdapter {
             version: file.version,
             modifiedTime: file.modifiedTime,
             size: file.size,
-            trashed: file.trashed
+            trashed: file.trashed,
+            ...(file.appProperties === undefined ? {} : { appProperties: { ...file.appProperties } })
         };
     }
 }
@@ -821,6 +827,13 @@ const nextTime = (metadata) => {
     return new Date(metadata.sequence).toISOString();
 };
 const cloneMetadata = (metadata) => JSON.parse(JSON.stringify(metadata));
+const assertAppProperties = (value) => {
+    if (value === undefined)
+        return;
+    const entries = Object.entries(value);
+    if (entries.length > 16 || entries.some(([key, item]) => !/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u.test(key) || typeof item !== "string" || item.length > 128 || /[\r\n\0]/u.test(item)))
+        throw new Error("invalid app properties");
+};
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 const assertMetadata = (value) => {
     if (!isRecord(value) || value.schemaVersion !== 1 || !isNonNegativeInteger(value.sequence) || !isNonNegativeInteger(value.generation) || !isRecord(value.files) || !isRecord(value.revisions)) {
@@ -998,13 +1011,26 @@ const isContentDescriptor = (value) => isRecord(value) &&
     /^[a-f0-9]{64}$/u.test(value.checksum);
 const isValidPersistedRevision = (value) => isRecord(value) && isPositiveDecimal(value.id) && isValidTimestamp(value.modifiedTime);
 const isValidPersistedFile = (value, id) => {
-    if (!isRecord(value) || value.id !== id || !isSafeFileId(id) || !isSafeName(value.name) || !isSafeMimeType(value.mimeType) || !Array.isArray(value.parentIds) || !value.parentIds.every((parent) => typeof parent === "string" && isSafeFileId(parent)) || !isPositiveDecimal(value.version) || !isValidTimestamp(value.modifiedTime) || !isNonNegativeInteger(value.size) || typeof value.trashed !== "boolean" || (value.kind !== "root" && value.kind !== "folder" && value.kind !== "file")) {
+    if (!isRecord(value) || value.id !== id || !isSafeFileId(id) || !isSafeName(value.name) || !isSafeMimeType(value.mimeType) || !Array.isArray(value.parentIds) || !value.parentIds.every((parent) => typeof parent === "string" && isSafeFileId(parent)) || !isPositiveDecimal(value.version) || !isValidTimestamp(value.modifiedTime) || !isNonNegativeInteger(value.size) || typeof value.trashed !== "boolean" || !isValidAppProperties(value.appProperties) || (value.kind !== "root" && value.kind !== "folder" && value.kind !== "file")) {
         return false;
     }
     if (value.kind === "root") {
         return value.parentIds.length === 0;
     }
     return value.parentIds.length === 1 && (value.kind === "file" ? isPositiveDecimal(value.contentRevision) : value.contentRevision === undefined);
+};
+const isValidAppProperties = (value) => {
+    if (value === undefined)
+        return true;
+    if (!isRecord(value))
+        return false;
+    try {
+        assertAppProperties(value);
+        return true;
+    }
+    catch {
+        return false;
+    }
 };
 const isExactRoot = (value, id) => isRecord(value) && value.id === id && value.name === id && value.mimeType === FOLDER_MIME_TYPE && Array.isArray(value.parentIds) && value.parentIds.length === 0 && value.version === "1" && value.modifiedTime === "1970-01-01T00:00:00.000Z" && value.size === 0 && value.trashed === false && value.kind === "root" && value.contentRevision === undefined;
 const isSafeFileId = (value) => typeof value === "string" && value.length > 0 && value.length <= MAX_FILE_ID_LENGTH && (value === "vault" || value === "private" || GENERATED_ID.test(value));

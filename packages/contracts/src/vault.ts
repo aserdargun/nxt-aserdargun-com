@@ -3,6 +3,8 @@ import { NoteIdSchema, NoteTitleSchema, TimestampSchema } from "./note.js";
 import { AttachmentNameSchema } from "./attachment.js";
 
 export const DriveIdSchema = z.string().min(1).max(512);
+/** Internal, random, non-user-controlled proof that an artifact came from one attachment intent. */
+export const AttachmentMutationMarkerSchema = z.string().regex(/^am1\.[A-Za-z0-9_-]{22}$/u);
 
 export const VaultAttachmentSchema = z
   .object({
@@ -11,7 +13,9 @@ export const VaultAttachmentSchema = z
     mimeType: z.string().trim().min(1).max(256),
     size: z.number().int().nonnegative(),
     checksum: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
-    disposition: z.enum(["inline", "download"]).optional()
+    disposition: z.enum(["inline", "download"]).optional(),
+    version: z.string().min(1).max(512).optional(),
+    marker: AttachmentMutationMarkerSchema.optional()
   })
   .strict();
 
@@ -80,7 +84,10 @@ export const VaultPendingMutationSchema = z
     folderId: DriveIdSchema.optional(),
     parentId: DriveIdSchema.optional(),
     targetParentId: DriveIdSchema.optional(),
-    targetName: AttachmentNameSchema.optional(),
+    // Folder operations retain the Drive-compatible 255-character request
+    // limit. Attachment operations apply their stricter Unicode-safe bound
+    // below, rather than accidentally tightening every Task 7 mutation.
+    targetName: z.string().trim().min(1).max(255).optional(),
     oldPath: z.string().trim().min(1).max(4096).optional(),
     newPath: z.string().trim().min(1).max(4096).optional(),
     preflightGeneration: z.number().int().nonnegative().optional(),
@@ -93,6 +100,8 @@ export const VaultPendingMutationSchema = z
     attachmentSize: z.number().int().nonnegative().max(20 * 1024 * 1024).optional(),
     attachmentDisposition: z.enum(["inline", "download"]).optional(),
     attachmentReferenceId: z.string().max(512).optional(),
+    attachmentMarker: AttachmentMutationMarkerSchema.optional(),
+    recoveryAttempts: z.number().int().min(0).max(8).optional(),
     source: z.string().max(100_000).optional(),
     ownerId: NoteIdSchema.optional(),
     fence: z.number().int().positive().default(1),
@@ -101,7 +110,16 @@ export const VaultPendingMutationSchema = z
     expiresAt: TimestampSchema,
     reconcileAfter: TimestampSchema.optional()
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      (value.operation === "create-attachment" || value.operation === "trash-attachment") &&
+      value.targetName !== undefined
+    ) {
+      const result = AttachmentNameSchema.safeParse(value.targetName);
+      if (!result.success) context.addIssue({ code: "custom", path: ["targetName"], message: "attachment name is too long" });
+    }
+  });
 
 export type VaultPendingMutation = z.infer<typeof VaultPendingMutationSchema>;
 

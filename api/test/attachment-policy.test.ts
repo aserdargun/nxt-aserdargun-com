@@ -10,6 +10,20 @@ import {
 } from "../src/services/attachment-policy.js";
 
 const validPng = Uint8Array.from(Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=", "base64"));
+const validGif = Uint8Array.from(Buffer.from("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==", "base64"));
+// A minimal lossless 1×1 VP8L RIFF container.  The policy intentionally
+// validates the image frame rather than accepting a VP8X metadata shell.
+const validWebp = Uint8Array.from([
+  ...new TextEncoder().encode("RIFF"), 18, 0, 0, 0, ...new TextEncoder().encode("WEBPVP8L"),
+  5, 0, 0, 0, 0x2f, 0, 0, 0, 0, 0
+]);
+const classicPdf = (): Uint8Array => {
+  const header = "%PDF-1.4\n";
+  const object = "1 0 obj\n<< /Type /Catalog >>\nendobj\n";
+  const offset = new TextEncoder().encode(header).byteLength;
+  const xref = offset + new TextEncoder().encode(object).byteLength;
+  return new TextEncoder().encode(`${header}${object}xref\n0 2\n0000000000 65535 f \n${offset.toString().padStart(10, "0")} 00000 n \ntrailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+};
 
 describe("attachment policy", () => {
   it.each([
@@ -40,6 +54,18 @@ describe("attachment policy", () => {
       .resolves.toMatchObject({ mimeType: "image/png", disposition: "download" });
     await expect(detectAttachment({ name: "polyglot.png", declaredMime: "image/png", bytes: polyglotPng }))
       .resolves.toMatchObject({ mimeType: "image/png", disposition: "download" });
+  });
+
+  it("requires real WebP/GIF image payloads and a classic-xref PDF", async () => {
+    const metadataOnlyWebp = Uint8Array.from([...new TextEncoder().encode("RIFF\u0012\u0000\u0000\u0000WEBPVP8X\n\u0000\u0000\u0000"), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    const gifWithoutImage = Uint8Array.from([...validGif.slice(0, 13), 0x3b]);
+    const tokenPdf = new TextEncoder().encode("%PDF-1.4\nxref\ntrailer\n<< /Root 1 0 R >>\nstartxref\n0\n%%EOF\n");
+    await expect(detectAttachment({ name: "image.webp", declaredMime: "image/webp", bytes: validWebp })).resolves.toMatchObject({ disposition: "inline" });
+    await expect(detectAttachment({ name: "image.webp", declaredMime: "image/webp", bytes: metadataOnlyWebp })).resolves.toMatchObject({ disposition: "download" });
+    await expect(detectAttachment({ name: "image.gif", declaredMime: "image/gif", bytes: validGif })).resolves.toMatchObject({ disposition: "inline" });
+    await expect(detectAttachment({ name: "image.gif", declaredMime: "image/gif", bytes: gifWithoutImage })).resolves.toMatchObject({ disposition: "download" });
+    await expect(detectAttachment({ name: "file.pdf", declaredMime: "application/pdf", bytes: classicPdf() })).resolves.toMatchObject({ disposition: "inline" });
+    await expect(detectAttachment({ name: "file.pdf", declaredMime: "application/pdf", bytes: tokenPdf })).resolves.toMatchObject({ disposition: "download" });
   });
 
   it("only labels valid UTF-8 as text when the final extension is safe", async () => {

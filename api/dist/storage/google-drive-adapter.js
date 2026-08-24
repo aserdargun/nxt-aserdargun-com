@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { setTimeout as sleepTimer } from "node:timers/promises";
 import { assertStorageVersion, StorageMutationOutcomeUnknownError, StorageOperationBudgetExceededError, StorageVersionConflictError } from "./storage-port.js";
-const FILE_FIELDS = "id,name,mimeType,parents,version,modifiedTime,size,trashed,md5Checksum";
+const FILE_FIELDS = "id,name,mimeType,parents,version,modifiedTime,size,trashed,md5Checksum,appProperties";
 const LIST_FIELDS = `nextPageToken,files(${FILE_FIELDS})`;
 const REVISION_FIELDS = "nextPageToken,revisions(id,modifiedTime)";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
@@ -228,18 +228,23 @@ export class GoogleDriveAdapter {
             throw mutationOutcomeUnknown(error, input.fileId, "Google Drive move verification failed.");
         }
     }
-    async trash(fileId, context) {
+    async trash(fileId, context, expectedVersion) {
         assertFileId(fileId);
         if (fileId === this.rootId)
             throw new DriveContractError("cannot trash configured root");
         let before;
+        let etag;
         try {
-            before = toStoredFile(await this.readMetadata(fileId, context), this.rootId);
+            const snapshot = await this.readMetadataSnapshot(fileId, context);
+            before = toStoredFile(snapshot.data, this.rootId);
+            etag = responseEtag(snapshot.headers);
         }
         catch (error) {
             throw preserveSafeError(error, "Google Drive read failed.");
         }
         assertActiveNonShortcut(before);
+        if (expectedVersion !== undefined && before.version !== expectedVersion)
+            throw new StorageVersionConflictError();
         assertSingleParent(before, "Google Drive Trash verification failed.");
         let response;
         context?.operationBudget?.consume();
@@ -248,9 +253,11 @@ export class GoogleDriveAdapter {
                 fileId,
                 requestBody: { trashed: true },
                 fields: "id"
-            });
+            }, { headers: { "If-Match": etag } });
         }
-        catch {
+        catch (error) {
+            if (errorStatus(error) === 412)
+                throw new StorageVersionConflictError();
             throw new StorageMutationOutcomeUnknownError(fileId, "Google Drive Trash outcome is unknown.");
         }
         try {
@@ -315,7 +322,8 @@ export class GoogleDriveAdapter {
             requestBody: {
                 name: input.name,
                 mimeType: input.mimeType,
-                parents: [input.parentId]
+                parents: [input.parentId],
+                ...(input.appProperties === undefined ? {} : { appProperties: input.appProperties })
             },
             ...(input.body === undefined
                 ? {}
@@ -417,6 +425,7 @@ const toStoredFile = (raw, rootId) => {
     assertVersion(version);
     const modifiedTime = requireNonEmptyString(file.modifiedTime);
     const trashed = requireBoolean(file.trashed);
+    const appProperties = optionalStringRecord(file.appProperties);
     return {
         id,
         name,
@@ -425,8 +434,18 @@ const toStoredFile = (raw, rootId) => {
         version,
         modifiedTime,
         size: parseSize(file.size, mimeType),
-        trashed
+        trashed,
+        ...(appProperties === undefined ? {} : { appProperties })
     };
+};
+const optionalStringRecord = (value) => {
+    if (value === undefined)
+        return undefined;
+    const record = requireRecord(value);
+    const entries = Object.entries(record);
+    if (entries.length > 16 || entries.some(([key, item]) => !/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u.test(key) || typeof item !== "string" || item.length > 128 || /[\r\n\0]/u.test(item)))
+        throw new DriveContractError("Google Drive app properties are invalid.");
+    return Object.fromEntries(entries);
 };
 const assertReadableContent = (file) => {
     assertActiveNonShortcut(file);

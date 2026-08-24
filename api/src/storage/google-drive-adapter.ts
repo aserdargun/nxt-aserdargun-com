@@ -17,7 +17,7 @@ import {
 } from "./storage-port.js";
 
 const FILE_FIELDS =
-  "id,name,mimeType,parents,version,modifiedTime,size,trashed,md5Checksum";
+  "id,name,mimeType,parents,version,modifiedTime,size,trashed,md5Checksum,appProperties";
 const LIST_FIELDS = `nextPageToken,files(${FILE_FIELDS})`;
 const REVISION_FIELDS = "nextPageToken,revisions(id,modifiedTime)";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
@@ -168,6 +168,7 @@ export class GoogleDriveAdapter implements StoragePort {
     name: string;
     mimeType: string;
     bytes: Uint8Array;
+    appProperties?: Record<string, string>;
   }, context?: StorageOperationContext): Promise<StoredFile> {
     return this.create({
       ...input,
@@ -315,17 +316,21 @@ export class GoogleDriveAdapter implements StoragePort {
     }
   }
 
-  public async trash(fileId: string, context?: StorageOperationContext): Promise<StoredFile> {
+  public async trash(fileId: string, context?: StorageOperationContext, expectedVersion?: string): Promise<StoredFile> {
     assertFileId(fileId);
     if (fileId === this.rootId)
       throw new DriveContractError("cannot trash configured root");
     let before: StoredFile;
+    let etag: string;
     try {
-      before = toStoredFile(await this.readMetadata(fileId, context), this.rootId);
+      const snapshot = await this.readMetadataSnapshot(fileId, context);
+      before = toStoredFile(snapshot.data, this.rootId);
+      etag = responseEtag(snapshot.headers);
     } catch (error) {
       throw preserveSafeError(error, "Google Drive read failed.");
     }
     assertActiveNonShortcut(before);
+    if (expectedVersion !== undefined && before.version !== expectedVersion) throw new StorageVersionConflictError();
     assertSingleParent(before, "Google Drive Trash verification failed.");
     let response;
     context?.operationBudget?.consume();
@@ -334,8 +339,9 @@ export class GoogleDriveAdapter implements StoragePort {
         fileId,
         requestBody: { trashed: true },
         fields: "id"
-      });
-    } catch {
+      }, { headers: { "If-Match": etag } });
+    } catch (error) {
+      if (errorStatus(error) === 412) throw new StorageVersionConflictError();
       throw new StorageMutationOutcomeUnknownError(fileId, "Google Drive Trash outcome is unknown.");
     }
     try {
@@ -409,6 +415,7 @@ export class GoogleDriveAdapter implements StoragePort {
     mimeType: string;
     body?: string | Uint8Array;
     checksum?: string;
+    appProperties?: Record<string, string>;
   }, context?: StorageOperationContext): Promise<StoredFile> {
     assertFileId(input.parentId);
     assertName(input.name);
@@ -417,7 +424,8 @@ export class GoogleDriveAdapter implements StoragePort {
       requestBody: {
         name: input.name,
         mimeType: input.mimeType,
-        parents: [input.parentId]
+        parents: [input.parentId],
+        ...(input.appProperties === undefined ? {} : { appProperties: input.appProperties })
       },
       ...(input.body === undefined
         ? {}
@@ -542,6 +550,7 @@ const toStoredFile = (raw: unknown, rootId?: string): StoredFile => {
   assertVersion(version);
   const modifiedTime = requireNonEmptyString(file.modifiedTime);
   const trashed = requireBoolean(file.trashed);
+  const appProperties = optionalStringRecord(file.appProperties);
   return {
     id,
     name,
@@ -550,8 +559,17 @@ const toStoredFile = (raw: unknown, rootId?: string): StoredFile => {
     version,
     modifiedTime,
     size: parseSize(file.size, mimeType),
-    trashed
+    trashed,
+    ...(appProperties === undefined ? {} : { appProperties })
   };
+};
+
+const optionalStringRecord = (value: unknown): Record<string, string> | undefined => {
+  if (value === undefined) return undefined;
+  const record = requireRecord(value);
+  const entries = Object.entries(record);
+  if (entries.length > 16 || entries.some(([key, item]) => !/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u.test(key) || typeof item !== "string" || item.length > 128 || /[\r\n\0]/u.test(item))) throw new DriveContractError("Google Drive app properties are invalid.");
+  return Object.fromEntries(entries) as Record<string, string>;
 };
 
 const assertReadableContent = (file: StoredFile): void => {

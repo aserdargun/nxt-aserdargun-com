@@ -1,20 +1,18 @@
 import { isOpaqueId } from "@nxt/contracts";
 import { posix } from "node:path";
+import { parseMarkdownAst } from "./render-markdown.js";
+import { extractWikiLinks } from "./wiki-links.js";
 
 /**
- * Extracts canonical local attachment targets from the Markdown dialect this
- * application accepts.  The projection deliberately excludes network URLs,
- * queries, fragments and malformed encodings so it can be used as a safe
- * deletion fence without rereading unrelated notes.
+ * Derives the deletion fence from the exact same remark parser/plugins used
+ * for rendering. The small wiki pass is the existing Obsidian dialect used by
+ * the renderer/indexer; ordinary Markdown is never regex-scanned here.
  */
 export const attachmentReferenceProjection = (source: string, notePath: string): string[] => {
-  const definitions = new Map<string, string>();
-  for (const definition of markdownDefinitions(source)) definitions.set(referenceKey(definition.label), definition.destination);
-  const values = [...markdownDestinations(source), ...wikiDestinations(source)];
-  for (const usage of markdownReferenceUsages(source)) {
-    const destination = definitions.get(referenceKey(usage));
-    if (destination !== undefined) values.push(destination);
-  }
+  const values = markdownDestinations(source);
+  // The existing wiki dialect treats `#heading` as an Obsidian target suffix,
+  // distinct from URL syntax, and `extractWikiLinks` already strips labels.
+  values.push(...extractWikiLinks(source).map((link) => link.target.split("#")[0] ?? ""));
   return [...new Set(values.flatMap((value) => canonicalAttachmentReference(value, notePath) ?? []))];
 };
 
@@ -36,121 +34,46 @@ export const projectionReferencesAttachment = (projection: readonly string[], in
   return projection.some((reference) => reference === expectedPath || reference === expectedOpaque);
 };
 
+const markdownDestinations = (source: string): string[] => {
+  const definitions = new Map<string, string>();
+  const destinations: string[] = [];
+  const references: string[] = [];
+  const visit = (node: unknown): void => {
+    if (typeof node !== "object" || node === null) return;
+    const record = node as { type?: unknown; url?: unknown; identifier?: unknown; children?: unknown[] };
+    if (record.type === "definition" && typeof record.identifier === "string" && typeof record.url === "string") definitions.set(referenceKey(record.identifier), record.url);
+    if ((record.type === "link" || record.type === "image") && typeof record.url === "string") destinations.push(record.url);
+    if ((record.type === "linkReference" || record.type === "imageReference") && typeof record.identifier === "string") references.push(record.identifier);
+    record.children?.forEach(visit);
+  };
+  visit(parseMarkdownAst(source));
+  for (const reference of references) {
+    const destination = definitions.get(referenceKey(reference));
+    if (destination !== undefined) destinations.push(destination);
+  }
+  return destinations;
+};
+
 const canonicalAttachmentReference = (raw: string, notePath: string): string | undefined => {
-  let value = raw.trim();
-  if (value.startsWith("<") && value.endsWith(">")) value = value.slice(1, -1);
-  value = unescapeMarkdown(value);
-  try { value = decodeURIComponent(value); } catch { return undefined; }
+  const value = raw.trim();
+  // Reject actual URL query/fragment syntax before percent decoding. This
+  // permits literal `%23`/`%3F` filename characters without accepting a URL
+  // fragment or query.
   if (value.length === 0 || value.includes("\u0000") || value.includes("?") || value.includes("#")) return undefined;
   if (value.startsWith("/api/private/attachments/")) {
     const token = value.slice("/api/private/attachments/".length);
     return isOpaqueId(token) && value === `/api/private/attachments/${token}` ? value : undefined;
   }
-  if (value.startsWith("/") || /^[a-z][a-z0-9+.-]*:/iu.test(value) || value.startsWith("//")) return undefined;
-  const resolved = posix.normalize(posix.join(posix.dirname(notePath), value)).normalize("NFC");
+  if (value.startsWith("/") || value.startsWith("//") || /^[a-z][a-z0-9+.-]*:/iu.test(value)) return undefined;
+  const segments: string[] = [];
+  for (const rawSegment of value.split("/")) {
+    let segment: string;
+    try { segment = decodeURIComponent(rawSegment); } catch { return undefined; }
+    if (segment.includes("/") || segment.includes("\\") || segment.includes("\u0000")) return undefined;
+    segments.push(segment);
+  }
+  const resolved = posix.normalize(posix.join(posix.dirname(notePath), ...segments)).normalize("NFC");
   return resolved.startsWith("_assets/") ? resolved : undefined;
 };
 
-const markdownDefinitions = (source: string): Array<{ label: string; destination: string }> => {
-  const definitions: Array<{ label: string; destination: string }> = [];
-  const lines = source.split(/\r?\n/u);
-  for (const line of lines) {
-    const match = /^\s{0,3}\[([^\]\r\n]+)\]:\s*(.*)$/u.exec(line);
-    if (match === null) continue;
-    const destination = destinationFromTail(match[2] ?? "");
-    if (destination !== undefined) definitions.push({ label: match[1] as string, destination });
-  }
-  return definitions;
-};
-
-const markdownDestinations = (source: string): string[] => {
-  const destinations: string[] = [];
-  for (let index = 0; index < source.length; index += 1) {
-    if (source[index] !== "]" || source[index + 1] !== "(") continue;
-    const parsed = balancedDestination(source, index + 2);
-    if (parsed === undefined) continue;
-    destinations.push(parsed.destination);
-    index = parsed.end - 1;
-  }
-  return destinations;
-};
-
-const markdownReferenceUsages = (source: string): string[] => {
-  const uses: string[] = [];
-  const expression = /!?\[([^\]\r\n]+)\](?:\[([^\]\r\n]*)\])?/gu;
-  for (const match of source.matchAll(expression)) {
-    const full = match[0] ?? "";
-    if (source[(match.index ?? 0) + full.length] === "(") continue;
-    const label = match[2] === undefined || match[2] === "" ? match[1] : match[2];
-    if (label !== undefined) uses.push(label);
-  }
-  return uses;
-};
-
-const wikiDestinations = (source: string): string[] => {
-  const values: string[] = [];
-  const expression = /!?\[\[([^\]\r\n]+)\]\]/gu;
-  for (const match of source.matchAll(expression)) {
-    const target = (match[1] ?? "").split("|")[0]?.split("#")[0]?.trim();
-    if (target !== undefined && target.length > 0) values.push(target);
-  }
-  return values;
-};
-
-const balancedDestination = (source: string, initial: number): { destination: string; end: number } | undefined => {
-  let index = initial;
-  while (index < source.length && /\s/u.test(source[index] as string)) index += 1;
-  if (source[index] === "<") {
-    const end = source.indexOf(">", index + 1);
-    if (end < 0 || /[\r\n]/u.test(source.slice(index + 1, end))) return undefined;
-    const close = closingParen(source, end + 1);
-    return close === undefined ? undefined : { destination: source.slice(index + 1, end), end: close };
-  }
-  const start = index;
-  let depth = 0;
-  let escaped = false;
-  while (index < source.length) {
-    const character = source[index] as string;
-    if (escaped) { escaped = false; index += 1; continue; }
-    if (character === "\\") { escaped = true; index += 1; continue; }
-    if (character === "(") { depth += 1; index += 1; continue; }
-    if (character === ")") {
-      if (depth === 0) return { destination: source.slice(start, index), end: index + 1 };
-      depth -= 1; index += 1; continue;
-    }
-    if (depth === 0 && /\s/u.test(character)) {
-      const close = closingParen(source, index);
-      return close === undefined ? undefined : { destination: source.slice(start, index), end: close };
-    }
-    index += 1;
-  }
-  return undefined;
-};
-
-const closingParen = (source: string, initial: number): number | undefined => {
-  let depth = 0;
-  let escaped = false;
-  for (let index = initial; index < source.length; index += 1) {
-    const character = source[index] as string;
-    if (escaped) { escaped = false; continue; }
-    if (character === "\\") { escaped = true; continue; }
-    if (character === "(") { depth += 1; continue; }
-    if (character === ")") {
-      if (depth === 0) return index + 1;
-      depth -= 1;
-    }
-    if (/\r|\n/u.test(character)) return undefined;
-  }
-  return undefined;
-};
-
-const destinationFromTail = (tail: string): string | undefined => {
-  const start = tail.trimStart();
-  if (start.startsWith("<")) {
-    const end = start.indexOf(">");
-    return end < 0 ? undefined : start.slice(1, end);
-  }
-  return /^([^\s\r\n]+)/u.exec(start)?.[1];
-};
 const referenceKey = (value: string): string => value.replace(/\s+/gu, " ").trim().normalize("NFC").toLocaleLowerCase("en-US");
-const unescapeMarkdown = (value: string): string => value.replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/gu, "$1");

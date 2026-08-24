@@ -10,6 +10,8 @@ export interface AttachmentRecord {
     size: number;
     checksum: string;
     disposition: AttachmentDisposition;
+    version?: string | undefined;
+    marker?: string | undefined;
 }
 export interface AttachmentDelivery {
     bytes: Uint8Array;
@@ -67,6 +69,7 @@ export declare class AttachmentService {
     private beginDriveMutation;
     private markDriveApplied;
     private updateMutation;
+    private assertOwnedMutation;
     private finalizeUpload;
     private applyTrashProjection;
     private clearMutation;
@@ -86,6 +89,8 @@ export declare class AttachmentService {
     private verifyTrashReadback;
     private matchesTrashMetadata;
     private clearOwnedMutation;
+    private markAttachmentConflict;
+    private rescheduleUnknownUpload;
     private listAll;
     private context;
     private serialize;

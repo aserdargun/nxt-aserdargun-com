@@ -9,6 +9,8 @@ export interface RenderedMarkdown {
     wikiLinks: WikiLink[];
     plainText: string;
 }
+/** Source AST shared by rendering and attachment-reference projection. */
+export declare function parseMarkdownAst(source: string): unknown;
 /** Derives visible text using the same Markdown and HAST pipeline as rendering. */
 export declare function deriveMarkdownPlainText(source: string): string;
 /** Renders GFM and strips every raw HTML node before serializing sanitized HTML. */

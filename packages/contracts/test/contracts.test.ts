@@ -13,7 +13,8 @@ import {
   UpdateFolderRequestSchema,
   UpdateNoteRequestSchema,
   VaultResponseSchema,
-  VaultIndexSchema
+  VaultIndexSchema,
+  VaultPendingMutationSchema
 } from "../src/index.js";
 
 describe("NoteFrontmatterSchema", () => {
@@ -220,4 +221,19 @@ it("bounds note source bytes and validates safe folder mutation and confirmation
   expect(() => UpdateFolderRequestSchema.parse({ expectedVersion: "1" })).toThrow();
   expect(ConfirmationTokenSchema.parse(`c1.${"a".repeat(120)}.${"b".repeat(43)}`)).toContain("c1.");
   expect(() => ConfirmationTokenSchema.parse("raw-folder-id.secret")).toThrow();
+});
+
+it("keeps folder pending names at 255 and attachment pending names at 180 code points", () => {
+  const base = {
+    id: "00000000-0000-4000-8000-000000000001",
+    ownerId: "00000000-0000-4000-8000-000000000002",
+    operation: "create-folder" as const,
+    phase: "reserved" as const,
+    fence: 1,
+    createdAt: "2026-08-24T00:00:00.000Z",
+    expiresAt: "2026-08-24T00:15:00.000Z"
+  };
+  expect(VaultPendingMutationSchema.safeParse({ ...base, targetName: "f".repeat(255) }).success).toBe(true);
+  expect(VaultPendingMutationSchema.safeParse({ ...base, targetName: "f".repeat(256) }).success).toBe(false);
+  expect(VaultPendingMutationSchema.safeParse({ ...base, operation: "create-attachment", targetName: "a".repeat(181) }).success).toBe(false);
 });

@@ -7,6 +7,8 @@ export interface StoredFile {
   modifiedTime: string;
   size: number;
   trashed: boolean;
+  /** Internal app-owned metadata. Never cross an API response boundary. */
+  appProperties?: Readonly<Record<string, string>>;
 }
 
 export class StorageVersionConflictError extends Error {
@@ -89,9 +91,9 @@ export interface StoragePort {
   readBytes(fileId: string, context?: StorageOperationContext): Promise<{ file: StoredFile; bytes: Uint8Array; checksum: string }>;
   createFolder(input: { parentId: string; name: string }, context?: StorageOperationContext): Promise<StoredFile>;
   createText(input: { parentId: string; name: string; mimeType: string; text: string }, context?: StorageOperationContext): Promise<StoredFile>;
-  createBytes(input: { parentId: string; name: string; mimeType: string; bytes: Uint8Array }, context?: StorageOperationContext): Promise<StoredFile>;
+  createBytes(input: { parentId: string; name: string; mimeType: string; bytes: Uint8Array; appProperties?: Record<string, string> }, context?: StorageOperationContext): Promise<StoredFile>;
   updateText(input: { fileId: string; expectedVersion: string; mimeType: string; text: string }, context?: StorageOperationContext): Promise<StoredFile>;
   move(input: { fileId: string; fromParentId: string; toParentId: string; expectedVersion: string; newName?: string }, context?: StorageOperationContext): Promise<StoredFile>;
-  trash(fileId: string, context?: StorageOperationContext): Promise<StoredFile>;
+  trash(fileId: string, context?: StorageOperationContext, expectedVersion?: string): Promise<StoredFile>;
   listRevisions(fileId: string, context?: StorageOperationContext): Promise<Array<{ id: string; modifiedTime: string }>>;
 }

@@ -212,14 +212,35 @@ const validWebp = (bytes) => {
         const length = u32le(bytes, offset + 4);
         if (type === undefined || length === undefined || length > bytes.length - offset - 8)
             return false;
-        if (type === "VP8 " || type === "VP8L" || type === "VP8X")
+        // VP8X carries only extended metadata.  It cannot by itself prove that
+        // this is an image, so require an actual bounded VP8/VP8L frame too.
+        if (type === "VP8 " && validVp8(bytes.subarray(offset + 8, offset + 8 + length)))
+            sawImage = true;
+        if (type === "VP8L" && validVp8l(bytes.subarray(offset + 8, offset + 8 + length)))
             sawImage = true;
         offset += 8 + length + (length % 2);
     }
     return sawImage && offset === bytes.length;
 };
+const validVp8 = (bytes) => {
+    if (bytes.length < 10 || (bytes[0] & 1) !== 0 || !equal(bytes, 3, [0x9d, 0x01, 0x2a]))
+        return false;
+    const width = (bytes[6] | ((bytes[7] & 0x3f) << 8));
+    const height = (bytes[8] | ((bytes[9] & 0x3f) << 8));
+    return width > 0 && height > 0;
+};
+const validVp8l = (bytes) => {
+    if (bytes.length < 5 || bytes[0] !== 0x2f)
+        return false;
+    const bits = (bytes[1] | (bytes[2] << 8) | (bytes[3] << 16) | (bytes[4] << 24)) >>> 0;
+    return (bits & 0x3fff) + 1 > 0 && ((bits >>> 14) & 0x3fff) + 1 > 0;
+};
 const validGif = (bytes) => {
     if (bytes.length < 14 || (ascii(bytes, 0, 6) !== "GIF87a" && ascii(bytes, 0, 6) !== "GIF89a"))
+        return false;
+    const canvasWidth = bytes[6] | (bytes[7] << 8);
+    const canvasHeight = bytes[8] | (bytes[9] << 8);
+    if (canvasWidth === 0 || canvasHeight === 0)
         return false;
     let offset = 13;
     if ((bytes[10] & 0x80) !== 0) {
@@ -236,6 +257,10 @@ const validGif = (bytes) => {
         if (token === 0x2c) {
             if (offset + 9 > bytes.length)
                 return false;
+            const imageWidth = bytes[offset + 4] | (bytes[offset + 5] << 8);
+            const imageHeight = bytes[offset + 6] | (bytes[offset + 7] << 8);
+            if (imageWidth === 0 || imageHeight === 0 || imageWidth > canvasWidth || imageHeight > canvasHeight)
+                return false;
             const packed = bytes[offset + 8];
             offset += 9;
             if ((packed & 0x80) !== 0) {
@@ -246,7 +271,7 @@ const validGif = (bytes) => {
             }
             if (offset >= bytes.length || bytes[offset++] < 2)
                 return false;
-            const end = skipGifSubBlocks(bytes, offset);
+            const end = skipGifSubBlocks(bytes, offset, true);
             if (end === false)
                 return false;
             offset = end;
@@ -256,33 +281,73 @@ const validGif = (bytes) => {
         if (token !== 0x21 || offset >= bytes.length)
             return false;
         offset += 1; // extension label
-        const end = skipGifSubBlocks(bytes, offset);
+        const end = skipGifSubBlocks(bytes, offset, false);
         if (end === false)
             return false;
         offset = end;
     }
     return false;
 };
-const skipGifSubBlocks = (bytes, initial) => {
+const skipGifSubBlocks = (bytes, initial, requirePayload) => {
     let offset = initial;
+    let sawPayload = false;
     while (offset < bytes.length) {
         const length = bytes[offset++];
         if (length === 0)
-            return offset;
+            return !requirePayload || sawPayload ? offset : false;
         if (length === undefined || offset + length > bytes.length)
             return false;
+        sawPayload = true;
         offset += length;
     }
     return false;
 };
 const validPdf = (bytes) => {
-    if (bytes.length < 32 || ascii(bytes, 0, 5) !== "%PDF-")
+    if (bytes.length < 64 || ascii(bytes, 0, 5) !== "%PDF-")
         return false;
     const text = new TextDecoder("latin1").decode(bytes);
-    if (!/^%PDF-[12]\.[0-9]/u.test(text) || !/\b(?:xref|\/Type\s*\/XRef)\b/u.test(text) || !/\btrailer\b/u.test(text) || !/\bstartxref\s+\d+\s+%%EOF\s*$/u.test(text))
+    if (!/^%PDF-[12]\.[0-9](?:\r?\n|\r)/u.test(text))
         return false;
-    const start = /\bstartxref\s+(\d+)\s+%%EOF\s*$/u.exec(text);
-    return start !== null && Number(start[1]) >= 0 && Number(start[1]) < bytes.length;
+    const terminal = /(?:\r?\n)startxref\r?\n(\d+)\r?\n%%EOF[\t \r\n]*$/u.exec(text);
+    if (terminal === null)
+        return false;
+    const xrefOffset = Number(terminal[1]);
+    if (!Number.isSafeInteger(xrefOffset) || xrefOffset < 0 || xrefOffset >= bytes.length || text.slice(xrefOffset, xrefOffset + 4) !== "xref")
+        return false;
+    const section = /^xref\r?\n(\d+)\s+(\d+)\r?\n/u.exec(text.slice(xrefOffset));
+    if (section === null)
+        return false;
+    const first = Number(section[1]);
+    const count = Number(section[2]);
+    if (!Number.isSafeInteger(first) || !Number.isSafeInteger(count) || count < 2 || count > 100_000)
+        return false;
+    let cursor = xrefOffset + section[0].length;
+    const entries = [];
+    for (let index = 0; index < count; index += 1) {
+        const line = /^(\d{10}) (\d{5}) ([nf]) \r?\n/u.exec(text.slice(cursor));
+        if (line === null)
+            return false;
+        entries.push({ offset: Number(line[1]), generation: Number(line[2]), active: line[3] === "n" });
+        cursor += line[0].length;
+    }
+    if (!text.startsWith("trailer", cursor))
+        return false;
+    const trailerEnd = text.indexOf(">>", cursor + 7);
+    if (trailerEnd === -1)
+        return false;
+    const root = /\/Root\s+(\d+)\s+(\d+)\s+R/u.exec(text.slice(cursor, trailerEnd + 2));
+    if (root === null)
+        return false;
+    const objectNumber = Number(root[1]);
+    const generation = Number(root[2]);
+    const entry = entries[objectNumber - first];
+    if (entry === undefined || !entry.active || entry.generation !== generation || entry.offset < 0 || entry.offset >= xrefOffset)
+        return false;
+    const objectStart = `${objectNumber} ${generation} obj`;
+    if (!text.startsWith(objectStart, entry.offset))
+        return false;
+    const objectEnd = text.indexOf("endobj", entry.offset + objectStart.length);
+    return objectEnd !== -1 && /\/Type\s*\/Catalog\b/u.test(text.slice(entry.offset, objectEnd));
 };
 const equal = (bytes, offset, expected) => expected.every((value, index) => bytes[offset + index] === value);
 const ascii = (bytes, offset, length) => offset + length <= bytes.length ? String.fromCharCode(...bytes.slice(offset, offset + length)) : undefined;

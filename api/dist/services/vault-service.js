@@ -525,6 +525,9 @@ export class VaultService {
             }
             if (index.rescanState !== null)
                 throw new ApiResponseError("CONFLICT");
+            if (isSourceMutation(mutation) && index.pendingMutations.some((pending) => pending.operation === "trash-attachment" && pending.phase !== "conflicted")) {
+                throw new ApiResponseError("CONFLICT");
+            }
             if (index.entries.some((entry) => mutation.noteId !== undefined && entry.id === mutation.noteId && mutation.operation === "create-note"))
                 throw new ApiResponseError("CONFLICT");
             const targetPath = mutation.newPath === undefined ? undefined : fold(mutation.newPath);
@@ -1207,6 +1210,7 @@ const mutationsOverlap = (first, second) => (first.noteId !== undefined && first
     pathsOverlap(first.oldPath, second.newPath) ||
     pathsOverlap(first.newPath, second.oldPath) ||
     pathsOverlap(first.newPath, second.newPath);
+const isSourceMutation = (mutation) => mutation.operation === "create-note" || mutation.operation === "update-note" || mutation.operation === "move-note";
 const recalculateAttachmentLinks = (source, noteId, oldPath, newPath) => {
     const rewrite = (rawUrl) => {
         const wrapped = rawUrl.startsWith("<") && rawUrl.endsWith(">");

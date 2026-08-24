@@ -145,14 +145,16 @@ export class LocalDriveAdapter implements StoragePort {
     return this.createBytes({ ...input, bytes: new TextEncoder().encode(input.text) }, context);
   }
 
-  public createBytes(input: { parentId: string; name: string; mimeType: string; bytes: Uint8Array }, context?: StorageOperationContext): Promise<StoredFile> {
+  public createBytes(input: { parentId: string; name: string; mimeType: string; bytes: Uint8Array; appProperties?: Record<string, string> }, context?: StorageOperationContext): Promise<StoredFile> {
     context?.operationBudget?.consume();
     return this.mutate(async (metadata) => {
       assertName(input.name);
       assertMimeType(input.mimeType);
+      assertAppProperties(input.appProperties);
       this.getActiveFolder(metadata, input.parentId);
       await this.reconcileUncommittedCreate(metadata, this.nextFileId(metadata));
       const file = this.newFile(metadata, input.parentId, input.name, input.mimeType, "file", input.bytes.byteLength);
+      if (input.appProperties !== undefined) file.appProperties = { ...input.appProperties };
       await this.writeRevision(metadata, file.id, file.version, input.bytes);
       await this.saveMetadata(metadata);
       await this.writeContent(file.id, input.bytes).catch(() => undefined);
@@ -209,10 +211,11 @@ export class LocalDriveAdapter implements StoragePort {
     });
   }
 
-  public trash(fileId: string, context?: StorageOperationContext): Promise<StoredFile> {
+  public trash(fileId: string, context?: StorageOperationContext, expectedVersion?: string): Promise<StoredFile> {
     context?.operationBudget?.consume();
     return this.mutate(async (metadata) => {
       const file = this.getActiveFile(metadata, fileId);
+      if (expectedVersion !== undefined && file.version !== expectedVersion) throw new StorageVersionConflictError();
       if (file.kind === "root") {
         throw new Error("cannot trash configured root");
       }
@@ -878,7 +881,8 @@ export class LocalDriveAdapter implements StoragePort {
       version: file.version,
       modifiedTime: file.modifiedTime,
       size: file.size,
-      trashed: file.trashed
+      trashed: file.trashed,
+      ...(file.appProperties === undefined ? {} : { appProperties: { ...file.appProperties } })
     };
   }
 }
@@ -915,6 +919,12 @@ const nextTime = (metadata: LocalMetadata): string => {
 };
 
 const cloneMetadata = (metadata: LocalMetadata): LocalMetadata => JSON.parse(JSON.stringify(metadata)) as LocalMetadata;
+
+const assertAppProperties = (value: Record<string, string> | undefined): void => {
+  if (value === undefined) return;
+  const entries = Object.entries(value);
+  if (entries.length > 16 || entries.some(([key, item]) => !/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/u.test(key) || typeof item !== "string" || item.length > 128 || /[\r\n\0]/u.test(item))) throw new Error("invalid app properties");
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -1105,13 +1115,19 @@ const isContentDescriptor = (value: unknown): value is TrashContentDescriptor =>
 const isValidPersistedRevision = (value: unknown): value is LocalRevision => isRecord(value) && isPositiveDecimal(value.id) && isValidTimestamp(value.modifiedTime);
 
 const isValidPersistedFile = (value: unknown, id: string): value is LocalFile => {
-  if (!isRecord(value) || value.id !== id || !isSafeFileId(id) || !isSafeName(value.name) || !isSafeMimeType(value.mimeType) || !Array.isArray(value.parentIds) || !value.parentIds.every((parent) => typeof parent === "string" && isSafeFileId(parent)) || !isPositiveDecimal(value.version) || !isValidTimestamp(value.modifiedTime) || !isNonNegativeInteger(value.size) || typeof value.trashed !== "boolean" || (value.kind !== "root" && value.kind !== "folder" && value.kind !== "file")) {
+  if (!isRecord(value) || value.id !== id || !isSafeFileId(id) || !isSafeName(value.name) || !isSafeMimeType(value.mimeType) || !Array.isArray(value.parentIds) || !value.parentIds.every((parent) => typeof parent === "string" && isSafeFileId(parent)) || !isPositiveDecimal(value.version) || !isValidTimestamp(value.modifiedTime) || !isNonNegativeInteger(value.size) || typeof value.trashed !== "boolean" || !isValidAppProperties(value.appProperties) || (value.kind !== "root" && value.kind !== "folder" && value.kind !== "file")) {
     return false;
   }
   if (value.kind === "root") {
     return value.parentIds.length === 0;
   }
   return value.parentIds.length === 1 && (value.kind === "file" ? isPositiveDecimal(value.contentRevision) : value.contentRevision === undefined);
+};
+
+const isValidAppProperties = (value: unknown): boolean => {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  try { assertAppProperties(value as Record<string, string>); return true; } catch { return false; }
 };
 
 const isExactRoot = (value: unknown, id: "vault" | "private"): boolean => isRecord(value) && value.id === id && value.name === id && value.mimeType === FOLDER_MIME_TYPE && Array.isArray(value.parentIds) && value.parentIds.length === 0 && value.version === "1" && value.modifiedTime === "1970-01-01T00:00:00.000Z" && value.size === 0 && value.trashed === false && value.kind === "root" && value.contentRevision === undefined;

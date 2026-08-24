@@ -1,8 +1,7 @@
 /**
- * Extracts canonical local attachment targets from the Markdown dialect this
- * application accepts.  The projection deliberately excludes network URLs,
- * queries, fragments and malformed encodings so it can be used as a safe
- * deletion fence without rereading unrelated notes.
+ * Derives the deletion fence from the exact same remark parser/plugins used
+ * for rendering. The small wiki pass is the existing Obsidian dialect used by
+ * the renderer/indexer; ordinary Markdown is never regex-scanned here.
  */
 export declare const attachmentReferenceProjection: (source: string, notePath: string) => string[];
 export declare const attachmentIsReferenced: (input: {

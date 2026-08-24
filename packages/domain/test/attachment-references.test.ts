@@ -23,4 +23,17 @@ describe("attachment reference projection", () => {
     const source = `![external](https://example.test/_assets/${noteId}/diagram.png)\n![near](../../_assets/${noteId}/diagram.png.bak)\n![query](../../_assets/${noteId}/diagram.png?x=1)\n![raw](/api/private/attachments/raw-drive-id)`;
     expect(attachmentIsReferenced({ source, notePath: "Notes/Inbox/Plan.md", noteId, name: "diagram.png", opaqueId: opaque })).toBe(false);
   });
+
+  it("uses the renderer parser for collapsed definitions and decodes path segments only after syntax checks", () => {
+    const source = [
+      `[asset]: ../../_assets/${noteId}/diagram%23draft.png`,
+      `![collapsed][]`,
+      `![full][asset]`,
+      `![query](../../_assets/${noteId}/diagram.png?blocked)`,
+      `![fragment](../../_assets/${noteId}/diagram.png#blocked)`
+    ].join("\n").replace("[collapsed][]", "![asset][]");
+    const projection = attachmentReferenceProjection(source, "Notes/Inbox/Plan.md");
+    expect(projection).toContain(`_assets/${noteId}/diagram#draft.png`);
+    expect(projection).not.toContain(`_assets/${noteId}/diagram.png`);
+  });
 });

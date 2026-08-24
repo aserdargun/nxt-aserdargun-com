@@ -1,5 +1,7 @@
 import { z } from "zod";
 export declare const DriveIdSchema: z.ZodString;
+/** Internal, random, non-user-controlled proof that an artifact came from one attachment intent. */
+export declare const AttachmentMutationMarkerSchema: z.ZodString;
 export declare const VaultAttachmentSchema: z.ZodObject<{
     driveId: z.ZodString;
     name: z.ZodString;
@@ -10,6 +12,8 @@ export declare const VaultAttachmentSchema: z.ZodObject<{
         inline: "inline";
         download: "download";
     }>>;
+    version: z.ZodOptional<z.ZodString>;
+    marker: z.ZodOptional<z.ZodString>;
 }, z.core.$strict>;
 export type VaultAttachment = z.infer<typeof VaultAttachmentSchema>;
 export declare const VaultIndexEntrySchema: z.ZodObject<{
@@ -37,6 +41,8 @@ export declare const VaultIndexEntrySchema: z.ZodObject<{
             inline: "inline";
             download: "download";
         }>>;
+        version: z.ZodOptional<z.ZodString>;
+        marker: z.ZodOptional<z.ZodString>;
     }, z.core.$strict>>;
     backlinks: z.ZodArray<z.ZodUUID>;
 }, z.core.$strict>;
@@ -109,6 +115,8 @@ export declare const VaultPendingMutationSchema: z.ZodObject<{
         download: "download";
     }>>;
     attachmentReferenceId: z.ZodOptional<z.ZodString>;
+    attachmentMarker: z.ZodOptional<z.ZodString>;
+    recoveryAttempts: z.ZodOptional<z.ZodNumber>;
     source: z.ZodOptional<z.ZodString>;
     ownerId: z.ZodOptional<z.ZodUUID>;
     fence: z.ZodDefault<z.ZodNumber>;
@@ -140,6 +148,8 @@ export declare const RescanStagedRecordSchema: z.ZodObject<{
             inline: "inline";
             download: "download";
         }>>;
+        version: z.ZodOptional<z.ZodString>;
+        marker: z.ZodOptional<z.ZodString>;
     }, z.core.$strict>>;
 }, z.core.$strict>;
 export declare const RescanRecoveryErrorSchema: z.ZodEnum<{
@@ -217,6 +227,8 @@ export declare const VaultRescanStateSchema: z.ZodObject<{
                 inline: "inline";
                 download: "download";
             }>>;
+            version: z.ZodOptional<z.ZodString>;
+            marker: z.ZodOptional<z.ZodString>;
         }, z.core.$strict>>;
     }, z.core.$strict>>;
     seenDriveIds: z.ZodArray<z.ZodString>;
@@ -307,6 +319,8 @@ export declare const VaultIndexSchema: z.ZodObject<{
                 inline: "inline";
                 download: "download";
             }>>;
+            version: z.ZodOptional<z.ZodString>;
+            marker: z.ZodOptional<z.ZodString>;
         }, z.core.$strict>>;
         backlinks: z.ZodArray<z.ZodUUID>;
     }, z.core.$strict>>;
@@ -351,6 +365,8 @@ export declare const VaultIndexSchema: z.ZodObject<{
             download: "download";
         }>>;
         attachmentReferenceId: z.ZodOptional<z.ZodString>;
+        attachmentMarker: z.ZodOptional<z.ZodString>;
+        recoveryAttempts: z.ZodOptional<z.ZodNumber>;
         source: z.ZodOptional<z.ZodString>;
         ownerId: z.ZodOptional<z.ZodUUID>;
         fence: z.ZodDefault<z.ZodNumber>;
@@ -401,6 +417,8 @@ export declare const VaultIndexSchema: z.ZodObject<{
                     inline: "inline";
                     download: "download";
                 }>>;
+                version: z.ZodOptional<z.ZodString>;
+                marker: z.ZodOptional<z.ZodString>;
             }, z.core.$strict>>;
         }, z.core.$strict>>;
         seenDriveIds: z.ZodArray<z.ZodString>;

@@ -25,6 +25,7 @@ export interface GoogleDriveCreateInput {
     name: string;
     mimeType: string;
     parents: string[];
+    appProperties?: Record<string, string>;
   };
   media?: {
     mimeType: string;

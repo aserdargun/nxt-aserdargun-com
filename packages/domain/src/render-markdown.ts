@@ -126,16 +126,25 @@ const sanitizerSchema: Options = {
 };
 
 function createMarkdownProcessor() {
-  return unified()
-    .use(remarkParse)
-    .use(remarkFrontmatter, ["yaml"])
-    .use(remarkGfm)
+  return createMarkdownParser()
     // Deliberately omit rehype-raw: raw HTML is discarded instead of interpreted.
     .use(remarkRehype)
     .use(restrictAttachmentUrls)
     .use(rehypeHighlight)
     .use(rehypeSanitize, sanitizerSchema)
     .use(rehypeStringify);
+}
+
+/** Source AST shared by rendering and attachment-reference projection. */
+export function parseMarkdownAst(source: string): unknown {
+  return createMarkdownParser().parse(source);
+}
+
+function createMarkdownParser() {
+  return unified()
+    .use(remarkParse)
+    .use(remarkFrontmatter, ["yaml"])
+    .use(remarkGfm);
 }
 
 function deriveMarkdown(source: string) {

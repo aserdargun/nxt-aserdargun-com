@@ -8,7 +8,7 @@ import { StorageVersionConflictError } from "../src/storage/storage-port.js";
 import type { GoogleDriveClient } from "../src/storage/google-drive-client.js";
 
 const FILE_FIELDS =
-  "id,name,mimeType,parents,version,modifiedTime,size,trashed,md5Checksum";
+  "id,name,mimeType,parents,version,modifiedTime,size,trashed,md5Checksum,appProperties";
 const LIST_FIELDS = `nextPageToken,files(${FILE_FIELDS})`;
 const REVISION_FIELDS = "nextPageToken,revisions(id,modifiedTime)";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
