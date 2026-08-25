@@ -58,12 +58,20 @@ interface DraftDatabase extends DBSchema {
     value: RecoveryCopy;
     indexes: { "by-note": string };
   };
+  metadata: {
+    key: string;
+    value: {
+      readonly key: string;
+      readonly schemaVersion: number;
+    };
+  };
 }
 
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 const DEFAULT_DATABASE_NAME = "nxt-markdown-drafts";
 const DEFAULT_RECOVERY_LIMITS = { perNote: 32, global: 256 } as const;
 const MAX_RECOVERY_PAGE_SIZE = 50;
+const RECOVERY_MIGRATION_KEY = "recovery-schema";
 const utf8Size = (value: string): number => new TextEncoder().encode(value).byteLength;
 
 export class DraftStoreError extends Error {
@@ -140,6 +148,132 @@ const validateRecovery = (value: unknown): RecoveryCopy => {
 const recoveryId = (input: Pick<RecoveryInput, "noteId" | "localUpdatedAt">): string =>
   `${input.noteId}:${input.localUpdatedAt}`;
 
+const isCanonicalUtcTimestamp = (value: unknown): value is string => {
+  if (TimestampSchema.safeParse(value).success === false || typeof value !== "string") return false;
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
+};
+
+const migratedLegacyRecovery = (value: unknown): RecoveryCopy => {
+  if (typeof value !== "object" || value === null) {
+    throw new DraftStoreError("The browser recovery record is invalid.");
+  }
+  const record = value as Partial<RecoveryCopy>;
+  if (
+    !isBoundedString(record.id, 1536) ||
+    !isBoundedString(record.noteId, 512) ||
+    !isBoundedString(record.name, 512) ||
+    typeof record.source !== "string" ||
+    utf8Size(record.source) > MAX_NOTE_SOURCE_BYTES ||
+    !isBoundedString(record.baseVersion, 512) ||
+    !isCanonicalUtcTimestamp(record.recoveredAt) ||
+    typeof record.removeMatchingDraft !== "boolean"
+  ) {
+    throw new DraftStoreError("The browser recovery record is invalid.");
+  }
+  const legacyBaseId = `${record.noteId}:${record.recoveredAt}`;
+  const collisionSuffix = record.id.slice(legacyBaseId.length);
+  if (
+    record.id !== legacyBaseId &&
+    (!record.id.startsWith(legacyBaseId) || !/^:[1-9]\d*$/u.test(collisionSuffix))
+  ) {
+    throw new DraftStoreError("The browser recovery record is invalid.");
+  }
+  const namedTimestamp = record.name.startsWith("Local draft ")
+    ? record.name.slice("Local draft ".length)
+    : null;
+  const localUpdatedAt = isCanonicalUtcTimestamp(namedTimestamp)
+    ? namedTimestamp
+    : record.recoveredAt;
+  const input = validateRecoveryInput({
+    noteId: record.noteId,
+    name: record.name,
+    source: record.source,
+    baseVersion: record.baseVersion,
+    localUpdatedAt,
+    recoveredAt: record.recoveredAt,
+    removeMatchingDraft: record.removeMatchingDraft
+  });
+  return { id: recoveryId(input), ...input };
+};
+
+const ensureRecoveryMigration = async (
+  database: IDBPDatabase<DraftDatabase>
+): Promise<void> => {
+  const transaction = database.transaction(["recoveries", "metadata"], "readwrite");
+  try {
+    const metadata = transaction.objectStore("metadata");
+    const marker = await metadata.get(RECOVERY_MIGRATION_KEY);
+    if (marker !== undefined) {
+      if (marker.key !== RECOVERY_MIGRATION_KEY || marker.schemaVersion !== DATABASE_VERSION) {
+        throw new DraftStoreError("The browser recovery migration marker is invalid.");
+      }
+      await transaction.done;
+      return;
+    }
+
+    const recoveries = transaction.objectStore("recoveries");
+    let cursor = await recoveries.openCursor();
+    while (cursor !== null) {
+      const raw = cursor.value as unknown;
+      if (
+        typeof raw === "object" &&
+        raw !== null &&
+        Object.prototype.hasOwnProperty.call(raw, "localUpdatedAt")
+      ) {
+        validateRecovery(raw);
+        cursor = await cursor.continue();
+        continue;
+      }
+
+      const migrated = migratedLegacyRecovery(raw);
+      if (cursor.primaryKey !== (raw as { readonly id: string }).id) {
+        throw new DraftStoreError("The browser recovery record is invalid.");
+      }
+      if (cursor.primaryKey === migrated.id) {
+        await cursor.update(migrated);
+      } else {
+        const targetRaw = await recoveries.get(migrated.id);
+        if (targetRaw === undefined) {
+          await recoveries.add(migrated);
+        } else {
+          const target = validateRecovery(targetRaw);
+          if (
+            target.noteId !== migrated.noteId ||
+            target.localUpdatedAt !== migrated.localUpdatedAt ||
+            target.source !== migrated.source
+          ) {
+            throw new DraftStoreError(
+              "The browser recovery key is already used by different content."
+            );
+          }
+        }
+        await cursor.delete();
+      }
+      cursor = await cursor.continue();
+    }
+
+    await metadata.put({
+      key: RECOVERY_MIGRATION_KEY,
+      schemaVersion: DATABASE_VERSION
+    });
+    await transaction.done;
+  } catch (error) {
+    try {
+      transaction.abort();
+    } catch {
+      // The transaction may already have aborted because an IndexedDB request failed.
+    }
+    try {
+      await transaction.done;
+    } catch {
+      // Preserve the original validated migration error below.
+    }
+    if (error instanceof DraftStoreError) throw error;
+    throw new DraftStoreError("The browser recovery migration failed.");
+  }
+};
+
 const isPositiveInteger = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 
@@ -158,8 +292,8 @@ export const createIndexedDbDraftStore = (
     throw new DraftStoreError("The browser recovery limits are invalid.");
   }
   let databasePromise: Promise<IDBPDatabase<DraftDatabase>> | null = null;
-  const database = (): Promise<IDBPDatabase<DraftDatabase>> => {
-    databasePromise ??= openDB<DraftDatabase>(databaseName, DATABASE_VERSION, {
+  const openAndMigrate = async (): Promise<IDBPDatabase<DraftDatabase>> => {
+    const opened = await openDB<DraftDatabase>(databaseName, DATABASE_VERSION, {
       upgrade(db) {
         if (!db.objectStoreNames.contains("drafts")) {
           db.createObjectStore("drafts", { keyPath: "noteId" });
@@ -168,9 +302,27 @@ export const createIndexedDbDraftStore = (
           const recoveries = db.createObjectStore("recoveries", { keyPath: "id" });
           recoveries.createIndex("by-note", "noteId");
         }
+        if (!db.objectStoreNames.contains("metadata")) {
+          db.createObjectStore("metadata", { keyPath: "key" });
+        }
       }
     });
-    return databasePromise;
+    try {
+      await ensureRecoveryMigration(opened);
+      return opened;
+    } catch (error) {
+      opened.close();
+      throw error;
+    }
+  };
+  const database = async (): Promise<IDBPDatabase<DraftDatabase>> => {
+    databasePromise ??= openAndMigrate();
+    try {
+      return await databasePromise;
+    } catch (error) {
+      databasePromise = null;
+      throw error;
+    }
   };
 
   return {

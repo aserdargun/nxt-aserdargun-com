@@ -10,6 +10,50 @@ import {
 let databaseSequence = 0;
 const databaseName = (label: string): string => `nxt-task-11-${label}-${databaseSequence += 1}`;
 
+interface LegacyRecovery {
+  readonly id: string;
+  readonly noteId: string;
+  readonly name: string;
+  readonly source: string;
+  readonly baseVersion: string;
+  readonly recoveredAt: string;
+  readonly removeMatchingDraft: boolean;
+}
+
+const seedVersionOneRecoveries = async (
+  name: string,
+  recoveries: readonly object[]
+): Promise<void> => {
+  const raw = await openDB(name, 1, {
+    upgrade(database) {
+      database.createObjectStore("drafts", { keyPath: "noteId" });
+      const recoveryStore = database.createObjectStore("recoveries", { keyPath: "id" });
+      recoveryStore.createIndex("by-note", "noteId");
+    }
+  });
+  for (const recovery of recoveries) await raw.put("recoveries", recovery);
+  raw.close();
+};
+
+const legacyRecovery = (input: {
+  readonly noteId: string;
+  readonly localUpdatedAt: string;
+  readonly recoveredAt: string;
+  readonly source: string;
+  readonly collision?: number;
+  readonly name?: string;
+}): LegacyRecovery => ({
+  id: `${input.noteId}:${input.recoveredAt}${
+    input.collision === undefined ? "" : `:${input.collision}`
+  }`,
+  noteId: input.noteId,
+  name: input.name ?? `Local draft ${input.localUpdatedAt}`,
+  source: input.source,
+  baseVersion: "7",
+  recoveredAt: input.recoveredAt,
+  removeMatchingDraft: false
+});
+
 const draft = (overrides: Partial<LocalDraft> = {}): LocalDraft => ({
   noteId: "note-1",
   source: "local",
@@ -21,6 +65,139 @@ const draft = (overrides: Partial<LocalDraft> = {}): LocalDraft => ({
 });
 
 describe("IndexedDB draft recovery", () => {
+  it("migrates exact version-one recoveries and conservatively falls back to recoveredAt", async () => {
+    const name = databaseName("legacy-recovery-list");
+    const namedLocalTime = "2026-08-23T12:01:00.000Z";
+    const namedRecoveredTime = "2026-08-23T12:05:00.000Z";
+    const fallbackTime = "2026-08-23T12:06:00.000Z";
+    await seedVersionOneRecoveries(name, [
+      legacyRecovery({
+        noteId: "note-1",
+        localUpdatedAt: namedLocalTime,
+        recoveredAt: namedRecoveredTime,
+        source: "named-local"
+      }),
+      legacyRecovery({
+        noteId: "note-2",
+        localUpdatedAt: "2026-08-23T12:02:00.000Z",
+        recoveredAt: fallbackTime,
+        source: "fallback",
+        name: "Manual local recovery"
+      })
+    ]);
+
+    const drafts = createIndexedDbDraftStore({ databaseName: name });
+    expect((await drafts.listRecoveries("note-1", { limit: 10 })).items).toEqual([
+      expect.objectContaining({
+        id: `note-1:${namedLocalTime}`,
+        source: "named-local",
+        localUpdatedAt: namedLocalTime,
+        recoveredAt: namedRecoveredTime
+      })
+    ]);
+    expect((await drafts.listRecoveries("note-2", { limit: 10 })).items).toEqual([
+      expect.objectContaining({
+        id: `note-2:${fallbackTime}`,
+        source: "fallback",
+        localUpdatedAt: fallbackTime
+      })
+    ]);
+    const upgraded = await openDB(name);
+    expect(upgraded.version).toBe(2);
+    upgraded.close();
+  });
+
+  it("deduplicates exact legacy copies and keeps preserveRecovery retry idempotent", async () => {
+    const name = databaseName("legacy-recovery-dedupe");
+    const localUpdatedAt = "2026-08-23T12:01:00.000Z";
+    const recoveredAt = "2026-08-23T12:05:00.000Z";
+    const duplicate = legacyRecovery({
+      noteId: "note-1",
+      localUpdatedAt,
+      recoveredAt,
+      source: "same"
+    });
+    await seedVersionOneRecoveries(name, [duplicate, { ...duplicate, id: `${duplicate.id}:1` }]);
+
+    const drafts = createIndexedDbDraftStore({ databaseName: name });
+    await drafts.preserveRecovery({
+      noteId: "note-1",
+      name: `Local draft ${localUpdatedAt}`,
+      source: "same",
+      baseVersion: "7",
+      localUpdatedAt,
+      recoveredAt: "2026-08-23T12:07:00.000Z",
+      removeMatchingDraft: false
+    });
+
+    const page = await drafts.listRecoveries("note-1", { limit: 10 });
+    expect(page.totalCount).toBe(1);
+    expect(page.items).toEqual([
+      expect.objectContaining({ id: `note-1:${localUpdatedAt}`, source: "same" })
+    ]);
+  });
+
+  it("rolls back a source collision and retries the migration on the next operation", async () => {
+    const name = databaseName("legacy-recovery-collision");
+    const safeLocalTime = "2026-08-23T10:01:00.000Z";
+    const safeRecoveredTime = "2026-08-23T10:05:00.000Z";
+    const collisionLocalTime = "2026-08-23T12:01:00.000Z";
+    const collisionRecoveredTime = "2026-08-23T12:05:00.000Z";
+    const safeLegacy = legacyRecovery({
+      noteId: "note-0",
+      localUpdatedAt: safeLocalTime,
+      recoveredAt: safeRecoveredTime,
+      source: "safe"
+    });
+    const collidingLegacy = legacyRecovery({
+      noteId: "note-1",
+      localUpdatedAt: collisionLocalTime,
+      recoveredAt: collisionRecoveredTime,
+      source: "legacy-source"
+    });
+    const occupiedTarget = {
+      id: `note-1:${collisionLocalTime}`,
+      noteId: "note-1",
+      name: `Local draft ${collisionLocalTime}`,
+      source: "different-source",
+      baseVersion: "8",
+      localUpdatedAt: collisionLocalTime,
+      recoveredAt: "2026-08-23T12:06:00.000Z",
+      removeMatchingDraft: false
+    } as const;
+    await seedVersionOneRecoveries(name, [safeLegacy, collidingLegacy, occupiedTarget]);
+    const drafts = createIndexedDbDraftStore({ databaseName: name });
+
+    await expect(
+      drafts.listRecoveries("note-1", { limit: 10 })
+    ).rejects.toBeInstanceOf(DraftStoreError);
+    const afterFailure = await openDB(name);
+    const rawAfterFailure = await afterFailure.getAll("recoveries");
+    expect(rawAfterFailure).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: safeLegacy.id, source: "safe" }),
+        expect.objectContaining({ id: collidingLegacy.id, source: "legacy-source" }),
+        expect.objectContaining({ id: occupiedTarget.id, source: "different-source" })
+      ])
+    );
+    expect(rawAfterFailure).toHaveLength(3);
+    expect(rawAfterFailure).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: `note-0:${safeLocalTime}` })])
+    );
+    await afterFailure.delete("recoveries", occupiedTarget.id);
+    afterFailure.close();
+
+    expect((await drafts.listRecoveries("note-1", { limit: 10 })).items).toEqual([
+      expect.objectContaining({
+        id: `note-1:${collisionLocalTime}`,
+        source: "legacy-source"
+      })
+    ]);
+    expect((await drafts.listRecoveries("note-0", { limit: 10 })).items).toEqual([
+      expect.objectContaining({ id: `note-0:${safeLocalTime}`, source: "safe" })
+    ]);
+  });
+
   it("keeps a local draft until the same source is confirmed by Drive", async () => {
     const drafts = createIndexedDbDraftStore({ databaseName: databaseName("confirm") });
     await drafts.put(draft());
