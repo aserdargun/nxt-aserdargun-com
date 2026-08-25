@@ -7,6 +7,7 @@ export interface EditorConflict {
   readonly noteId: string;
   readonly title: string;
   readonly localSource: string;
+  readonly localBaseVersion: string;
   readonly localUpdatedAt: string;
   readonly drive: NoteResponse;
 }

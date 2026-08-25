@@ -31,10 +31,13 @@ interface AutosaveRuntime {
   readonly noteId: string;
   source: string | null;
   title: string;
-  path: string;
+  path: string | null;
   baseVersion: string;
+  needsReconcile: boolean;
   generation: number;
   localUpdatedAt: string;
+  writeChain: Promise<void>;
+  durableWrite: DurableDraftWrite | null;
   timer: ReturnType<typeof setTimeout> | null;
   inFlight: boolean;
   queued: boolean;
@@ -44,6 +47,16 @@ interface AutosaveRuntime {
   changeMerge: (source: string) => void;
   resolve: (resolution: ConflictResolution) => void;
   setConflictOpen: (open: boolean) => void;
+}
+
+interface DurableDraftWrite {
+  readonly generation: number;
+  readonly source: string;
+  readonly baseVersion: string;
+  readonly path: string | null;
+  readonly localUpdatedAt: string;
+  readonly promise: Promise<void>;
+  state: "pending" | "fulfilled" | "rejected";
 }
 
 const INITIAL_STATE: EditorSessionState = {
@@ -170,12 +183,12 @@ const isOfflineFailure = (error: unknown): boolean =>
   error instanceof TypeError ||
   (error instanceof ApiClientError && error.code === "DRIVE_UNAVAILABLE");
 
-const draftMetadata = (draft: LocalDraft): { readonly title: string; readonly path: string } => {
+const draftTitle = (draft: LocalDraft): string => {
   try {
     const note = parseNote(draft.source);
-    return { title: note.frontmatter.title, path: `${note.frontmatter.title}.md` };
+    return note.frontmatter.title;
   } catch {
-    return { title: "", path: "" };
+    return "";
   }
 };
 
@@ -207,10 +220,13 @@ export const useAutosave = ({
       noteId,
       source: null,
       title: "",
-      path: "",
+      path: null,
       baseVersion: "",
+      needsReconcile: false,
       generation: 0,
       localUpdatedAt: now().toISOString(),
+      writeChain: Promise.resolve(),
+      durableWrite: null,
       timer: null,
       inFlight: false,
       queued: false,
@@ -242,28 +258,102 @@ export const useAutosave = ({
       publish({
         source: response.source,
         title: session.title,
-        path: session.path,
+        path: session.path ?? "",
         status,
         conflict: session.conflict
       });
     };
 
-    const showConflict = async (localSource: string): Promise<void> => {
+    const queueDraftWrite = (input: {
+      readonly generation: number;
+      readonly source: string;
+      readonly baseVersion: string;
+      readonly path: string | null;
+      readonly localUpdatedAt: string;
+      readonly conflictWrite?: boolean;
+    }): DurableDraftWrite => {
+      const predecessor = session.writeChain.catch(() => undefined);
+      const promise = predecessor.then(() =>
+        drafts.put({
+          noteId,
+          source: input.source,
+          baseVersion: input.baseVersion,
+          path: input.path,
+          localUpdatedAt: input.localUpdatedAt,
+          confirmedAt: null
+        })
+      );
+      const write: DurableDraftWrite = {
+        generation: input.generation,
+        source: input.source,
+        baseVersion: input.baseVersion,
+        path: input.path,
+        localUpdatedAt: input.localUpdatedAt,
+        promise,
+        state: "pending"
+      };
+      session.writeChain = promise;
+      session.durableWrite = write;
+      void promise.then(
+        () => {
+          write.state = "fulfilled";
+        },
+        () => {
+          write.state = "rejected";
+          if (
+            session.active &&
+            session.durableWrite === write &&
+            session.generation === write.generation &&
+            session.source === write.source
+          ) {
+            clearTimer();
+            session.queued = false;
+            publish(
+              input.conflictWrite === true
+                ? {
+                    status: "Conflict",
+                    conflictError: "The local draft could not be stored."
+                  }
+                : { status: "Error" }
+            );
+          }
+        }
+      );
+      return write;
+    };
+
+    const showConflict = async (
+      localSource: string,
+      localBaseVersion: string,
+      knownLatest?: NoteResponse
+    ): Promise<void> => {
       clearTimer();
       session.queued = false;
       publish({ status: "Conflict", conflictError: null });
       try {
-        const latest = await verifyResponse(await notes.getNote(noteId), noteId);
+        const latest = knownLatest ?? await verifyResponse(
+          await Promise.resolve().then(() => notes.getNote(noteId)),
+          noteId
+        );
         if (!session.active) return;
+        session.title = latest.note.frontmatter.title;
+        session.path = latest.path;
         session.conflict = {
           noteId,
           title: latest.note.frontmatter.title,
           localSource,
+          localBaseVersion,
           localUpdatedAt: session.localUpdatedAt,
           drive: latest
         };
         session.recoveredTitleTimestamp = null;
-        publish({ status: "Conflict", conflict: session.conflict, conflictError: null });
+        publish({
+          title: session.title,
+          path: latest.path,
+          status: "Conflict",
+          conflict: session.conflict,
+          conflictError: null
+        });
       } catch {
         if (session.active) publish({ status: "Conflict", conflict: null });
       }
@@ -279,15 +369,65 @@ export const useAutosave = ({
       session.queued = false;
       const submittedSource = session.source;
       const submittedGeneration = session.generation;
-      const expectedVersion = session.baseVersion;
-      const expectedPath = session.path;
+      const submittedWrite = session.durableWrite;
+      if (
+        submittedWrite === null ||
+        submittedWrite.generation !== submittedGeneration ||
+        submittedWrite.source !== submittedSource
+      ) {
+        session.inFlight = false;
+        publish({ status: "Error" });
+        return;
+      }
+      let expectedVersion = submittedWrite.baseVersion;
+      let expectedPath = submittedWrite.path;
       let resumeQueued = false;
       try {
+        await submittedWrite.promise;
+        if (!session.active) return;
+        if (session.generation !== submittedGeneration || session.source !== submittedSource) {
+          resumeQueued = session.queued;
+          return;
+        }
+
+        if (session.needsReconcile || expectedPath === null) {
+          const latest = await verifyResponse(
+            await Promise.resolve().then(() => notes.getNote(noteId)),
+            noteId
+          );
+          if (!session.active) return;
+          if (latest.version !== expectedVersion) {
+            await showConflict(submittedSource, submittedWrite.baseVersion, latest);
+            return;
+          }
+          session.baseVersion = latest.version;
+          session.path = latest.path;
+          expectedVersion = latest.version;
+          expectedPath = latest.path;
+          const reconciledWrite = queueDraftWrite({
+            generation: submittedGeneration,
+            source: submittedSource,
+            baseVersion: expectedVersion,
+            path: expectedPath,
+            localUpdatedAt: submittedWrite.localUpdatedAt
+          });
+          await reconciledWrite.promise;
+          if (!session.active) return;
+          if (session.generation !== submittedGeneration || session.source !== submittedSource) {
+            resumeQueued = session.queued;
+            return;
+          }
+          session.needsReconcile = false;
+          publish({ path: expectedPath });
+        }
+
         const response = await verifyUpdateResponse({
-          response: await notes.updateNote(noteId, {
-            expectedVersion,
-            source: submittedSource
-          }),
+          response: await Promise.resolve().then(() =>
+            notes.updateNote(noteId, {
+              expectedVersion,
+              source: submittedSource
+            })
+          ),
           noteId,
           source: submittedSource,
           expectedVersion,
@@ -297,21 +437,66 @@ export const useAutosave = ({
         session.baseVersion = response.version;
         session.path = response.path;
         session.title = response.note.frontmatter.title;
-        await drafts.markConfirmed({ noteId, source: submittedSource });
+        await Promise.resolve().then(() =>
+          drafts.markConfirmed({
+            noteId,
+            source: submittedSource,
+            localUpdatedAt: submittedWrite.localUpdatedAt
+          })
+        );
         if (!session.active) return;
         if (session.generation === submittedGeneration && session.source === submittedSource) {
+          session.needsReconcile = false;
           applyResponse(response, "Saved");
         } else {
-          publish({ status: "Saving", title: session.title, path: session.path });
+          const latestGeneration = session.generation;
+          const latestSource = session.source;
+          const latestUpdatedAt = session.localUpdatedAt;
+          if (latestSource === null) return;
+          const rebasedWrite = queueDraftWrite({
+            generation: latestGeneration,
+            source: latestSource,
+            baseVersion: response.version,
+            path: response.path,
+            localUpdatedAt: latestUpdatedAt
+          });
+          await rebasedWrite.promise;
+          if (!session.active) return;
+          if (session.generation === latestGeneration && session.source === latestSource) {
+            publish({ status: "Saving", title: session.title, path: response.path });
+          }
           resumeQueued = session.queued;
         }
       } catch (error) {
         if (!session.active) return;
-        clearTimer();
-        session.queued = false;
-        if (error instanceof ApiClientError && error.status === 409 && error.code === "CONFLICT") {
-          await showConflict(session.source ?? submittedSource);
+        const currentWrite = session.durableWrite;
+        const currentIsSubmitted =
+          session.generation === submittedGeneration && session.source === submittedSource;
+        if (currentWrite?.state === "rejected" && currentWrite.generation === session.generation) {
+          clearTimer();
+          session.queued = false;
+          publish({ status: "Error" });
+        } else if (
+          error instanceof ApiClientError &&
+          error.status === 409 &&
+          error.code === "CONFLICT"
+        ) {
+          if (currentWrite !== null) {
+            try {
+              await currentWrite.promise;
+            } catch {
+              return;
+            }
+          }
+          await showConflict(
+            session.source ?? submittedSource,
+            currentWrite?.baseVersion ?? submittedWrite.baseVersion
+          );
+        } else if (!currentIsSubmitted) {
+          resumeQueued = session.queued;
         } else {
+          clearTimer();
+          session.queued = false;
           publish({ status: isOfflineFailure(error) ? "Offline draft" : "Error" });
         }
       } finally {
@@ -343,14 +528,13 @@ export const useAutosave = ({
       } catch {
         // Invalid in-progress Markdown stays recoverable and will fail closed at readback.
       }
-      const draft: LocalDraft = {
-        noteId,
+      queueDraftWrite({
+        generation: session.generation,
         source: nextSource,
         baseVersion: session.baseVersion,
-        localUpdatedAt: session.localUpdatedAt,
-        confirmedAt: null
-      };
-      void drafts.put(draft).catch(() => publish({ status: "Error" }));
+        path: session.path,
+        localUpdatedAt: session.localUpdatedAt
+      });
       publish({ source: nextSource, title: session.title, status: "Saving", conflictError: null });
       scheduleSave();
     };
@@ -369,13 +553,14 @@ export const useAutosave = ({
         localSource: nextSource,
         localUpdatedAt: session.localUpdatedAt
       };
-      void drafts.put({
-        noteId,
+      queueDraftWrite({
+        generation: session.generation,
         source: nextSource,
-        baseVersion: session.conflict.drive.version,
+        baseVersion: session.conflict.localBaseVersion,
+        path: session.conflict.drive.path,
         localUpdatedAt: session.localUpdatedAt,
-        confirmedAt: null
-      }).catch(() => publish({ status: "Error", conflictError: "The local draft could not be stored." }));
+        conflictWrite: true
+      });
       publish({
         source: nextSource,
         status: "Conflict",
@@ -389,7 +574,8 @@ export const useAutosave = ({
         noteId,
         name: `Local draft ${conflict.localUpdatedAt}`,
         source: conflict.localSource,
-        baseVersion: conflict.drive.version,
+        baseVersion: conflict.localBaseVersion,
+        localUpdatedAt: conflict.localUpdatedAt,
         recoveredAt: now().toISOString(),
         removeMatchingDraft
       });
@@ -401,6 +587,10 @@ export const useAutosave = ({
       publish({ conflictBusy: true, conflictError: null });
       void (async () => {
         try {
+          const resolutionWrite = session.durableWrite;
+          if (resolutionWrite !== null && resolutionWrite.source === conflict.localSource) {
+            await resolutionWrite.promise;
+          }
           if (resolution === "keep-drive") {
             await preserve(conflict, true);
             if (!session.active) return;
@@ -426,16 +616,22 @@ export const useAutosave = ({
             session.recoveredTitleTimestamp ??= now().toISOString();
             const title = recoveredTitle(conflict.title, session.recoveredTitleTimestamp);
             await verifyCreateResponse({
-              response: await notes.createNote({
-                title,
-                body: conflict.localSource,
-                folderId: recoveryFolderId
-              }),
+              response: await Promise.resolve().then(() =>
+                notes.createNote({
+                  title,
+                  body: conflict.localSource,
+                  folderId: recoveryFolderId
+                })
+              ),
               title,
               body: conflict.localSource
             });
             if (!session.active) return;
-            await drafts.markConfirmed({ noteId, source: conflict.localSource });
+            await drafts.markConfirmed({
+              noteId,
+              source: conflict.localSource,
+              localUpdatedAt: conflict.localUpdatedAt
+            });
             if (!session.active) return;
             session.conflict = null;
             applyResponse(conflict.drive, "Saved");
@@ -447,10 +643,12 @@ export const useAutosave = ({
           let response: NoteResponse;
           try {
             response = await verifyUpdateResponse({
-              response: await notes.updateNote(noteId, {
-                expectedVersion: conflict.drive.version,
-                source: merged
-              }),
+              response: await Promise.resolve().then(() =>
+                notes.updateNote(noteId, {
+                  expectedVersion: conflict.drive.version,
+                  source: merged
+                })
+              ),
               noteId,
               source: merged,
               expectedVersion: conflict.drive.version,
@@ -458,7 +656,10 @@ export const useAutosave = ({
             });
           } catch (error) {
             if (error instanceof ApiClientError && error.status === 409 && error.code === "CONFLICT") {
-              const latest = await verifyResponse(await notes.getNote(noteId), noteId);
+              const latest = await verifyResponse(
+                await Promise.resolve().then(() => notes.getNote(noteId)),
+                noteId
+              );
               if (!session.active) return;
               session.conflict = { ...conflict, localSource: merged, drive: latest };
               publish({
@@ -472,7 +673,11 @@ export const useAutosave = ({
             throw error;
           }
           if (!session.active) return;
-          await drafts.markConfirmed({ noteId, source: merged });
+          await drafts.markConfirmed({
+            noteId,
+            source: merged,
+            localUpdatedAt: conflict.localUpdatedAt
+          });
           if (!session.active) return;
           session.conflict = null;
           applyResponse(response, "Saved");
@@ -495,10 +700,12 @@ export const useAutosave = ({
       publish({ conflict: null, conflictBusy: false, conflictError: null, status: "Conflict" });
     };
 
-    void (async () => {
+    const loadInitial = async (): Promise<void> => {
       const [draftResult, driveResult] = await Promise.allSettled([
-        drafts.get(noteId),
-        notes.getNote(noteId).then((response) => verifyResponse(response, noteId))
+        Promise.resolve().then(() => drafts.get(noteId)),
+        Promise.resolve()
+          .then(() => notes.getNote(noteId))
+          .then((response) => verifyResponse(response, noteId))
       ]);
 
       if (draftResult.status === "rejected") {
@@ -510,20 +717,20 @@ export const useAutosave = ({
       if (driveResult.status === "rejected") {
         if (!session.active) return;
         if (draft !== null) {
-          const metadata = draftMetadata(draft);
           session.source = draft.source;
           session.baseVersion = draft.baseVersion;
-          session.title = metadata.title;
-          session.path = metadata.path;
+          session.title = draftTitle(draft);
+          session.path = draft.path;
           session.localUpdatedAt = draft.localUpdatedAt;
+          session.needsReconcile = true;
           publish({
             source: draft.source,
-            title: metadata.title,
-            path: metadata.path,
+            title: session.title,
+            path: draft.path ?? "",
             status: isOfflineFailure(driveResult.reason) ? "Offline draft" : "Error"
           });
         } else {
-          publish({ status: isOfflineFailure(driveResult.reason) ? "Offline draft" : "Error" });
+          publish({ status: "Error" });
         }
         return;
       }
@@ -537,7 +744,13 @@ export const useAutosave = ({
         session.baseVersion = drive.version;
         if (draft !== null) {
           try {
-            await drafts.markConfirmed({ noteId, source: drive.source });
+            await Promise.resolve().then(() =>
+              drafts.markConfirmed({
+                noteId,
+                source: drive.source,
+                localUpdatedAt: draft.localUpdatedAt
+              })
+            );
           } catch {
             publish({ status: "Error" });
             return;
@@ -549,6 +762,25 @@ export const useAutosave = ({
         session.source = draft.source;
         session.baseVersion = draft.baseVersion;
         session.localUpdatedAt = draft.localUpdatedAt;
+        if (draft.baseVersion !== drive.version) {
+          await showConflict(draft.source, draft.baseVersion, drive);
+          return;
+        }
+        const migratedWrite = queueDraftWrite({
+          generation: session.generation,
+          source: draft.source,
+          baseVersion: drive.version,
+          path: drive.path,
+          localUpdatedAt: draft.localUpdatedAt
+        });
+        try {
+          await migratedWrite.promise;
+        } catch {
+          publish({ status: "Error" });
+          return;
+        }
+        if (!session.active) return;
+        session.needsReconcile = false;
         publish({
           source: draft.source,
           title: drive.note.frontmatter.title,
@@ -556,7 +788,10 @@ export const useAutosave = ({
           status: "Offline draft"
         });
       }
-    })();
+    };
+    void loadInitial().catch(() => {
+      publish({ status: "Error" });
+    });
 
     return () => {
       session.active = false;

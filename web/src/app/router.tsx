@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { NoteIdSchema } from "@nxt/contracts";
 import { Navigate, useParams, type RouteObject } from "react-router-dom";
 import { ApiClientError } from "../api/client";
 import { getSession } from "../api/session";
@@ -63,7 +64,8 @@ const OwnerGate = ({ noteId }: { readonly noteId?: string }): React.JSX.Element 
 
 const OwnerNoteGate = (): React.JSX.Element => {
   const { noteId } = useParams<{ noteId: string }>();
-  return noteId === undefined ? <NotFoundPage /> : <OwnerGate noteId={noteId} />;
+  const parsed = NoteIdSchema.safeParse(noteId);
+  return parsed.success ? <OwnerGate noteId={parsed.data} /> : <NotFoundPage />;
 };
 
 export const appRoutes: RouteObject[] = [

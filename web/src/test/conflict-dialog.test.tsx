@@ -12,6 +12,7 @@ const fixtureConflict: EditorConflict = {
   noteId: "018f47d2-6a34-7b2a-9f21-8a7034963aef",
   title: "Plan",
   localSource: "# Local",
+  localBaseVersion: "7",
   localUpdatedAt: "2026-08-23T09:12:00.000Z",
   drive: {
     note: {

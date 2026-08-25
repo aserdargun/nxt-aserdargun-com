@@ -120,9 +120,15 @@ class MemoryDraftStore implements DraftStore {
     return Promise.resolve();
   }
 
-  public markConfirmed(input: { readonly noteId: string; readonly source: string }): Promise<void> {
+  public markConfirmed(input: {
+    readonly noteId: string;
+    readonly source: string;
+    readonly localUpdatedAt: string;
+  }): Promise<void> {
     const current = this.drafts.get(input.noteId);
-    if (current?.source === input.source) this.drafts.delete(input.noteId);
+    if (current?.source === input.source && current.localUpdatedAt === input.localUpdatedAt) {
+      this.drafts.delete(input.noteId);
+    }
     return Promise.resolve();
   }
 
@@ -136,15 +142,36 @@ class MemoryDraftStore implements DraftStore {
       this.recoveryFailuresRemaining -= 1;
       return Promise.reject(new Error("Recovery storage is unavailable."));
     }
-    this.recoveries.push({ ...input, id: `${input.noteId}:${input.recoveredAt}:${this.recoveries.length}` });
+    const id = `${input.noteId}:${input.localUpdatedAt}`;
+    const existing = this.recoveries.find((copy) => copy.id === id);
+    if (existing !== undefined && existing.source !== input.source) {
+      return Promise.reject(new Error("The recovery key is already used by different content."));
+    }
+    if (existing === undefined) this.recoveries.push({ ...input, id });
     if (input.removeMatchingDraft && this.drafts.get(input.noteId)?.source === input.source) {
       this.drafts.delete(input.noteId);
     }
     return Promise.resolve();
   }
 
-  public listRecoveries(noteId: string): Promise<RecoveryCopy[]> {
-    return Promise.resolve(this.recoveries.filter((copy) => copy.noteId === noteId));
+  public listRecoveries(
+    noteId: string,
+    options: { readonly cursor?: string; readonly limit: number }
+  ): Promise<{
+    readonly items: RecoveryCopy[];
+    readonly nextCursor: string | null;
+    readonly totalCount: number;
+  }> {
+    const matching = this.recoveries.filter((copy) => copy.noteId === noteId);
+    const start = options.cursor === undefined
+      ? 0
+      : Math.max(0, matching.findIndex((copy) => copy.id === options.cursor) + 1);
+    const items = matching.slice(start, start + options.limit);
+    return Promise.resolve({
+      items,
+      nextCursor: start + items.length < matching.length ? items.at(-1)?.id ?? null : null,
+      totalCount: matching.length
+    });
   }
 }
 
@@ -191,8 +218,7 @@ const replaceEditorSource = (view: EditorView, nextSource: string): void => {
 
 const flushMicrotasks = async (): Promise<void> => {
   await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
   });
 };
 
@@ -313,6 +339,7 @@ describe("editor load and durable drafts", () => {
       noteId: NOTE_ID,
       source: LOCAL_SOURCE,
       baseVersion: "7",
+      path: "Notes/Plan.md",
       localUpdatedAt: "2026-08-23T12:00:00.000Z",
       confirmedAt: null
     });
@@ -339,6 +366,7 @@ describe("editor load and durable drafts", () => {
       noteId: NOTE_ID,
       source: BASE_SOURCE,
       baseVersion: "7",
+      path: "Notes/Plan.md",
       localUpdatedAt: "2026-08-23T12:00:00.000Z",
       confirmedAt: null
     });
@@ -364,6 +392,7 @@ describe("editor load and durable drafts", () => {
       noteId: NOTE_ID,
       source: LOCAL_SOURCE,
       baseVersion: "7",
+      path: "Notes/Plan.md",
       localUpdatedAt: "2026-08-23T12:00:00.000Z",
       confirmedAt: null
     });
@@ -381,6 +410,262 @@ describe("editor load and durable drafts", () => {
     expect((await getEditorView()).state.doc.toString()).toBe(LOCAL_SOURCE);
     expect(screen.getByLabelText("Save status")).toHaveTextContent("Error");
     expect(store.drafts.get(NOTE_ID)?.source).toBe(LOCAL_SOURCE);
+  });
+
+  it("uses the production adapter to reconcile a pathless offline draft before an exact confirmed save", async () => {
+    const store = new MemoryDraftStore();
+    await store.put({
+      noteId: NOTE_ID,
+      source: LOCAL_SOURCE,
+      baseVersion: "7",
+      path: null,
+      localUpdatedAt: "2026-08-23T12:00:00.000Z",
+      confirmedAt: null
+    });
+    const reconnectedResponse = response("# Newer local", { version: "8" });
+    let getAttempts = 0;
+    const fetchMock = vi.fn<typeof fetch>((input, init) => {
+      if (input !== `/api/private/notes/${NOTE_ID}`) {
+        const requestedPath =
+          typeof input === "string" || input instanceof URL ? input.toString() : input.url;
+        return Promise.reject(new Error(`Unexpected request: ${requestedPath}`));
+      }
+      if (init?.method === "GET") {
+        getAttempts += 1;
+        return getAttempts === 1
+          ? Promise.reject(new TypeError("Failed to fetch"))
+          : Promise.resolve(responseJson(BASE_RESPONSE));
+      }
+      if (init?.method === "PUT") return Promise.resolve(responseJson(reconnectedResponse));
+      return Promise.reject(new Error(`Unexpected method: ${String(init?.method)}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+      />
+    );
+
+    const view = await getEditorView();
+    expect(view.state.doc.toString()).toBe(LOCAL_SOURCE);
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Offline draft");
+    expect(screen.queryByLabelText(/Active note path:/u)).not.toBeInTheDocument();
+    vi.useFakeTimers();
+    replaceEditorSource(view, NEWER_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await flushMicrotasks();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      `/api/private/notes/${NOTE_ID}`,
+      expect.objectContaining({ method: "GET" })
+    );
+    const putInit = fetchMock.mock.calls[2]?.[1];
+    expect(putInit).toMatchObject({ method: "PUT" });
+    if (typeof putInit?.body !== "string") throw new Error("Expected a serialized PUT body");
+    expect(JSON.parse(putInit.body) as UpdateNoteRequest).toEqual({
+      expectedVersion: "7",
+      source: NEWER_SOURCE
+    });
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
+    expect(screen.getByLabelText("Active note path: Notes/Plan.md")).toBeVisible();
+    expect(store.drafts.has(NOTE_ID)).toBe(false);
+  });
+
+  it("opens the normal conflict after reconnect when Drive advanced beyond a pathless draft", async () => {
+    const store = new MemoryDraftStore();
+    await store.put({
+      noteId: NOTE_ID,
+      source: LOCAL_SOURCE,
+      baseVersion: "7",
+      path: null,
+      localUpdatedAt: "2026-08-23T12:00:00.000Z",
+      confirmedAt: null
+    });
+    const notes = notesHarness();
+    notes.getNote
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(LATEST_DRIVE_RESPONSE);
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, NEWER_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await flushMicrotasks();
+
+    expect(notes.getNote).toHaveBeenCalledTimes(2);
+    expect(notes.updateNote).not.toHaveBeenCalled();
+    vi.useRealTimers();
+    expect(await screen.findByRole("dialog", { name: "Version conflict" })).toBeVisible();
+    expect(screen.getByRole("region", { name: "Drive version" })).toHaveTextContent("Latest Drive");
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(NEWER_SOURCE);
+  });
+
+  it("reports Error instead of Offline draft when no relevant source is durable", async () => {
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    notes.getNote.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Error"));
+    expect(screen.queryByRole("textbox", { name: "Markdown editor" })).not.toBeInTheDocument();
+  });
+
+  it("waits for the matching durable write after the exact 1000ms debounce", async () => {
+    const store = new MemoryDraftStore();
+    const write = deferred<void>();
+    vi.spyOn(store, "put").mockImplementation((nextDraft) =>
+      write.promise.then(() => {
+        store.drafts.set(nextDraft.noteId, { ...nextDraft });
+      })
+    );
+    const notes = notesHarness();
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, LOCAL_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(999));
+    expect(notes.updateNote).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(notes.updateNote).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saving");
+
+    write.resolve();
+    await flushMicrotasks();
+    expect(notes.updateNote).toHaveBeenCalledWith(NOTE_ID, {
+      expectedVersion: "7",
+      source: LOCAL_SOURCE
+    });
+    vi.useRealTimers();
+    await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved"));
+  });
+
+  it("keeps a quota failure as Error and never sends that generation", async () => {
+    const store = new MemoryDraftStore();
+    vi.spyOn(store, "put").mockRejectedValue(new Error("Quota exceeded"));
+    const notes = notesHarness();
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, LOCAL_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await flushMicrotasks();
+
+    expect(notes.updateNote).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Error");
+  });
+
+  it("does not claim Offline draft until the matching write has succeeded", async () => {
+    const store = new MemoryDraftStore();
+    const write = deferred<void>();
+    vi.spyOn(store, "put").mockImplementation((nextDraft) =>
+      write.promise.then(() => {
+        store.drafts.set(nextDraft.noteId, { ...nextDraft });
+      })
+    );
+    const notes = notesHarness();
+    notes.updateNote.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, LOCAL_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    expect(notes.updateNote).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saving");
+
+    write.resolve();
+    await flushMicrotasks();
+    expect(notes.updateNote).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Offline draft");
+  });
+
+  it("fences a stale local-write failure from a newer durable generation", async () => {
+    const store = new MemoryDraftStore();
+    const first = deferred<void>();
+    const second = deferred<void>();
+    vi.spyOn(store, "put")
+      .mockImplementationOnce((nextDraft) => first.promise.then(() => {
+        store.drafts.set(nextDraft.noteId, { ...nextDraft });
+      }))
+      .mockImplementationOnce((nextDraft) => second.promise.then(() => {
+        store.drafts.set(nextDraft.noteId, { ...nextDraft });
+      }));
+    const notes = notesHarness();
+    notes.updateNote.mockResolvedValueOnce(NEWER_RESPONSE);
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, LOCAL_SOURCE);
+    replaceEditorSource(view, NEWER_SOURCE);
+    first.reject(new Error("Old write failed"));
+    second.resolve();
+    await flushMicrotasks();
+
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saving");
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await flushMicrotasks();
+    expect(notes.updateNote).toHaveBeenCalledWith(NOTE_ID, {
+      expectedVersion: "7",
+      source: NEWER_SOURCE
+    });
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
   });
 
   it("persists every editor change immediately and waits exactly 1000ms before PUT", async () => {
@@ -416,7 +701,8 @@ describe("editor load and durable drafts", () => {
 
     pending.resolve(LOCAL_RESPONSE);
     await flushMicrotasks();
-    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
+    vi.useRealTimers();
+    await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved"));
     expect(store.drafts.has(NOTE_ID)).toBe(false);
   });
 
@@ -458,8 +744,50 @@ describe("editor load and durable drafts", () => {
 
     second.resolve(NEWER_RESPONSE);
     await flushMicrotasks();
-    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
+    vi.useRealTimers();
+    await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved"));
     expect(store.drafts.has(NOTE_ID)).toBe(false);
+  });
+
+  it("does not let a stale network failure relabel or drop a newer queued edit", async () => {
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    const first = deferred<NoteResponse>();
+    const second = deferred<NoteResponse>();
+    notes.updateNote.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, LOCAL_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    replaceEditorSource(view, NEWER_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    expect(notes.updateNote).toHaveBeenCalledTimes(1);
+
+    first.reject(new TypeError("Failed to fetch"));
+    await flushMicrotasks();
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saving");
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(NEWER_SOURCE);
+    expect(notes.updateNote).toHaveBeenCalledTimes(2);
+    expect(notes.updateNote).toHaveBeenLastCalledWith(NOTE_ID, {
+      expectedVersion: "7",
+      source: NEWER_SOURCE
+    });
+
+    second.resolve(NEWER_RESPONSE);
+    await flushMicrotasks();
+    vi.useRealTimers();
+    await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved"));
   });
 
   it.each([
@@ -645,6 +973,7 @@ describe("editor load and durable drafts", () => {
       noteId: OTHER_NOTE_ID,
       source: source("# Other local", { id: OTHER_NOTE_ID, title: "Other" }),
       baseVersion: "7",
+      path: "Notes/Other.md",
       localUpdatedAt: "2026-08-23T12:01:00.000Z",
       confirmedAt: null
     });
@@ -665,6 +994,34 @@ describe("editor load and durable drafts", () => {
     expect(nextView.state.doc.toString()).toContain("# Other local");
     expect(store.drafts.get(OTHER_NOTE_ID)?.source).toContain("# Other local");
   });
+
+  it.each(["draft store", "note client"])(
+    "catches a synchronously throwing injected %s during initial load",
+    async (thrower) => {
+      const store = new MemoryDraftStore();
+      const notes = notesHarness();
+      if (thrower === "draft store") {
+        vi.spyOn(store, "get").mockImplementation(() => {
+          throw new Error("Synchronous draft failure");
+        });
+      } else {
+        notes.getNote.mockImplementation(() => {
+          throw new Error("Synchronous note failure");
+        });
+      }
+      render(
+        <EditorWorkspace
+          noteId={NOTE_ID}
+          hiddenEditor={false}
+          hiddenPreview={false}
+          draftStore={store}
+          notes={notes.client}
+        />
+      );
+
+      await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Error"));
+    }
+  );
 });
 
 describe("conflict recovery outcomes", () => {
@@ -688,7 +1045,9 @@ describe("conflict recovery outcomes", () => {
     expect(store.recoveries).toEqual([
       expect.objectContaining({
         name: "Local draft 2026-08-23T09:12:00.000Z",
-        source: LOCAL_SOURCE
+        source: LOCAL_SOURCE,
+        baseVersion: "7",
+        localUpdatedAt: "2026-08-23T09:12:00.000Z"
       })
     ]);
   });
@@ -706,6 +1065,8 @@ describe("conflict recovery outcomes", () => {
     expect(notes.createNote).not.toHaveBeenCalled();
     expect(store.drafts.get(NOTE_ID)?.source).toBe(LOCAL_SOURCE);
     expect(store.recoveries.at(-1)?.source).toBe(LOCAL_SOURCE);
+    await user.click(screen.getByRole("button", { name: "Save local as a new note" }));
+    expect(store.recoveries).toHaveLength(1);
   });
 
   it("uses the canonical UTC recovered-title suffix and clears only after exact create readback", async () => {
@@ -940,5 +1301,20 @@ describe("owner-shell integration", () => {
       `/api/private/notes/${NOTE_ID}`,
       expect.objectContaining({ method: "GET", credentials: "same-origin" })
     );
+  });
+
+  it("renders controlled Not Found for an invalid note deep link without calling clients", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockRejectedValue(new Error("No client call expected"));
+    vi.stubGlobal("fetch", fetchMock);
+    const router = createMemoryRouter(appRoutes, { initialEntries: ["/app/notes/not-a-note-id"] });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <AppProviders queryClient={queryClient}>
+        <RouterProvider router={router} />
+      </AppProviders>
+    );
+
+    expect(await screen.findByRole("heading", { name: "Not found" })).toBeVisible();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

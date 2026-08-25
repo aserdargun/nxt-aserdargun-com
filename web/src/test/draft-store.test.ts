@@ -14,6 +14,7 @@ const draft = (overrides: Partial<LocalDraft> = {}): LocalDraft => ({
   noteId: "note-1",
   source: "local",
   baseVersion: "7",
+  path: "Notes/Plan.md",
   localUpdatedAt: "2026-08-23T12:00:00.000Z",
   confirmedAt: null,
   ...overrides
@@ -24,9 +25,17 @@ describe("IndexedDB draft recovery", () => {
     const drafts = createIndexedDbDraftStore({ databaseName: databaseName("confirm") });
     await drafts.put(draft());
 
-    await drafts.markConfirmed({ noteId: "note-1", source: "different" });
+    await drafts.markConfirmed({
+      noteId: "note-1",
+      source: "different",
+      localUpdatedAt: "2026-08-23T12:00:00.000Z"
+    });
     expect(await drafts.get("note-1")).not.toBeNull();
-    await drafts.markConfirmed({ noteId: "note-1", source: "local" });
+    await drafts.markConfirmed({
+      noteId: "note-1",
+      source: "local",
+      localUpdatedAt: "2026-08-23T12:00:00.000Z"
+    });
     expect(await drafts.get("note-1")).toBeNull();
   });
 
@@ -35,7 +44,11 @@ describe("IndexedDB draft recovery", () => {
     await drafts.put(draft());
 
     await Promise.all([
-      drafts.markConfirmed({ noteId: "note-1", source: "local" }),
+      drafts.markConfirmed({
+        noteId: "note-1",
+        source: "local",
+        localUpdatedAt: "2026-08-23T12:00:00.000Z"
+      }),
       drafts.put(draft({ source: "newer", localUpdatedAt: "2026-08-23T12:00:01.000Z" }))
     ]);
 
@@ -48,9 +61,28 @@ describe("IndexedDB draft recovery", () => {
     const drafts = createIndexedDbDraftStore({ databaseName: databaseName("stale") });
     await drafts.put(draft({ source: "newer", localUpdatedAt: "2026-08-23T12:00:01.000Z" }));
 
-    await drafts.markConfirmed({ noteId: "note-1", source: "local" });
+    await drafts.markConfirmed({
+      noteId: "note-1",
+      source: "local",
+      localUpdatedAt: "2026-08-23T12:00:00.000Z"
+    });
 
     expect((await drafts.get("note-1"))?.source).toBe("newer");
+  });
+
+  it("does not delete newer identical content with a different local generation timestamp", async () => {
+    const drafts = createIndexedDbDraftStore({ databaseName: databaseName("same-source-stale") });
+    await drafts.put(draft({ localUpdatedAt: "2026-08-23T12:00:01.000Z" }));
+
+    await drafts.markConfirmed({
+      noteId: "note-1",
+      source: "local",
+      localUpdatedAt: "2026-08-23T12:00:00.000Z"
+    });
+
+    expect(await drafts.get("note-1")).toEqual(
+      draft({ localUpdatedAt: "2026-08-23T12:00:01.000Z" })
+    );
   });
 
   it("fails closed when a persisted draft record is malformed", async () => {
@@ -67,6 +99,57 @@ describe("IndexedDB draft recovery", () => {
     const drafts = createIndexedDbDraftStore({ databaseName: name });
 
     await expect(drafts.get("note-bad")).rejects.toBeInstanceOf(DraftStoreError);
+  });
+
+  it("preserves an exact verified path and compatibly marks a legacy pathless draft", async () => {
+    const name = databaseName("legacy-path");
+    const raw = await openDB(name, 1, {
+      upgrade(database) {
+        database.createObjectStore("drafts", { keyPath: "noteId" });
+        const recoveries = database.createObjectStore("recoveries", { keyPath: "id" });
+        recoveries.createIndex("by-note", "noteId");
+      }
+    });
+    await raw.put("drafts", {
+      noteId: "legacy-note",
+      source: "legacy",
+      baseVersion: "6",
+      localUpdatedAt: "2026-08-23T11:00:00.000Z",
+      confirmedAt: null
+    });
+    raw.close();
+    const drafts = createIndexedDbDraftStore({ databaseName: name });
+
+    expect(await drafts.get("legacy-note")).toEqual({
+      noteId: "legacy-note",
+      source: "legacy",
+      baseVersion: "6",
+      path: null,
+      localUpdatedAt: "2026-08-23T11:00:00.000Z",
+      confirmedAt: null
+    });
+    await drafts.put(draft({ path: "Vault/Nested/Plan.md" }));
+    expect((await drafts.get("note-1"))?.path).toBe("Vault/Nested/Plan.md");
+  });
+
+  it("fails closed for a malformed persisted draft path", async () => {
+    const name = databaseName("malformed-path");
+    const raw = await openDB(name, 1, {
+      upgrade(database) {
+        database.createObjectStore("drafts", { keyPath: "noteId" });
+        const recoveries = database.createObjectStore("recoveries", { keyPath: "id" });
+        recoveries.createIndex("by-note", "noteId");
+      }
+    });
+    await raw.put("drafts", {
+      ...draft({ noteId: "note-bad-path" }),
+      path: 17
+    });
+    raw.close();
+
+    await expect(
+      createIndexedDbDraftStore({ databaseName: name }).get("note-bad-path")
+    ).rejects.toBeInstanceOf(DraftStoreError);
   });
 
   it("bounds browser drafts with the shared source contract", async () => {
@@ -87,12 +170,13 @@ describe("IndexedDB draft recovery", () => {
       name: "Local draft 2026-08-23T12:01:00.000Z",
       source: "local",
       baseVersion: "7",
+      localUpdatedAt: "2026-08-23T12:01:00.000Z",
       recoveredAt: "2026-08-23T12:01:00.000Z",
       removeMatchingDraft: true
     });
 
     expect(await drafts.get("note-1")).toBeNull();
-    expect(await drafts.listRecoveries("note-1")).toEqual([
+    expect((await drafts.listRecoveries("note-1", { limit: 10 })).items).toEqual([
       expect.objectContaining({
         name: "Local draft 2026-08-23T12:01:00.000Z",
         source: "local",
@@ -101,22 +185,120 @@ describe("IndexedDB draft recovery", () => {
     ]);
   });
 
-  it("never overwrites a prior recovery created at the same canonical timestamp", async () => {
+  it("deduplicates the same local recovery across retry timestamps", async () => {
+    const drafts = createIndexedDbDraftStore({ databaseName: databaseName("recovery-dedupe") });
+    const recovery = {
+      noteId: "note-1",
+      name: "Local draft 2026-08-23T12:01:00.000Z",
+      baseVersion: "7",
+      localUpdatedAt: "2026-08-23T12:01:00.000Z",
+      recoveredAt: "2026-08-23T12:01:00.000Z",
+      removeMatchingDraft: false
+    } as const;
+
+    await drafts.preserveRecovery({ ...recovery, source: "same" });
+    await drafts.preserveRecovery({
+      ...recovery,
+      source: "same",
+      recoveredAt: "2026-08-23T12:02:00.000Z"
+    });
+
+    const page = await drafts.listRecoveries("note-1", { limit: 10 });
+    expect(page.totalCount).toBe(1);
+    expect(page.items.map((copy) => copy.source)).toEqual(["same"]);
+  });
+
+  it("rejects a non-matching source that collides on note and local timestamp", async () => {
     const drafts = createIndexedDbDraftStore({ databaseName: databaseName("recovery-collision") });
     const recovery = {
       noteId: "note-1",
       name: "Local draft 2026-08-23T12:01:00.000Z",
       baseVersion: "7",
+      localUpdatedAt: "2026-08-23T12:01:00.000Z",
       recoveredAt: "2026-08-23T12:01:00.000Z",
       removeMatchingDraft: false
     } as const;
 
     await drafts.preserveRecovery({ ...recovery, source: "first" });
-    await drafts.preserveRecovery({ ...recovery, source: "second" });
-
-    expect((await drafts.listRecoveries("note-1")).map((copy) => copy.source)).toEqual([
-      "first",
-      "second"
+    await expect(
+      drafts.preserveRecovery({ ...recovery, source: "second" })
+    ).rejects.toBeInstanceOf(DraftStoreError);
+    expect((await drafts.listRecoveries("note-1", { limit: 10 })).items).toEqual([
+      expect.objectContaining({ source: "first" })
     ]);
+  });
+
+  it("fails closed at explicit per-note and global recovery limits without deleting drafts", async () => {
+    const drafts = createIndexedDbDraftStore({
+      databaseName: databaseName("recovery-limits"),
+      recoveryLimits: { perNote: 1, global: 2 }
+    });
+    await drafts.put(draft());
+    const recovery = {
+      name: "Local recovery",
+      source: "local",
+      baseVersion: "7",
+      recoveredAt: "2026-08-23T12:05:00.000Z",
+      removeMatchingDraft: false
+    } as const;
+    await drafts.preserveRecovery({
+      ...recovery,
+      noteId: "note-1",
+      localUpdatedAt: "2026-08-23T12:01:00.000Z"
+    });
+    await expect(
+      drafts.preserveRecovery({
+        ...recovery,
+        noteId: "note-1",
+        source: "newer",
+        localUpdatedAt: "2026-08-23T12:02:00.000Z"
+      })
+    ).rejects.toBeInstanceOf(DraftStoreError);
+    expect(await drafts.get("note-1")).toEqual(draft());
+
+    await drafts.preserveRecovery({
+      ...recovery,
+      noteId: "note-2",
+      localUpdatedAt: "2026-08-23T12:03:00.000Z"
+    });
+    await expect(
+      drafts.preserveRecovery({
+        ...recovery,
+        noteId: "note-3",
+        localUpdatedAt: "2026-08-23T12:04:00.000Z"
+      })
+    ).rejects.toBeInstanceOf(DraftStoreError);
+    expect(await drafts.get("note-1")).toEqual(draft());
+  });
+
+  it("pages recovery records with a bounded cursor and exact count", async () => {
+    const drafts = createIndexedDbDraftStore({ databaseName: databaseName("recovery-page") });
+    for (const minute of [1, 2, 3]) {
+      const timestamp = `2026-08-23T12:0${minute}:00.000Z`;
+      await drafts.preserveRecovery({
+        noteId: "note-1",
+        name: `Local draft ${timestamp}`,
+        source: `local-${minute}`,
+        baseVersion: "7",
+        localUpdatedAt: timestamp,
+        recoveredAt: timestamp,
+        removeMatchingDraft: false
+      });
+    }
+
+    const first = await drafts.listRecoveries("note-1", { limit: 2 });
+    expect(first.totalCount).toBe(3);
+    expect(first.items.map((copy) => copy.source)).toEqual(["local-1", "local-2"]);
+    expect(first.nextCursor).not.toBeNull();
+    const second = await drafts.listRecoveries("note-1", {
+      limit: 2,
+      cursor: first.nextCursor ?? undefined
+    });
+    expect(second.totalCount).toBe(3);
+    expect(second.items.map((copy) => copy.source)).toEqual(["local-3"]);
+    expect(second.nextCursor).toBeNull();
+    await expect(drafts.listRecoveries("note-1", { limit: 10_000 })).rejects.toBeInstanceOf(
+      DraftStoreError
+    );
   });
 });
