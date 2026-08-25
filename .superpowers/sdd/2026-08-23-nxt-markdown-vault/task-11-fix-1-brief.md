@@ -39,4 +39,3 @@ Fix only the four Important and two related Minor findings from the independent 
    - Re-run desktop/mobile/conflict browser QA only if production layout changes; otherwise cite the unchanged inspected Task 11 artifacts.
    - Restore `web/tsconfig.tsbuildinfo`, close checkout-owned ports, commit implementation and a separate forced-added `task-11-fix-1-report.md`, and return clean status.
    - No live Drive credentials, Google, GitHub, Azure, DNS, deployment, push, or external mutable state.
-
