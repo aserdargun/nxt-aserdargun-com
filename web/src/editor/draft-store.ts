@@ -154,8 +154,37 @@ const isCanonicalUtcTimestamp = (value: unknown): value is string => {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
 };
 
+const LEGACY_RECOVERY_KEYS = new Set([
+  "id",
+  "noteId",
+  "name",
+  "source",
+  "baseVersion",
+  "recoveredAt",
+  "removeMatchingDraft"
+]);
+
+const isExactLegacyRecoveryObject = (value: unknown): value is Record<string, unknown> => {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    Object.getPrototypeOf(value) !== Object.prototype
+  ) {
+    return false;
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== LEGACY_RECOVERY_KEYS.size) return false;
+  for (const key of keys) {
+    if (typeof key !== "string" || !LEGACY_RECOVERY_KEYS.has(key)) return false;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor)) return false;
+  }
+  return true;
+};
+
 const migratedLegacyRecovery = (value: unknown): RecoveryCopy => {
-  if (typeof value !== "object" || value === null) {
+  if (!isExactLegacyRecoveryObject(value)) {
     throw new DraftStoreError("The browser recovery record is invalid.");
   }
   const record = value as Partial<RecoveryCopy>;
@@ -241,12 +270,16 @@ const ensureRecoveryMigration = async (
           if (
             target.noteId !== migrated.noteId ||
             target.localUpdatedAt !== migrated.localUpdatedAt ||
-            target.source !== migrated.source
+            target.source !== migrated.source ||
+            target.name !== migrated.name ||
+            target.baseVersion !== migrated.baseVersion
           ) {
             throw new DraftStoreError(
               "The browser recovery key is already used by different content."
             );
           }
+          // recoveredAt and removeMatchingDraft describe a preservation attempt, not draft
+          // lineage. As with an idempotent preserveRecovery retry, the first copy keeps them.
         }
         await cursor.delete();
       }
