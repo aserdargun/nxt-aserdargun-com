@@ -135,6 +135,7 @@ describe("session-gated owner route", () => {
         return Promise.resolve(responseJson({
           entries: [],
           preferences: { schemaVersion: 1, favorites: [], recent: [], theme: "dark" },
+          preferencesChecksum: "f".repeat(64),
           folders: [],
           treeVersion: "a".repeat(64),
           cursor: null,

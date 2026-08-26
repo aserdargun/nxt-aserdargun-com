@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderMarkdown } from "../src/index.js";
+import { deriveMarkdownOutline, renderMarkdown } from "../src/index.js";
 
 describe("renderMarkdown", () => {
   it("sanitizes active markup and preserves GFM", async () => {
@@ -40,5 +40,18 @@ describe("renderMarkdown", () => {
     const rendered = await renderMarkdown("# constructor");
     expect(rendered.outline).toEqual([{ depth: 1, id: "nxt-heading-constructor", text: "constructor" }]);
     expect(rendered.html).toContain('<h1 id="nxt-heading-constructor">constructor</h1>');
+  });
+
+  it("derives the exact renderer outline for CommonMark headings", async () => {
+    const source = "# **Bold** `code`\n\nSetext *emphasis*\n-----------------\n\n> # Quoted\n\n## Repeat\n## Repeat";
+    const outline = deriveMarkdownOutline(source);
+
+    expect(outline).toEqual([
+      { depth: 1, id: "nxt-heading-bold-code", text: "Bold code" },
+      { depth: 2, id: "nxt-heading-setext-emphasis", text: "Setext emphasis" },
+      { depth: 2, id: "nxt-heading-repeat", text: "Repeat" },
+      { depth: 2, id: "nxt-heading-repeat-2", text: "Repeat" }
+    ]);
+    await expect(renderMarkdown(source)).resolves.toMatchObject({ outline });
   });
 });

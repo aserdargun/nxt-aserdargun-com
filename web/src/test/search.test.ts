@@ -41,9 +41,9 @@ class ControlledWorker implements SearchWorkerLike {
 describe("bounded Turkish vault search", () => {
   it("searches Turkish text, title, tag, folder, and favorite", () => {
     const index = createSearchIndex(indexFixture);
-    expect(searchIndex(index, "yıllık tag:plan folder:Plans favorite:true").map((item) => item.id)).toEqual([
-      "note-2026"
-    ]);
+    const results = searchIndex(index, "yıllık tag:plan folder:Plans favorite:true");
+    expect(results.map((item) => item.id)).toEqual(["note-2026"]);
+    expect(results[0]).not.toHaveProperty("searchText");
     expect(searchIndex(index, "ISIK").map((item) => item.id)).toEqual(["note-idea"]);
   });
 
@@ -90,5 +90,17 @@ describe("bounded Turkish vault search", () => {
 
     await expect(query).rejects.toThrow("invalid response");
     client.terminate();
+  });
+
+  it("rejects every pending request when a malformed worker response has no usable request ID", async () => {
+    const worker = new ControlledWorker();
+    const client = new SearchClient(worker);
+    const ready = client.initialize(indexFixture);
+
+    worker.respond({ type: "ready", requestId: "not-an-integer" });
+
+    await expect(ready).rejects.toThrow("invalid response");
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    await expect(client.query("plan")).rejects.toThrow("terminated");
   });
 });

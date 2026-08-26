@@ -99,7 +99,7 @@ describe("private vault handlers", () => {
             folders: [{ id: "raw-folder-drive-id", name: "Notes", path: "Notes", version: "1", protected: true }]
           })
         },
-        preferences: { read: async () => ({ value: { schemaVersion: 1, favorites: [], recent: [], theme: "system" } }) }
+        preferences: { read: async () => ({ value: { schemaVersion: 1, favorites: [], recent: [], theme: "system" }, checksum: "f".repeat(64) }) }
       }) as never,
       idCodec: identityCodec
     });
@@ -148,7 +148,7 @@ describe("private vault handlers", () => {
         vaultTree: async () => ({ treeVersion, folders: [folder] }),
         trashFolder
       },
-      preferences: { read: async () => ({ value: { schemaVersion: 1, favorites: [], recent: [], theme: "system" } }) }
+      preferences: { read: async () => ({ value: { schemaVersion: 1, favorites: [], recent: [], theme: "system" }, checksum: "f".repeat(64) }) }
     } as never;
     const dependencies = {
       authorize: () => ({ provider: "github" as const, userId: "owner", userDetails: "aserdargun" }),
@@ -182,7 +182,7 @@ describe("private vault handlers", () => {
         readIndex: async () => ({ value: { schemaVersion: 1, generation: 7, entries, pendingMutations: [], rescanState: null } }),
         vaultTree: async () => ({ treeVersion: "e".repeat(64), folders: [] })
       },
-      preferences: { read: async () => ({ value: { schemaVersion: 1, favorites: [], recent: [], theme: "system" } }) }
+      preferences: { read: async () => ({ value: { schemaVersion: 1, favorites: [], recent: [], theme: "system" }, checksum: "f".repeat(64) }) }
     } as never;
     const handlers = createVaultHandlers({
       authorize: () => ({ provider: "github", userId: "owner", userDetails: "aserdargun" }),
@@ -212,12 +212,48 @@ describe("private vault handlers", () => {
           readIndex: async () => ({ value: { schemaVersion: 1, generation: 9, entries, pendingMutations: [], rescanState: null } }),
           vaultTree: async () => ({ treeVersion, folders: [] })
         },
-        preferences: { read: async () => ({ value: { schemaVersion: 1, favorites: [], recent: [], theme: "system" } }) }
+        preferences: { read: async () => ({ value: { schemaVersion: 1, favorites: [], recent: [], theme: "system" }, checksum: "f".repeat(64) }) }
       }) as never,
       idCodec: identityCodec
     });
     const first = VaultResponseSchema.parse((await handlers.getVault(request("GET", "https://nxt.example/api/private/vault"))).jsonBody);
     treeVersion = "2".repeat(64);
+
+    const stale = await handlers.getVault(request("GET", `https://nxt.example/api/private/vault?cursor=${first.cursor}`));
+
+    expect(stale.status).toBe(409);
+    expect(stale.jsonBody).toMatchObject({ error: { code: "CONFLICT" } });
+  });
+
+  it("rejects a vault cursor when preferences change between pages", async () => {
+    const favorites = Array.from({ length: 101 }, (_, index) =>
+      `30000000-0000-4000-8000-${String(index).padStart(12, "0")}`
+    );
+    let preferenceReads = 0;
+    const handlers = createVaultHandlers({
+      authorize: () => ({ provider: "github", userId: "owner", userDetails: "aserdargun" }),
+      resolveServices: () => ({
+        vault: {
+          readIndex: async () => ({ value: { schemaVersion: 1, generation: 9, entries: [], pendingMutations: [], rescanState: null } }),
+          vaultTree: async () => ({ treeVersion: "4".repeat(64), folders: [] })
+        },
+        preferences: {
+          read: async () => {
+            const first = preferenceReads++ === 0;
+            return {
+            value: {
+              schemaVersion: 1,
+              favorites: first ? favorites : [...favorites].reverse(),
+              recent: [],
+              theme: "system"
+            },
+            checksum: (first ? "a" : "b").repeat(64)
+          }; }
+        }
+      }) as never,
+      idCodec: identityCodec
+    });
+    const first = VaultResponseSchema.parse((await handlers.getVault(request("GET", "https://nxt.example/api/private/vault"))).jsonBody);
 
     const stale = await handlers.getVault(request("GET", `https://nxt.example/api/private/vault?cursor=${first.cursor}`));
 
@@ -240,7 +276,7 @@ describe("private vault handlers", () => {
           readIndex: async () => ({ value: { schemaVersion: 1, generation: 9, entries: [], pendingMutations: [], rescanState: null } }),
           vaultTree: async () => ({ treeVersion, folders: calls++ % 2 === 0 ? folders : [...folders].reverse() })
         },
-        preferences: { read: async () => ({ value: { schemaVersion: 1, favorites: [], recent: [], theme: "system" } }) }
+        preferences: { read: async () => ({ value: { schemaVersion: 1, favorites: [], recent: [], theme: "system" }, checksum: "f".repeat(64) }) }
       }) as never,
       idCodec: identityCodec
     });
@@ -279,7 +315,7 @@ describe("private vault handlers", () => {
         readIndex: async () => ({ value: { schemaVersion: 1, generation: 10, entries: [entry], pendingMutations: [], rescanState: null } }),
         vaultTree: async () => ({ treeVersion: "3".repeat(64), folders: [] })
       },
-      preferences: { read: async () => ({ value: { schemaVersion: 1, favorites, recent, theme: "system" } }) }
+      preferences: { read: async () => ({ value: { schemaVersion: 1, favorites, recent, theme: "system" }, checksum: "f".repeat(64) }) }
     } as never;
     const handlers = createVaultHandlers({
       authorize: () => ({ provider: "github", userId: "owner", userDetails: "aserdargun" }),

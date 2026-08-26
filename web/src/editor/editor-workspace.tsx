@@ -1,8 +1,8 @@
 import type { WikiTargetResolution } from "@nxt/domain";
-import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
 import { notesClient, type NotesClient } from "../api/notes";
 import { BacklinksPanel, type KnowledgeLink } from "../explorer/backlinks-panel";
-import { deriveOutline, OutlinePanel, type OutlineHeading } from "../explorer/outline-panel";
+import { OutlinePanel, type OutlineHeading } from "../explorer/outline-panel";
 import { ConflictDialog } from "./conflict-dialog";
 import { browserDraftStore, type DraftStore } from "./draft-store";
 import { useAutosave, type SaveStatus } from "./use-autosave";
@@ -71,6 +71,7 @@ export const EditorWorkspace = ({
   infoRegion
 }: EditorWorkspaceProps): React.JSX.Element => {
   const [contextTab, setContextTab] = useState<"preview" | "outline" | "backlinks">("preview");
+  const [pendingOutlineId, setPendingOutlineId] = useState<string | null>(null);
   const {
     state,
     onSourceChange,
@@ -90,16 +91,20 @@ export const EditorWorkspace = ({
     onStateChange?.({ title: state.title, path: state.path, status: state.status });
   }, [onStateChange, state.path, state.status, state.title]);
 
-  useEffect(() => setContextTab("preview"), [noteId]);
+  useEffect(() => {
+    setContextTab("preview");
+    setPendingOutlineId(null);
+  }, [noteId]);
+
+  useEffect(() => setPendingOutlineId(null), [state.source]);
 
   const navigateOutline = (heading: OutlineHeading): void => {
-    if (state.source === null) return;
-    const index = deriveOutline(state.source).findIndex((candidate) => candidate.line === heading.line);
-    if (index < 0) return;
-    const rendered = document.querySelectorAll<HTMLElement>(".markdown-preview h1, .markdown-preview h2, .markdown-preview h3, .markdown-preview h4, .markdown-preview h5, .markdown-preview h6")[index];
-    if (rendered === undefined) return;
-    if (typeof rendered.scrollIntoView === "function") rendered.scrollIntoView({ block: "start" });
+    setPendingOutlineId(heading.id);
+    setContextTab("preview");
   };
+  const completeOutlineNavigation = useCallback((headingId: string): void => {
+    setPendingOutlineId((current) => current === headingId ? null : current);
+  }, []);
 
   return (
     <>
@@ -153,21 +158,26 @@ export const EditorWorkspace = ({
             ))}
           </div>
           <div className="preview-content" aria-busy={state.source === null}>
-            {state.source === null ? null : contextTab === "preview" ? (
-              <Suspense fallback={null}>
-                <MarkdownPreview
-                  source={state.source}
-                  notePath={state.path}
-                  resolveAttachment={resolveAttachment}
-                  resolveWikiLink={resolveWikiLink}
-                  onWikiNavigate={onWikiNavigate}
-                />
-              </Suspense>
-            ) : contextTab === "outline" ? (
-              <OutlinePanel source={state.source} onNavigate={navigateOutline} />
-            ) : (
-              <BacklinksPanel backlinks={backlinks} wikiLinks={wikiLinks} onNavigate={(id) => onWikiNavigate?.(id)} />
+            {state.source === null ? null : (
+              <div hidden={contextTab !== "preview"}>
+                <Suspense fallback={null}>
+                  <MarkdownPreview
+                    source={state.source}
+                    notePath={state.path}
+                    resolveAttachment={resolveAttachment}
+                    resolveWikiLink={resolveWikiLink}
+                    onWikiNavigate={onWikiNavigate}
+                    scrollTargetId={pendingOutlineId}
+                    onScrollComplete={completeOutlineNavigation}
+                  />
+                </Suspense>
+              </div>
             )}
+            {state.source !== null && contextTab === "outline" ? (
+              <OutlinePanel source={state.source} onNavigate={navigateOutline} />
+            ) : state.source !== null && contextTab === "backlinks" ? (
+              <BacklinksPanel backlinks={backlinks} wikiLinks={wikiLinks} onNavigate={(id) => onWikiNavigate?.(id)} />
+            ) : null}
           </div>
         </section>
         {infoRegion}

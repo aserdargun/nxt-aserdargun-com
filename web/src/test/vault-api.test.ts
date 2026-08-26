@@ -13,6 +13,11 @@ const FOLDER_ID = "v1.abcdefghijklmnop.folder_1.abcdefghijklmnopqrstuv";
 const ASSET_ID = "v1.abcdefghijklmnop.asset_1.abcdefghijklmnopqrstuv";
 const CURSOR = "v1.abcdefghijklmnop.cursor_1.abcdefghijklmnopqrstuv";
 
+const noteIds = (count: number): string[] => Array.from(
+  { length: count },
+  (_, index) => `10000000-0000-4000-8000-${String(index).padStart(12, "0")}`
+);
+
 const entry = (relations: Partial<VaultResponse["entries"][number]> = {}): VaultResponse["entries"][number] => ({
   id: NOTE_ID,
   title: "Yıllık Plan",
@@ -34,6 +39,7 @@ const entry = (relations: Partial<VaultResponse["entries"][number]> = {}): Vault
 const page = (overrides: Partial<VaultResponse> = {}): VaultResponse => ({
   entries: [],
   preferences: { schemaVersion: 1, favorites: [], recent: [], theme: "dark" },
+  preferencesChecksum: "f".repeat(64),
   folders: [],
   treeVersion: "a".repeat(64),
   cursor: null,
@@ -70,6 +76,37 @@ describe("complete authenticated vault assembly", () => {
     ]);
     expect(vault.preferences.favorites).toEqual([NOTE_ID]);
     expect(vault.preferences.recent).toEqual([NOTE_ID]);
+  });
+
+  it("assembles more than one bounded preference page into the complete preferences contract", async () => {
+    const favorites = noteIds(101);
+    const recent = [...favorites].reverse();
+
+    const vault = await assembleVaultPages((cursor) => Promise.resolve(cursor === null
+      ? page({
+        preferences: { schemaVersion: 1, favorites: favorites.slice(0, 100), recent: recent.slice(0, 100), theme: "dark" },
+        cursor: CURSOR,
+        complete: false
+      })
+      : page({
+        preferences: { schemaVersion: 1, favorites: favorites.slice(100), recent: recent.slice(100), theme: "dark" }
+      })));
+
+    expect(vault.preferences.favorites).toEqual(favorites);
+    expect(vault.preferences.recent).toEqual(recent);
+  });
+
+  it("fails closed when preferences are reordered between pages", async () => {
+    await expect(assembleVaultPages((cursor) => Promise.resolve(cursor === null
+      ? page({
+        preferences: { schemaVersion: 1, favorites: [NOTE_ID, OTHER_NOTE_ID], recent: [], theme: "dark" },
+        cursor: CURSOR,
+        complete: false
+      })
+      : page({
+        preferences: { schemaVersion: 1, favorites: [OTHER_NOTE_ID, NOTE_ID], recent: [], theme: "dark" },
+        preferencesChecksum: "e".repeat(64)
+      })))).rejects.toBeInstanceOf(IncompleteVaultError);
   });
 
   it("fails closed when a later page changes a scalar or tree version", async () => {

@@ -1378,6 +1378,37 @@ describe("owner-shell integration", () => {
     expect(within(preview).getByLabelText("Missing, Unresolved")).toHaveAttribute("aria-disabled", "true");
   });
 
+  it("scrolls the exact rendered heading ID instead of a positional heading match", async () => {
+    const user = userEvent.setup();
+    const notes = notesHarness(response("# Repeat\n\n> # Nested quote\n\n# Repeat"));
+    const scrolledIds: string[] = [];
+    const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+    const scroll = vi.fn(function (this: HTMLElement) {
+      scrolledIds.push(this.id);
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: scroll });
+    try {
+      render(
+        <OwnerShell
+          noteId={NOTE_ID}
+          vault={OWNER_VAULT}
+          notes={notes.client}
+          draftStore={new MemoryDraftStore()}
+        />
+      );
+      const preview = screen.getByRole("region", { name: "Preview" });
+      await waitFor(() => expect(preview.querySelector("#nxt-heading-repeat-2")).not.toBeNull());
+
+      await user.click(within(preview).getByRole("tab", { name: "Outline" }));
+      await user.click(within(preview).getAllByRole("button", { name: "Repeat" })[1]!);
+
+      await waitFor(() => expect(scrolledIds).toEqual(["nxt-heading-repeat-2"]));
+    } finally {
+      if (originalScrollIntoView === undefined) delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+      else Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScrollIntoView);
+    }
+  });
+
   it("derives the recovery destination from the selected note's exact opaque parent", async () => {
     const user = userEvent.setup();
     const store = new MemoryDraftStore();
@@ -1483,13 +1514,64 @@ describe("owner-shell integration", () => {
     expect(onRefreshVault).toHaveBeenCalledTimes(2);
   });
 
+  it("refreshes the vault after a stale folder confirmation conflict", async () => {
+    const user = userEvent.setup();
+    const customFolder = {
+      id: "v1.abcdefghijklmnop.folder_3.abcdefghijklmnopqrstuv",
+      name: "Plans",
+      path: "Notes/Plans",
+      version: "3",
+      protected: false,
+      deleteConfirmation: {
+        descendantCount: 0,
+        treeVersion: "a".repeat(64),
+        expiresAt: "2026-08-25T12:05:00.000Z",
+        confirmationToken: `c1.${"b".repeat(120)}.${"c".repeat(43)}`
+      }
+    } as const;
+    const stale = conflictError();
+    const trashFolder = vi.fn(() => Promise.reject(stale));
+    const vaultApi: VaultClient = {
+      loadCompleteVault: vi.fn(() => Promise.resolve(OWNER_VAULT)),
+      createFolder: vi.fn(),
+      updateFolder: vi.fn(),
+      trashFolder,
+      updatePreferences: vi.fn(() => Promise.resolve(OWNER_VAULT.preferences)),
+      rescanVault: vi.fn(() => Promise.resolve([]))
+    };
+    const onRefreshVault = vi.fn(() => Promise.resolve());
+    render(
+      <OwnerShell
+        noteId={NOTE_ID}
+        vault={{ ...OWNER_VAULT, folders: [...OWNER_VAULT.folders, customFolder] }}
+        notes={notesHarness().client}
+        draftStore={new MemoryDraftStore()}
+        vaultApi={vaultApi}
+        onRefreshVault={onRefreshVault}
+        now={() => new Date("2026-08-25T12:04:00.000Z")}
+      />
+    );
+    await user.click(screen.getByRole("button", { name: "Plans actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Move to Trash" }));
+    await user.click(within(screen.getByRole("dialog", { name: "Move Plans to Trash" })).getByRole("button", { name: "Move to Trash" }));
+
+    await waitFor(() => expect(onRefreshVault).toHaveBeenCalledOnce());
+    expect(trashFolder).toHaveBeenCalledOnce();
+    expect(screen.getByRole("alert")).toHaveTextContent("confirmation is stale");
+  });
+
   it("reaches the selected production note through the exact deep owner route", async () => {
     const fetchMock = vi.fn<typeof fetch>((input) => {
       if (input === "/api/private/session") {
         return Promise.resolve(responseJson({ user: { userDetails: "owner" } }));
       }
       if (input === "/api/private/vault?limit=100") {
-        return Promise.resolve(responseJson({ ...OWNER_VAULT, cursor: null, complete: true }));
+        return Promise.resolve(responseJson({
+          ...OWNER_VAULT,
+          preferencesChecksum: "f".repeat(64),
+          cursor: null,
+          complete: true
+        }));
       }
       if (input === `/api/private/notes/${NOTE_ID}`) return Promise.resolve(responseJson(BASE_RESPONSE));
       const requestedPath = typeof input === "string" || input instanceof URL ? input.toString() : input.url;

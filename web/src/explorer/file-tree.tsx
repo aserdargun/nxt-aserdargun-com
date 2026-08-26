@@ -1,5 +1,5 @@
 import { ChevronRight, File, Folder } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DeleteFolderRequest, FolderDeleteConfirmationSchema } from "@nxt/contracts";
 import type { CompleteVault } from "../api/vault";
 import { FolderActions } from "./folder-actions";
@@ -92,6 +92,7 @@ export interface FileTreeProps {
   readonly onMoveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onTrashFolder?: ((folder: FolderExplorerNode, input: DeleteFolderRequest) => Promise<void>) | undefined;
+  readonly now?: (() => Date) | undefined;
 }
 
 const flattenVisible = (
@@ -140,27 +141,41 @@ export const FileTree = ({
   onRenameFolder,
   onMoveFolder,
   onArchiveFolder,
-  onTrashFolder
+  onTrashFolder,
+  now
 }: FileTreeProps): React.JSX.Element => {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(
     () => new Set(ancestorFolderIds(tree, selectedId))
   );
   const [focusedId, setFocusedId] = useState<string | null>(() => selectedId ?? tree[0]?.id ?? null);
+  const [activeSelectedId, setActiveSelectedId] = useState<string | null>(() => selectedId ?? null);
+  const [menuFolderId, setMenuFolderId] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
   const itemRefs = useRef(new Map<string, HTMLButtonElement>());
+  const treeOwnedFocus = useRef(false);
   const visible = useMemo(() => flattenVisible(tree, expanded), [expanded, tree]);
   const effectiveFocusedId = visible.some(({ node }) => node.id === focusedId)
     ? focusedId
     : visible.find(({ node }) => node.id === selectedId)?.node.id ?? visible[0]?.node.id ?? null;
 
+  useLayoutEffect(() => {
+    const visibleIds = new Set(visible.map(({ node }) => node.id));
+    if (focusedId !== null && visibleIds.has(focusedId)) return;
+    const next = selectedId !== undefined && visibleIds.has(selectedId) ? selectedId : visible[0]?.node.id ?? null;
+    setFocusedId(next);
+    if (treeOwnedFocus.current && next !== null) itemRefs.current.get(next)?.focus();
+  }, [focusedId, selectedId, visible]);
+
+  useEffect(() => {
+    if (selectedId !== undefined) setActiveSelectedId(selectedId);
+  }, [selectedId]);
+
   useEffect(() => {
     const validIds = allIds(tree);
-    if (focusedId !== null && validIds.has(focusedId)) return;
-    const next = selectedId !== undefined && validIds.has(selectedId) ? selectedId : tree[0]?.id ?? null;
-    const shouldRestoreFocus = root.current?.contains(document.activeElement) === true;
-    setFocusedId(next);
-    if (shouldRestoreFocus && next !== null) requestAnimationFrame(() => itemRefs.current.get(next)?.focus());
-  }, [focusedId, selectedId, tree]);
+    setActiveSelectedId((current) => current !== null && validIds.has(current)
+      ? current
+      : selectedId !== undefined && validIds.has(selectedId) ? selectedId : null);
+  }, [selectedId, tree]);
 
   useEffect(() => {
     const ancestors = ancestorFolderIds(tree, selectedId);
@@ -189,8 +204,24 @@ export const FileTree = ({
     });
   };
 
+  const select = (node: ExplorerNode): void => {
+    setActiveSelectedId(node.id);
+    onSelect?.(node);
+  };
+
   return (
-    <div ref={root} className="file-tree" role="tree" aria-label="Files">
+    <div
+      ref={root}
+      className="file-tree"
+      role="tree"
+      aria-label="Files"
+      onFocusCapture={() => { treeOwnedFocus.current = true; }}
+      onBlurCapture={() => {
+        queueMicrotask(() => {
+          if (root.current?.contains(document.activeElement) !== true) treeOwnedFocus.current = false;
+        });
+      }}
+    >
       {visible.map(({ node, level, parentId }, index) => {
         const isFolder = node.kind === "folder";
         const isExpanded = isFolder && expanded.has(node.id);
@@ -201,23 +232,30 @@ export const FileTree = ({
                 if (element === null) itemRefs.current.delete(node.id);
                 else itemRefs.current.set(node.id, element);
               }}
-              className={`tree-row touch-target${selectedId === node.id ? " selected" : ""}`}
+              className={`tree-row touch-target${activeSelectedId === node.id ? " selected" : ""}`}
               type="button"
               role="treeitem"
               aria-level={level}
-              aria-selected={selectedId === node.id}
+              aria-selected={activeSelectedId === node.id}
               {...(isFolder ? { "aria-expanded": isExpanded } : {})}
               tabIndex={effectiveFocusedId === node.id ? 0 : -1}
               onFocus={() => setFocusedId(node.id)}
-              onClick={() => onSelect?.(node)}
+              onClick={() => select(node)}
+              onContextMenu={(event) => {
+                if (!isFolder) return;
+                event.preventDefault();
+                setMenuFolderId(node.id);
+              }}
               onKeyDown={(event) => {
-                if (event.key === "ArrowDown") focusAt(Math.min(index + 1, visible.length - 1));
+                if (isFolder && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
+                  setMenuFolderId(node.id);
+                } else if (event.key === "ArrowDown") focusAt(Math.min(index + 1, visible.length - 1));
                 else if (event.key === "ArrowUp") focusAt(Math.max(index - 1, 0));
                 else if (event.key === "Home") focusAt(0);
                 else if (event.key === "End") focusAt(visible.length - 1);
                 else if (event.key === "ArrowRight" && isFolder) {
                   if (!isExpanded) toggle(node.id, true);
-                  else focusAt(index + 1);
+                  else if (visible[index + 1]?.parentId === node.id) focusAt(index + 1);
                 } else if (event.key === "ArrowLeft") {
                   if (isFolder && isExpanded) toggle(node.id, false);
                   else if (parentId !== null) {
@@ -225,7 +263,7 @@ export const FileTree = ({
                     focusAt(parentIndex);
                   }
                 } else if (event.key === "Enter" || event.key === " ") {
-                  onSelect?.(node);
+                  select(node);
                 } else return;
                 event.preventDefault();
               }}
@@ -241,6 +279,9 @@ export const FileTree = ({
                 onMove={onMoveFolder}
                 onArchive={onArchiveFolder}
                 onTrash={onTrashFolder}
+                now={now}
+                menuOpen={menuFolderId === node.id}
+                onMenuOpenChange={(open) => setMenuFolderId(open ? node.id : null)}
               />
             ) : null}
           </div>

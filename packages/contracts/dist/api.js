@@ -74,6 +74,7 @@ export const VaultResponseSchema = z
     .object({
     entries: z.array(SafeVaultIndexEntrySchema).max(100),
     preferences: PreferencesResponseSchema,
+    preferencesChecksum: ChecksumSchema,
     folders: z.array(FolderResponseSchema).max(100),
     treeVersion: TreeVersionSchema,
     cursor: OpaqueIdSchema.nullable(),

@@ -301,7 +301,8 @@ const VaultExplorerRegion = ({
   onRenameFolder,
   onMoveFolder,
   onArchiveFolder,
-  onTrashFolder
+  onTrashFolder,
+  now
 }: {
   readonly hidden: boolean;
   readonly vault: CompleteVault;
@@ -311,6 +312,7 @@ const VaultExplorerRegion = ({
   readonly onMoveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onTrashFolder?: FileTreeProps["onTrashFolder"];
+  readonly now?: (() => Date) | undefined;
 }): React.JSX.Element => {
   const [requestedSearch, setRequestedSearch] = useState<string | undefined>();
   const tree = useMemo(() => buildExplorerTree(vault), [vault]);
@@ -369,6 +371,7 @@ const VaultExplorerRegion = ({
             onMoveFolder={onMoveFolder}
             onArchiveFolder={onArchiveFolder}
             onTrashFolder={onTrashFolder}
+            now={now}
           />
         </section>
         <FavoritesPanel items={favorites} onOpen={(id) => onNavigateNote?.(id)} />
@@ -386,7 +389,8 @@ const ExplorerRegion = ({
   onRenameFolder,
   onMoveFolder,
   onArchiveFolder,
-  onTrashFolder
+  onTrashFolder,
+  now
 }: {
   readonly hidden: boolean;
   readonly vault?: CompleteVault | undefined;
@@ -396,6 +400,7 @@ const ExplorerRegion = ({
   readonly onMoveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onTrashFolder?: FileTreeProps["onTrashFolder"];
+  readonly now?: (() => Date) | undefined;
 }): React.JSX.Element => vault === undefined
   ? <StaticExplorerRegion hidden={hidden} />
   : (
@@ -408,6 +413,7 @@ const ExplorerRegion = ({
       onMoveFolder={onMoveFolder}
       onArchiveFolder={onArchiveFolder}
       onTrashFolder={onTrashFolder}
+      now={now}
     />
   );
 
@@ -629,7 +635,12 @@ export const OwnerShell = ({
     input: DeleteFolderRequest
   ): Promise<void> => {
     if (folder.protected) return;
-    await vaultApi.trashFolder(folder.id, input);
+    try {
+      await vaultApi.trashFolder(folder.id, input);
+    } catch (error) {
+      await refreshVault().catch(() => undefined);
+      throw error;
+    }
     await refreshVault();
   }, [refreshVault, vaultApi]);
 
@@ -841,6 +852,7 @@ export const OwnerShell = ({
           onMoveFolder={(folder) => openFolderOperation("move", folder)}
           onArchiveFolder={archiveFolder === undefined ? undefined : (folder) => void runFolderArchive(folder)}
           onTrashFolder={runFolderTrash}
+          now={now}
         />
         {noteId === undefined ? (
           <>

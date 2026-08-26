@@ -33,7 +33,7 @@ export class SearchClient {
 
   public constructor(private readonly worker: SearchWorkerLike) {
     worker.onmessage = (event) => this.receive(event.data);
-    worker.onerror = () => this.failAll(new Error("Search worker failed."));
+    worker.onerror = () => this.close(new Error("Search worker failed."));
   }
 
   public initialize(records: readonly SearchRecord[]): Promise<void> {
@@ -68,18 +68,25 @@ export class SearchClient {
   }
 
   public terminate(): void {
+    this.close(new Error("Search client is terminated."));
+  }
+
+  private close(error: Error): void {
     if (this.terminated) return;
     this.terminated = true;
-    this.failAll(new Error("Search client is terminated."));
     this.worker.onmessage = null;
     this.worker.onerror = null;
     this.worker.terminate();
+    this.failAll(error);
   }
 
   private receive(value: unknown): void {
     if (!isResponse(value)) {
       const requestId = responseRequestId(value);
-      if (requestId === null) return;
+      if (requestId === null) {
+        this.close(new Error("Search worker returned an invalid response."));
+        return;
+      }
       const pending = this.pending.get(requestId);
       if (pending === undefined) return;
       this.pending.delete(requestId);
@@ -123,13 +130,14 @@ const responseRequestId = (value: unknown): number | null => {
 const isResult = (value: unknown): value is SearchResultItem => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const result = value as Partial<SearchResultItem>;
-  return typeof result.id === "string" && result.id.length > 0 && result.id.length <= 512 &&
+  const keys = Object.keys(result);
+  return keys.length === 7 && keys.every((key) => ["id", "title", "path", "folder", "tags", "favorite", "score"].includes(key)) &&
+    typeof result.id === "string" && result.id.length > 0 && result.id.length <= 512 &&
     typeof result.title === "string" && result.title.length > 0 && result.title.length <= 160 &&
     typeof result.path === "string" && result.path.length > 0 && result.path.length <= 4096 &&
     typeof result.folder === "string" && result.folder.length <= 4096 &&
     Array.isArray(result.tags) && result.tags.length <= 64 && result.tags.every((tag) => typeof tag === "string" && tag.length <= 64) &&
     typeof result.favorite === "boolean" &&
-    typeof result.searchText === "string" && result.searchText.length <= 100_000 &&
     typeof result.score === "number" && Number.isFinite(result.score) && result.score >= 0;
 };
 

@@ -153,6 +153,7 @@ export declare const VaultResponseSchema: z.ZodObject<{
         favorites: z.ZodArray<z.ZodUUID>;
         recent: z.ZodArray<z.ZodUUID>;
     }, z.core.$strict>;
+    preferencesChecksum: z.ZodString;
     folders: z.ZodArray<z.ZodObject<{
         id: z.ZodString;
         name: z.ZodString;

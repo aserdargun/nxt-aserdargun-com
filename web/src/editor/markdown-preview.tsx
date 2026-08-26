@@ -12,6 +12,8 @@ export interface MarkdownPreviewProps {
   readonly resolveAttachment?: ((canonicalReference: string) => string | undefined) | undefined;
   readonly resolveWikiLink?: ((target: string) => WikiTargetResolution) | undefined;
   readonly onWikiNavigate?: ((noteId: string) => void) | undefined;
+  readonly scrollTargetId?: string | null | undefined;
+  readonly onScrollComplete?: ((headingId: string) => void) | undefined;
 }
 
 interface RenderState {
@@ -96,7 +98,9 @@ export const MarkdownPreview = ({
   notePath,
   resolveAttachment,
   resolveWikiLink,
-  onWikiNavigate
+  onWikiNavigate,
+  scrollTargetId,
+  onScrollComplete
 }: MarkdownPreviewProps): React.JSX.Element => {
   const root = useRef<HTMLDivElement>(null);
   const [rendered, setRendered] = useState<RenderState | null>(null);
@@ -123,7 +127,13 @@ export const MarkdownPreview = ({
     if (root.current === null || rendered === null || rendered.source !== source) return;
     root.current.innerHTML = rendered.html;
     transformWikiText(root.current, resolveWikiLink);
-  }, [rendered, resolveWikiLink, source]);
+    if (scrollTargetId === null || scrollTargetId === undefined) return;
+    const heading = [...root.current.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")]
+      .find((candidate) => candidate.id === scrollTargetId);
+    if (heading === undefined) return;
+    if (typeof heading.scrollIntoView === "function") heading.scrollIntoView({ block: "start" });
+    onScrollComplete?.(scrollTargetId);
+  }, [onScrollComplete, rendered, resolveWikiLink, scrollTargetId, source]);
 
   return (
     <div

@@ -181,6 +181,11 @@ function deriveMarkdown(source: string, options: RenderMarkdownOptions = {}) {
   return { processor, outline, hastTree: processor.runSync(markdownTree) };
 }
 
+/** Derives the exact top-level heading identities used by the sanitized renderer. */
+export function deriveMarkdownOutline(source: string): RenderedMarkdown["outline"] {
+  return deriveMarkdown(source).outline;
+}
+
 /** Derives visible text using the same Markdown and HAST pipeline as rendering. */
 export function deriveMarkdownPlainText(source: string): string {
   return textFromHast(deriveMarkdown(source).hastTree);

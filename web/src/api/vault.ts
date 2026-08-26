@@ -3,6 +3,7 @@ import {
   DeleteFolderRequestSchema,
   FolderResponseSchema,
   OpaqueIdSchema,
+  PreferencesSchema,
   PreferencesResponseSchema,
   RescanVaultRequestSchema,
   RescanVaultResponseSchema,
@@ -12,6 +13,7 @@ import {
   VaultResponseSchema,
   type RescanVaultResponse,
   type DeleteFolderRequest,
+  type Preferences,
   type UpdatePreferencesRequest,
   type VaultResponse
 } from "@nxt/contracts";
@@ -23,7 +25,7 @@ export type VaultEntry = VaultResponse["entries"][number];
 
 export interface CompleteVault {
   readonly entries: readonly VaultEntry[];
-  readonly preferences: PreferencesResponse;
+  readonly preferences: Preferences;
   readonly folders: readonly FolderResponse[];
   readonly treeVersion: string;
 }
@@ -108,6 +110,7 @@ export const assembleVaultPages = async (
   const recent: string[] = [];
   const cursors = new Set<string>();
   let preferences: VaultResponse["preferences"] | null = null;
+  let preferencesChecksum: string | null = null;
   let treeVersion: string | null = null;
   let cursor: string | null = null;
 
@@ -116,6 +119,8 @@ export const assembleVaultPages = async (
     if ((page.complete && page.cursor !== null) || (!page.complete && page.cursor === null)) fail();
     if (treeVersion === null) treeVersion = page.treeVersion;
     else if (treeVersion !== page.treeVersion) fail();
+    if (preferencesChecksum === null) preferencesChecksum = page.preferencesChecksum;
+    else if (preferencesChecksum !== page.preferencesChecksum) fail();
     if (preferences === null) preferences = page.preferences;
     else if (!samePreferencesScalar(preferences, page.preferences)) fail();
 
@@ -143,7 +148,7 @@ export const assembleVaultPages = async (
         entries: [...entries.values()],
         folders: [...folders.values()],
         treeVersion,
-        preferences: PreferencesResponseSchema.parse({ ...preferences, favorites, recent })
+        preferences: PreferencesSchema.parse({ ...preferences, favorites, recent })
       };
     }
     const next = page.cursor;

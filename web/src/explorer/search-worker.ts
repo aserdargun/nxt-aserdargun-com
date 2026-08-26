@@ -10,7 +10,13 @@ export interface SearchRecord {
   readonly searchText: string;
 }
 
-export interface SearchResultItem extends SearchRecord {
+export interface SearchResultItem {
+  readonly id: string;
+  readonly title: string;
+  readonly path: string;
+  readonly folder: string;
+  readonly tags: readonly string[];
+  readonly favorite: boolean;
   readonly score: number;
 }
 
@@ -111,6 +117,16 @@ const matchesFilters = (record: SearchRecord, parsed: ParsedQuery): boolean => {
   return parsed.favorite === null || record.favorite === parsed.favorite;
 };
 
+const projectResult = (record: SearchRecord, score: number): SearchResultItem => ({
+  id: record.id,
+  title: record.title,
+  path: record.path,
+  folder: record.folder,
+  tags: record.tags,
+  favorite: record.favorite,
+  score
+});
+
 export const searchIndex = (index: SearchIndex, query: string): SearchResultItem[] => {
   const parsed = parseQuery(query);
   const scored = parsed.text.length === 0
@@ -119,7 +135,7 @@ export const searchIndex = (index: SearchIndex, query: string): SearchResultItem
   return scored
     .flatMap(({ id, score }) => {
       const record = index.records.get(id);
-      return record === undefined || !matchesFilters(record, parsed) ? [] : [{ ...record, score }];
+      return record === undefined || !matchesFilters(record, parsed) ? [] : [projectResult(record, score)];
     })
     .sort((first, second) => second.score - first.score || first.title.localeCompare(second.title, "tr-TR") || first.id.localeCompare(second.id))
     .slice(0, MAX_RESULTS);

@@ -194,6 +194,7 @@ it("defines strict Drive-ID-free private response contracts", () => {
   expect(VaultResponseSchema.parse({
     entries: [safeEntry],
     preferences,
+    preferencesChecksum: "b".repeat(64),
     folders: [folder],
     treeVersion: "a".repeat(64),
     cursor: null,
@@ -201,6 +202,16 @@ it("defines strict Drive-ID-free private response contracts", () => {
   }).folders[0]?.deleteConfirmation).toEqual(confirmation);
   expect(FolderResponseSchema.parse(folder).id).toBe(folder.id);
   expect(PreferencesResponseSchema.parse(preferences)).toEqual(preferences);
+  expect(PreferencesResponseSchema.parse({
+    ...preferences,
+    favorites: Array.from({ length: 100 }, () => safeEntry.id),
+    recent: Array.from({ length: 100 }, () => safeEntry.id)
+  }).favorites).toHaveLength(100);
+  expect(() => PreferencesResponseSchema.parse({
+    ...preferences,
+    favorites: Array.from({ length: 101 }, () => safeEntry.id),
+    recent: []
+  })).toThrow();
   expect(RescanVaultResponseSchema.parse({
     cursor: null,
     processed: 1,
@@ -229,10 +240,11 @@ it("defines strict Drive-ID-free private response contracts", () => {
     path: "Notes/Plan.md",
     checksum: "a".repeat(64)
   }).path).toBe("Notes/Plan.md");
-  expect(() => VaultResponseSchema.parse({ entries: [{ ...safeEntry, driveId: "raw" }], preferences, folders: [], treeVersion: "a".repeat(64), cursor: null, complete: true })).toThrow();
+  expect(() => VaultResponseSchema.parse({ entries: [{ ...safeEntry, driveId: "raw" }], preferences, preferencesChecksum: "b".repeat(64), folders: [], treeVersion: "a".repeat(64), cursor: null, complete: true })).toThrow();
   expect(() => VaultResponseSchema.parse({
     entries: [{ ...safeEntry, attachments: [{ name: "x.png", mimeType: "image/png", size: 1, assetId: "raw-drive-id" }] }],
     preferences,
+    preferencesChecksum: "b".repeat(64),
     folders: [],
     treeVersion: "a".repeat(64),
     cursor: null,

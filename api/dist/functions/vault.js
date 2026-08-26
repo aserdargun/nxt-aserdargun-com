@@ -16,6 +16,8 @@ export const createVaultHandlers = (dependencies = defaultPrivateHandlerDependen
             throw new ApiResponseError("CONFLICT");
         if (page.treeVersion !== null && page.treeVersion !== tree.treeVersion)
             throw new ApiResponseError("CONFLICT");
+        if (page.preferencesChecksum !== null && page.preferencesChecksum !== preferences.checksum)
+            throw new ApiResponseError("CONFLICT");
         const orderedFolders = [...tree.folders].sort((first, second) => {
             const firstPath = first.path.normalize("NFKC").toLocaleLowerCase("en-US");
             const secondPath = second.path.normalize("NFKC").toLocaleLowerCase("en-US");
@@ -85,12 +87,14 @@ export const createVaultHandlers = (dependencies = defaultPrivateHandlerDependen
                 favorites: preferences.value.favorites.slice(page.favoriteOffset, favoriteEnd),
                 recent: preferences.value.recent.slice(page.recentOffset, recentEnd)
             },
+            preferencesChecksum: preferences.checksum,
             folders,
             treeVersion: tree.treeVersion,
             cursor: complete ? null : dependencies.idCodec.encode([
-                "vault2",
+                "vault3",
                 index.value.generation,
                 tree.treeVersion,
+                preferences.checksum,
                 nextEntryOffset,
                 relationOffsets.outbound,
                 relationOffsets.unresolved,
@@ -138,15 +142,17 @@ const parseVaultPage = (request, dependencies) => {
             relationOffsets: emptyRelationOffsets(),
             limit,
             generation: null,
-            treeVersion: null
+            treeVersion: null,
+            preferencesChecksum: null
         };
     const decoded = dependencies.idCodec.decode(cursor);
-    const match = /^vault2:(\d+):([a-f0-9]{64}):(\d+):(\d+):(\d+):(\d+):(\d+):(\d+):(\d+):(\d+)$/u.exec(decoded);
+    const match = /^vault3:(\d+):([a-f0-9]{64}):([a-f0-9]{64}):(\d+):(\d+):(\d+):(\d+):(\d+):(\d+):(\d+):(\d+)$/u.exec(decoded);
     if (match === null)
         throw new ApiResponseError("INVALID_INPUT");
     const generation = Number(match[1]);
     const treeVersion = match[2];
-    const numbers = match.slice(3).map(Number);
+    const preferencesChecksum = match[3];
+    const numbers = match.slice(4).map(Number);
     if (!Number.isSafeInteger(generation) || numbers.some((value) => !Number.isSafeInteger(value) || value < 0))
         throw new ApiResponseError("INVALID_INPUT");
     return {
@@ -162,7 +168,8 @@ const parseVaultPage = (request, dependencies) => {
         recentOffset: numbers[7],
         limit,
         generation,
-        treeVersion
+        treeVersion,
+        preferencesChecksum
     };
 };
 const emptyRelationOffsets = () => ({ outbound: 0, unresolved: 0, attachments: 0, backlinks: 0 });

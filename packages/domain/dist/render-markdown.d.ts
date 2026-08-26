@@ -15,6 +15,8 @@ export interface RenderMarkdownOptions {
 }
 /** Source AST shared by rendering and attachment-reference projection. */
 export declare function parseMarkdownAst(source: string): unknown;
+/** Derives the exact top-level heading identities used by the sanitized renderer. */
+export declare function deriveMarkdownOutline(source: string): RenderedMarkdown["outline"];
 /** Derives visible text using the same Markdown and HAST pipeline as rendering. */
 export declare function deriveMarkdownPlainText(source: string): string;
 /** Renders GFM and strips every raw HTML node before serializing sanitized HTML. */
