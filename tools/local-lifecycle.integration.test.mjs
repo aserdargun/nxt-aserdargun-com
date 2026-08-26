@@ -107,7 +107,8 @@ const createLauncherHarness = async (t) => {
     'try {',
     '  const stack = await startLocalStack({ testHooks: {',
     '    afterLease: async () => { if (mode === "lease") { await writeFile(marker, "leased"); await waitForRelease(); } },',
-    '    afterService: async (name) => { if (mode === "crash" && name === target) { await writeFile(marker, name); await new Promise(() => {}); } }',
+    '    afterService: async (name) => { if (mode === "crash" && name === target) { await writeFile(marker, name); await new Promise(() => {}); } },',
+    '    beforeServiceRelease: async (name, supervisor) => { if (mode === "pre-release" && name === target) { await writeFile(marker, JSON.stringify({ name, pid: supervisor.pid })); await new Promise(() => {}); } }',
     '  } });',
     '  await writeFile(result, JSON.stringify({ ok: true, services: stack.services.map(({ name, pid }) => ({ name, pid })) }));',
     '} catch (error) {',
@@ -309,6 +310,39 @@ test("controlled stop refuses descendant-enumeration errors and retains ownershi
   assert.match(await readFile(controlPath, "utf8"), /fixture/u);
 });
 
+test("concurrent Stops have exactly one exclusive identity-bound owner", async (t) => {
+  const { directory, childScript } = await fixture(t);
+  const controlPath = join(directory, ".nxt-local", "control.json");
+  await mkdir(join(directory, ".nxt-local"), { recursive: true });
+  const port = await reservePort();
+  const child = await startChild(childScript, port, directory);
+  let claimObserved = false;
+  let releaseClaim;
+  const claimBarrier = new Promise((resolvePromise) => { releaseClaim = resolvePromise; });
+  await makeRecord({ checkoutPath: directory, controlPath, child, port });
+  const firstStop = stopControlledStack({
+    checkoutPath: directory,
+    controlPath,
+    afterStopClaim: async () => { claimObserved = true; await claimBarrier; }
+  });
+  t.after(async () => {
+    releaseClaim();
+    await firstStop.catch(() => {});
+    if (child.exitCode === null) child.kill("SIGKILL");
+  });
+
+  await waitFor(() => claimObserved);
+  assert.equal(await pathExists(join(directory, ".nxt-local", "stop.lock")), true);
+  await assert.rejects(
+    stopControlledStack({ checkoutPath: directory, controlPath }),
+    /Stop|stop.*owned|claim/u
+  );
+  assert.equal((await inspectProcess(child.pid))?.listeningPorts.includes(port), true);
+  assert.match(await readFile(controlPath, "utf8"), /fixture/u);
+  releaseClaim();
+  assert.deepEqual(await firstStop, { status: "stopped" });
+});
+
 test("controlled stop repeatedly discovers and terminates a late fork", async (t) => {
   const { directory, childScript } = await fixture(t);
   const controlPath = join(directory, ".nxt-local", "control.json");
@@ -406,6 +440,33 @@ test("simultaneous launchers have exactly one lease owner and the loser cannot e
   await assert.doesNotReject(assertPortsAvailable([4280, 5173, 7071]));
 });
 
+test("launcher SIGKILL before Vite release leaves only a recorded gated supervisor for Stop", { timeout: 120_000 }, async (t) => {
+  const { directory, script } = await createLauncherHarness(t);
+  const runner = spawnLauncher({ script, directory, id: "prerelease", mode: "pre-release", target: "vite" });
+  const markerPath = join(directory, "pre-release-vite-prerelease.marker");
+  const resultPath = join(directory, "result-prerelease.json");
+  t.after(async () => {
+    await terminateRunner(runner);
+    await forceCleanupCheckoutStack();
+  });
+
+  await waitFor(async () => await pathExists(markerPath) || await pathExists(resultPath), 90_000);
+  assert.equal(await pathExists(markerPath), true, await pathExists(resultPath) ? (JSON.parse(await readFile(resultPath, "utf8")).message ?? "service was released before its gate") : "missing pre-release marker");
+  const marker = JSON.parse(await readFile(markerPath, "utf8"));
+  const provisional = JSON.parse(await readFile(join(checkout, ".nxt-local", "control.json"), "utf8"));
+  assert.equal(provisional.state, "starting");
+  assert.equal(provisional.services.length, 1);
+  assert.equal(provisional.services[0].status, "gated");
+  assert.equal(provisional.services[0].launcher.pid, marker.pid);
+  await assert.doesNotReject(assertPortsAvailable([5173]));
+  await terminateRunner(runner);
+
+  assert.deepEqual(await stopControlledStack({ checkoutPath: checkout }), { status: "stopped" });
+  assert.equal(await inspectProcess(marker.pid), null);
+  await assert.doesNotReject(assertPortsAvailable([4280, 5173, 7071]));
+  assert.equal(await pathExists(join(checkout, ".nxt-local")), false);
+});
+
 for (const [serviceName, expectedCount] of [["vite", 1], ["functions", 2]]) {
   test(`Stop recovers a launcher SIGKILL after ${serviceName} is durably recorded`, { timeout: 120_000 }, async (t) => {
     const { directory, script } = await createLauncherHarness(t);
@@ -415,7 +476,14 @@ for (const [serviceName, expectedCount] of [["vite", 1], ["functions", 2]]) {
       await forceCleanupCheckoutStack();
     });
 
-    await waitFor(() => pathExists(join(directory, `crash-${serviceName}-${serviceName}.marker`)), 90_000);
+    const markerPath = join(directory, `crash-${serviceName}-${serviceName}.marker`);
+    const resultPath = join(directory, `result-${serviceName}.json`);
+    await waitFor(async () => await pathExists(markerPath) || await pathExists(resultPath), 90_000);
+    assert.equal(
+      await pathExists(markerPath),
+      true,
+      await pathExists(resultPath) ? (JSON.parse(await readFile(resultPath, "utf8")).message ?? "launcher failed before crash barrier") : "missing crash barrier"
+    );
     const provisional = JSON.parse(await readFile(join(checkout, ".nxt-local", "control.json"), "utf8"));
     assert.equal(provisional.state, "starting");
     assert.equal(provisional.services.length, expectedCount);
@@ -477,6 +545,35 @@ test("caller-exported local auth bypass is removed from Vite and SWA and child-s
       assert.equal(stdout.includes("NXT_LOCAL_AUTH_BYPASS="), false, `${service.name} must not inherit the auth bypass.`);
     }
   }
+  assert.deepEqual(await stopControlledStack({ checkoutPath: checkout }), { status: "stopped" });
+});
+
+test("ready Stop keeps Run excluded until process, control, and log cleanup finishes", { timeout: 180_000 }, async (t) => {
+  const stack = await startLocalStack();
+  let cleanupObserved = false;
+  let releaseCleanup;
+  const cleanupBarrier = new Promise((resolvePromise) => { releaseCleanup = resolvePromise; });
+  const stopping = stopControlledStack({
+    checkoutPath: checkout,
+    beforeStopClaimRelease: async () => { cleanupObserved = true; await cleanupBarrier; }
+  });
+  t.after(async () => {
+    releaseCleanup();
+    await stopping.catch(() => {});
+    await forceCleanupCheckoutStack();
+  });
+
+  await waitFor(() => cleanupObserved, 30_000);
+  assert.equal(await pathExists(join(checkout, ".nxt-local", "stop.lock")), true);
+  assert.equal(await pathExists(join(checkout, ".nxt-local", "control.json")), false);
+  for (const service of stack.services) assert.equal(await pathExists(service.logPath), false);
+  await assert.doesNotReject(assertPortsAvailable([4280, 5173, 7071]));
+  await assert.rejects(startLocalStack(), /Stop|stop.*owned|claim/u);
+  releaseCleanup();
+  assert.deepEqual(await stopping, { status: "stopped" });
+
+  const restarted = await startLocalStack();
+  assert.equal(restarted.services.length, 3);
   assert.deepEqual(await stopControlledStack({ checkoutPath: checkout }), { status: "stopped" });
 });
 

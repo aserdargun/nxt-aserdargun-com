@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, chmod, lstat, mkdir, open, realpath, readdir, rm } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, open, readFile, realpath, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { createRequire } from "node:module";
 import { delimiter, dirname, join, resolve, sep } from "node:path";
@@ -19,6 +19,7 @@ import {
 
 const run = promisify(execFile);
 const checkoutPath = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const supervisorPath = join(checkoutPath, "scripts", "service-supervisor.mjs");
 const ports = [4280, 5173, 7071];
 const driveKeys = [
   "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN", "NXT_VAULT_DRIVE_FOLDER_ID", "NXT_PRIVATE_DRIVE_FOLDER_ID",
@@ -155,15 +156,60 @@ const resolvePackageBin = async (packageName, relativeBin, from) => {
   return join(dirname(packagePath), relativeBin);
 };
 
-const spawnLogged = async ({ name, executable, args, cwd, env, localDirectory }) => {
+const spawnGated = async ({ name, executable, args, cwd, env, localDirectory, gate }) => {
   const logPath = join(localDirectory, `${name}.log`);
   const log = await open(logPath, "a", 0o600);
-  const child = spawn(executable, args, { cwd, env, detached: true, stdio: ["ignore", log.fd, log.fd] });
+  const child = spawn(process.execPath, [supervisorPath], {
+    cwd,
+    env: {
+      ...env,
+      NXT_SERVICE_GATE_NONCE: gate.nonce,
+      NXT_SERVICE_GATE_REGISTRATION: gate.registrationPath,
+      NXT_SERVICE_GATE_RELEASE: gate.releasePath,
+      NXT_SERVICE_GATE_CANCEL: gate.cancelPath,
+      NXT_SERVICE_EXECUTABLE: executable,
+      NXT_SERVICE_ARGS: JSON.stringify(args),
+      NXT_SERVICE_CWD: cwd
+    },
+    detached: true,
+    stdio: ["ignore", log.fd, log.fd]
+  });
   child.unref();
   await log.close();
-  const identity = await inspectProcess(child.pid);
-  if (identity === null) throw new Error(`${name} failed before identity observation.`);
-  return { child, identity, logPath };
+  return { child, logPath };
+};
+
+const writeGate = async (path, nonce) => {
+  const handle = await open(path, "wx", 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify({ version: 1, nonce })}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await chmod(path, 0o600);
+};
+
+const waitForSupervisorRegistration = async (child, gate, timeoutMs = 10_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) throw new Error("Service supervisor exited before registration.");
+    try {
+      const metadata = await lstat(gate.registrationPath);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("Unsafe service supervisor registration.");
+      const registration = JSON.parse(await readFile(gate.registrationPath, "utf8"));
+      if (registration?.version !== 1 || registration?.nonce !== gate.nonce || registration?.identity?.pid !== child.pid) {
+        throw new Error("Invalid service supervisor registration.");
+      }
+      const observed = await inspectProcess(child.pid);
+      if (observed === null || !sameIdentity(registration.identity, observed)) throw new Error("Service supervisor identity changed during registration.");
+      return observed;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  throw new Error("Timed out waiting for service supervisor registration.");
 };
 
 const sameIdentity = (left, right) => left.pid === right.pid && left.pgid === right.pgid && left.startTime === right.startTime &&
@@ -186,6 +232,7 @@ export const startLocalStack = async ({ checkout = checkoutPath, testHooks } = {
     if (typeof process.env[key] === "string" && process.env[key].trim().length > 0) throw new Error(`Refusing live Drive environment key ${key}.`);
   }
   const tools = await preflightTools();
+  await access(supervisorPath, constants.R_OK);
   await ensureLocalDirectory(checkoutRealpath, localDirectory);
   const nonce = randomUUID();
   const lease = await acquireStartupLease({ checkoutPath: checkoutRealpath, controlPath, nonce });
@@ -228,16 +275,32 @@ export const startLocalStack = async ({ checkout = checkoutPath, testHooks } = {
     const swaBin = await resolvePackageBin("@azure/static-web-apps-cli", "dist/cli/bin.js", checkoutRealpath);
 
     const addService = async ({ name, executable, args, cwd, env, port }) => {
-      const { child, identity, logPath } = await spawnLogged({ name, executable, args, cwd, env, localDirectory });
       const index = services.length;
-      let launcherIdentity = identity;
-      services.push({ name, status: "spawned", launcher: identity, port, logPath, nonce });
+      const gateNonce = randomUUID();
+      const gatePrefix = join(localDirectory, `.gate-${name}-${gateNonce}`);
+      const gate = {
+        nonce: gateNonce,
+        registrationPath: `${gatePrefix}.registration.json`,
+        releasePath: `${gatePrefix}.release.json`,
+        cancelPath: `${gatePrefix}.cancel.json`
+      };
+      const logPath = join(localDirectory, `${name}.log`);
+      services.push({ name, status: "planned", gate, port, logPath, nonce });
       await persist();
+      const { child } = await spawnGated({ name, executable, args, cwd, env, localDirectory, gate });
+      services[index] = { name, status: "planned", candidatePid: child.pid, gate, port, logPath, nonce };
+      await persist();
+      let launcherIdentity = await waitForSupervisorRegistration(child, gate);
+      services[index] = { name, status: "gated", launcher: launcherIdentity, gate, port, logPath, nonce };
+      await persist();
+      await testHooks?.beforeServiceRelease?.(name, launcherIdentity);
+      if (interrupted) throw new Error("Local startup was interrupted.");
+      await writeGate(gate.releasePath, gate.nonce);
       const listener = await waitForListener(child, port, async (observed) => {
         if (sameIdentity(launcherIdentity, observed)) return;
         if (!sameProcessInstance(launcherIdentity, observed)) throw new Error(`${name} launcher process instance changed before readiness.`);
         launcherIdentity = observed;
-        services[index] = { name, status: "spawned", launcher: launcherIdentity, port, logPath, nonce };
+        services[index] = { name, status: "gated", launcher: launcherIdentity, gate, port, logPath, nonce };
         await persist();
       });
       const finalLauncher = await inspectProcess(child.pid);
@@ -253,6 +316,7 @@ export const startLocalStack = async ({ checkout = checkoutPath, testHooks } = {
         command: listener.command,
         port,
         logPath,
+        gate,
         nonce,
         ...(listener.pid === child.pid ? {} : { launcher: launcherIdentity })
       };

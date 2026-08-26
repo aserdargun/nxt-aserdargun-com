@@ -9,6 +9,8 @@ const run = promisify(execFile);
 export const CONTROL_VERSION = 2;
 export const STARTUP_LEASE_VERSION = 1;
 export const STARTUP_LEASE_NAME = "startup.lock";
+export const STOP_CLAIM_VERSION = 1;
+export const STOP_CLAIM_NAME = "stop.lock";
 const stoppingLeaseName = "stopping.lock";
 
 const refuse = (reason) => new Error(`Refusing local lifecycle operation: ${reason}.`);
@@ -68,22 +70,50 @@ const validateIdentitySchema = (identity, checkout, label) => {
   if (!isInsideCheckout(resolve(identity.cwd), checkout)) throw refuse(`foreign ${label} cwd`);
 };
 
+const validateProcessIdentityShape = (identity, label) => {
+  if (!isObject(identity) || !positiveInteger(identity.pid) || !positiveInteger(identity.pgid) ||
+    typeof identity.startTime !== "string" || identity.startTime.length === 0 || typeof identity.cwd !== "string" ||
+    identity.cwd.length === 0 || typeof identity.executable !== "string" || identity.executable.length === 0 ||
+    typeof identity.command !== "string" || identity.command.length === 0) throw refuse(`invalid ${label} identity`);
+};
+
 const identityMatches = (expected, observed) => observed !== null && expected.pid === observed.pid && expected.pgid === observed.pgid &&
   expected.startTime === observed.startTime && expected.cwd === observed.cwd && expected.executable === observed.executable &&
   expected.command === observed.command;
 
+const validateGateSchema = (gate, service, localDirectory) => {
+  if (!isObject(gate) || !isNonce(gate.nonce)) throw refuse(`invalid ${service.name} gate`);
+  const prefix = join(localDirectory, `.gate-${service.name}-${gate.nonce}`);
+  const expected = {
+    registrationPath: `${prefix}.registration.json`,
+    releasePath: `${prefix}.release.json`,
+    cancelPath: `${prefix}.cancel.json`
+  };
+  for (const [key, path] of Object.entries(expected)) {
+    if (gate[key] !== path || dirname(resolve(gate[key] ?? "")) !== localDirectory) throw refuse(`foreign ${service.name} gate`);
+  }
+};
+
 const validateServiceSchema = (service, recordNonce, checkout, localDirectory) => {
-  if (!isObject(service) || typeof service.name !== "string" || service.name.length === 0 || !positiveInteger(service.port) ||
+  if (!isObject(service) || typeof service.name !== "string" || !/^[a-z][a-z0-9-]*$/u.test(service.name) || !positiveInteger(service.port) ||
     service.port > 65_535 || typeof service.logPath !== "string" || service.nonce !== recordNonce) {
     throw refuse("invalid service identity");
   }
   if (dirname(resolve(service.logPath)) !== localDirectory) throw refuse("foreign service log");
   const status = service.status ?? "ready";
-  if (status !== "spawned" && status !== "ready") throw refuse("invalid service state");
-  if (status === "spawned") validateIdentitySchema(service.launcher, checkout, `${service.name} launcher`);
+  if (status !== "planned" && status !== "gated" && status !== "spawned" && status !== "ready") throw refuse("invalid service state");
+  if (status === "planned") {
+    validateGateSchema(service.gate, service, localDirectory);
+    if (service.candidatePid !== undefined && !positiveInteger(service.candidatePid)) throw refuse(`invalid ${service.name} supervisor candidate`);
+  }
+  else if (status === "gated") {
+    validateGateSchema(service.gate, service, localDirectory);
+    validateIdentitySchema(service.launcher, checkout, `${service.name} launcher`);
+  } else if (status === "spawned") validateIdentitySchema(service.launcher, checkout, `${service.name} launcher`);
   else {
     validateIdentitySchema(service, checkout, `${service.name} listener`);
     if (service.launcher !== undefined) validateIdentitySchema(service.launcher, checkout, `${service.name} launcher`);
+    if (service.gate !== undefined) validateGateSchema(service.gate, service, localDirectory);
   }
 };
 
@@ -104,7 +134,11 @@ const parseControlRecord = (text, checkout, localDirectory) => {
   if (state === "ready" && record.services.some((service) => (service.status ?? "ready") !== "ready")) {
     throw refuse("incomplete ready control record");
   }
-  const identities = record.services.flatMap((service) => service.status === "spawned" ? [service.launcher] : [service, service.launcher])
+  const identities = record.services.flatMap((service) => {
+    if (service.status === "planned") return [];
+    if (service.status === "spawned" || service.status === "gated") return [service.launcher];
+    return [service, service.launcher];
+  })
     .filter((identity) => identity !== undefined);
   if (new Set(record.services.map(({ name }) => name)).size !== record.services.length ||
     new Set(record.services.map(({ port }) => port)).size !== record.services.length ||
@@ -119,6 +153,16 @@ const parseLeaseRecord = (text, checkout) => {
     typeof lease.createdAt !== "string" || Number.isNaN(Date.parse(lease.createdAt))) throw refuse("invalid or foreign startup lease");
   validateIdentitySchema(lease.owner, checkout, "startup lease owner");
   return lease;
+};
+
+const parseStopClaim = (text, checkout) => {
+  let claim;
+  try { claim = JSON.parse(text); } catch { throw refuse("corrupt Stop claim"); }
+  if (!isObject(claim) || claim.version !== STOP_CLAIM_VERSION || claim.checkoutRealpath !== checkout ||
+    !isNonce(claim.nonce) || !isNonce(claim.controlNonce) || typeof claim.createdAt !== "string" ||
+    Number.isNaN(Date.parse(claim.createdAt))) throw refuse("invalid or foreign Stop claim");
+  validateProcessIdentityShape(claim.owner, "Stop claim owner");
+  return claim;
 };
 
 const assertLocalDirectory = async (checkout, controlPath) => {
@@ -172,7 +216,10 @@ export const acquireStartupLease = async ({ checkoutPath, controlPath, nonce }) 
   await chmod(localDirectory, 0o700);
   const leasePath = join(localDirectory, STARTUP_LEASE_NAME);
   const stoppingPath = join(localDirectory, stoppingLeaseName);
-  if (await exists(controlPath) || await exists(stoppingPath)) throw refuse("existing local control or startup state");
+  const stopClaimPath = join(localDirectory, STOP_CLAIM_NAME);
+  if (await exists(controlPath) || await exists(stoppingPath) || await exists(stopClaimPath)) {
+    throw refuse("existing local control, startup state, or Stop claim");
+  }
   const owner = await inspectProcess(process.pid);
   if (owner === null || !isInsideCheckout(owner.cwd, checkout)) throw refuse("startup owner is outside the checkout");
   const record = { version: STARTUP_LEASE_VERSION, checkoutRealpath: checkout, nonce, createdAt: new Date().toISOString(), owner };
@@ -188,7 +235,7 @@ export const acquireStartupLease = async ({ checkoutPath, controlPath, nonce }) 
   } finally { await handle?.close(); }
   await chmod(leasePath, 0o600);
   try {
-    if (await exists(controlPath)) throw refuse("control state appeared while acquiring startup lease");
+    if (await exists(controlPath) || await exists(stopClaimPath)) throw refuse("control or Stop state appeared while acquiring startup lease");
   } catch (error) {
     if (await readFile(leasePath, "utf8").catch(() => "") === text) await rm(leasePath);
     throw error;
@@ -254,8 +301,12 @@ const defaultEnumerateGroupPids = async (pgid) => {
   });
 };
 
-const serviceIdentities = (service) => (service.status ?? "ready") === "spawned" ? [service.launcher] : [service, service.launcher]
-  .filter((identity) => identity !== undefined);
+const serviceIdentities = (service) => {
+  const status = service.status ?? "ready";
+  if (status === "planned") return [];
+  if (status === "spawned" || status === "gated") return [service.launcher];
+  return [service, service.launcher].filter((identity) => identity !== undefined);
+};
 
 const verifyRecordedServices = async (record, inspect) => {
   for (const service of record.services) {
@@ -377,6 +428,108 @@ const readOptionalFile = async (path) => {
   catch (error) { if (error?.code === "ENOENT") return undefined; throw error; }
 };
 
+const acquireStopClaim = async ({ localDirectory, checkout, controlNonce, inspect }) => {
+  const path = join(localDirectory, STOP_CLAIM_NAME);
+  const owner = await inspect(process.pid);
+  if (owner === null) throw refuse("Stop owner identity could not be observed");
+  validateProcessIdentityShape(owner, "Stop owner");
+  const record = {
+    version: STOP_CLAIM_VERSION,
+    checkoutRealpath: checkout,
+    controlNonce,
+    nonce: randomUUID(),
+    createdAt: new Date().toISOString(),
+    owner
+  };
+  const text = `${JSON.stringify(record, null, 2)}\n`;
+  let handle;
+  try {
+    handle = await open(path, "wx", 0o600);
+    await handle.writeFile(text, "utf8");
+    await handle.sync();
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      const existingText = await readOptionalFile(path);
+      if (existingText !== undefined) parseStopClaim(existingText, checkout);
+      throw refuse("Stop claim is already owned");
+    }
+    throw error;
+  } finally {
+    await handle?.close();
+  }
+  await chmod(path, 0o600);
+  return { path, record, text };
+};
+
+const assertOwnedStopClaim = async (claim, inspect) => {
+  await assertRegularLifecycleFile(claim.path, "Stop claim");
+  if (await readFile(claim.path, "utf8") !== claim.text) throw refuse("Stop claim changed");
+  if (!identityMatches(claim.record.owner, await inspect(process.pid))) throw refuse("Stop claim owner identity changed");
+};
+
+const releaseOwnedStopClaim = async (claim, inspect) => {
+  await assertOwnedStopClaim(claim, inspect);
+  await rm(claim.path);
+};
+
+const writeGateClaim = async (path, nonce) => {
+  const text = `${JSON.stringify({ version: 1, nonce })}\n`;
+  let handle;
+  try {
+    handle = await open(path, "wx", 0o600);
+    await handle.writeFile(text, "utf8");
+    await handle.sync();
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    await assertRegularLifecycleFile(path, "service gate claim");
+    const existing = JSON.parse(await readFile(path, "utf8"));
+    if (existing?.version !== 1 || existing?.nonce !== nonce) throw refuse("service gate claim changed");
+  } finally {
+    await handle?.close();
+  }
+  await chmod(path, 0o600);
+};
+
+const readSupervisorRegistration = async (service, checkout, inspect) => {
+  const text = await readOptionalFile(service.gate.registrationPath);
+  if (text === undefined) return undefined;
+  let registration;
+  try { registration = JSON.parse(text); } catch { throw refuse(`corrupt ${service.name} supervisor registration`); }
+  if (registration?.version !== 1 || registration?.nonce !== service.gate.nonce) throw refuse(`invalid ${service.name} supervisor registration`);
+  validateIdentitySchema(registration.identity, checkout, `${service.name} supervisor`);
+  if (!identityMatches(registration.identity, await inspect(registration.identity.pid))) {
+    if (await inspect(registration.identity.pid) !== null) throw refuse(`${service.name} supervisor identity changed`);
+  }
+  return registration.identity;
+};
+
+const prepareGatedServices = async (record, checkout, inspect, timeoutMs) => {
+  const prepared = [];
+  for (const service of record.services) {
+    if (service.gate === undefined || (service.status !== "planned" && service.status !== "gated")) {
+      prepared.push(service);
+      continue;
+    }
+    await writeGateClaim(service.gate.cancelPath, service.gate.nonce);
+    if (service.status === "gated") {
+      prepared.push(service);
+      continue;
+    }
+    const deadline = Date.now() + timeoutMs;
+    let identity;
+    while (Date.now() < deadline && identity === undefined) {
+      identity = await readSupervisorRegistration(service, checkout, inspect);
+      if (identity !== undefined) break;
+      if (service.candidatePid !== undefined && await inspect(service.candidatePid) === null) break;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+    }
+    if (identity !== undefined) prepared.push({ ...service, status: "gated", launcher: identity });
+    else if (service.candidatePid !== undefined && await inspect(service.candidatePid) === null) prepared.push(service);
+    else throw refuse(`${service.name} supervisor cleanup could not be proven`);
+  }
+  return { ...record, services: prepared };
+};
+
 const claimStartupLease = async (localDirectory, checkout) => {
   const startupPath = join(localDirectory, STARTUP_LEASE_NAME);
   const stoppingPath = join(localDirectory, stoppingLeaseName);
@@ -405,17 +558,41 @@ export const stopControlledStack = async ({
   ownerNonce,
   enumerateChildPids = defaultEnumerateChildPids,
   enumerateGroupPids = defaultEnumerateGroupPids,
-  inspect = inspectProcess
+  inspect = inspectProcess,
+  afterStopClaim,
+  beforeStopClaimRelease
 }) => {
   const checkout = await realpath(resolve(checkoutPath));
   const localDirectory = await assertLocalDirectory(checkout, controlPath);
   const initialControlText = await readOptionalFile(controlPath);
   const initialRecord = initialControlText === undefined ? undefined : parseControlRecord(initialControlText, checkout, localDirectory);
+  const initialStartupText = await readOptionalFile(join(localDirectory, STARTUP_LEASE_NAME));
+  const initialStoppingText = await readOptionalFile(join(localDirectory, stoppingLeaseName));
+  if (initialStartupText !== undefined && initialStoppingText !== undefined) throw refuse("multiple startup lease states");
+  const initialLeaseText = initialStartupText ?? initialStoppingText;
+  const initialLease = initialLeaseText === undefined ? undefined : parseLeaseRecord(initialLeaseText, checkout);
+  if (initialRecord === undefined && initialLease === undefined) {
+    const existingStop = await readOptionalFile(join(localDirectory, STOP_CLAIM_NAME));
+    if (existingStop !== undefined) {
+      parseStopClaim(existingStop, checkout);
+      throw refuse("Stop claim is already owned");
+    }
+    return { status: "idle" };
+  }
+  const controlNonce = initialRecord?.nonce ?? initialLease.nonce;
+  if (initialRecord !== undefined && initialLease !== undefined && initialRecord.nonce !== initialLease.nonce) {
+    throw refuse("startup lease and control record ownership differ");
+  }
+  const stopClaim = await acquireStopClaim({ localDirectory, checkout, controlNonce, inspect });
+  let claimReleased = false;
+  try {
+    await afterStopClaim?.(stopClaim.record);
+    await assertOwnedStopClaim(stopClaim, inspect);
   const needsLease = initialRecord === undefined || initialRecord.state === "starting" ||
     await readOptionalFile(join(localDirectory, STARTUP_LEASE_NAME)) !== undefined ||
     await readOptionalFile(join(localDirectory, stoppingLeaseName)) !== undefined;
   const claimedLease = needsLease ? await claimStartupLease(localDirectory, checkout) : undefined;
-  if (initialRecord === undefined && claimedLease === undefined) return { status: "idle" };
+  if (initialRecord === undefined && claimedLease === undefined) throw refuse("startup state changed while Stop acquired ownership");
   if (initialRecord?.state === "starting" && claimedLease === undefined) throw refuse("starting control record has no startup lease");
   if (ownerNonce !== undefined) {
     if (claimedLease === undefined || claimedLease.record.nonce !== ownerNonce || claimedLease.record.owner.pid !== process.pid) {
@@ -424,7 +601,7 @@ export const stopControlledStack = async ({
     if (!identityMatches(claimedLease.record.owner, await inspect(process.pid))) throw refuse("startup cleanup owner identity changed");
   }
   const frozenControlText = await readOptionalFile(controlPath);
-  const record = frozenControlText === undefined ? {
+  let record = frozenControlText === undefined ? {
     version: CONTROL_VERSION,
     state: "starting",
     checkoutRealpath: checkout,
@@ -440,6 +617,7 @@ export const stopControlledStack = async ({
   if (claimedLease !== undefined && ownerNonce === undefined) {
     await stopCoordinator(claimedLease.record.owner, { termTimeoutMs, killTimeoutMs, inspect });
   }
+  record = await prepareGatedServices(record, checkout, inspect, termTimeoutMs);
   await verifyRecordedServices(record, inspect);
   await stopServiceProcesses({ record, checkout, termTimeoutMs, killTimeoutMs, enumerateChildPids, enumerateGroupPids, inspect });
   for (const service of record.services) if (!await listenerIsClosed(service.port)) throw refuse(`${service.name} listener is still open`);
@@ -447,7 +625,26 @@ export const stopControlledStack = async ({
   if (claimedLease !== undefined && await readFile(claimedLease.path, "utf8") !== claimedLease.text) throw refuse("claimed startup lease changed during stop");
   if (frozenControlText !== undefined) await rm(controlPath);
   if (claimedLease !== undefined) await rm(claimedLease.path);
-  for (const service of record.services) await rm(service.logPath, { force: true });
+  for (const service of record.services) {
+    if (service.gate !== undefined) {
+      await rm(service.gate.registrationPath, { force: true });
+      await rm(service.gate.releasePath, { force: true });
+      await rm(service.gate.cancelPath, { force: true });
+    }
+    await rm(service.logPath, { force: true });
+  }
+  await beforeStopClaimRelease?.(stopClaim.record);
+  await releaseOwnedStopClaim(stopClaim, inspect);
+  claimReleased = true;
   await rmdir(localDirectory).catch((error) => { if (error?.code !== "ENOTEMPTY" && error?.code !== "ENOENT") throw error; });
   return { status: "stopped" };
+  } catch (error) {
+    if (!claimReleased) {
+      try { await releaseOwnedStopClaim(stopClaim, inspect); }
+      catch (claimError) {
+        throw new AggregateError([error, claimError], "Stop failed and its ownership claim could not be released.", { cause: claimError });
+      }
+    }
+    throw error;
+  }
 };
