@@ -1,4 +1,4 @@
-import { type PublicationManifest, type PublicNoteResponse, type VaultIndex } from "@nxt/contracts";
+import { type PublicationManifest, type PublicNoteResponse, type PublicationStatus, type VaultIndex } from "@nxt/contracts";
 import { type StoragePort } from "../storage/storage-port.js";
 import type { AttachmentDelivery, AttachmentService } from "./attachment-service.js";
 import { type SystemFileStore } from "./system-file-store.js";
@@ -29,6 +29,7 @@ export declare class PublicationService {
         noteId: string;
         expectedVersion: string;
     }): Promise<PublicationResult>;
+    getStatus(noteId: string): Promise<PublicationStatus | null>;
     revoke(input: {
         publicId: string;
     }): Promise<{

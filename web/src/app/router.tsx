@@ -1,13 +1,20 @@
 import { useQuery } from "@tanstack/react-query";
 import { NoteIdSchema } from "@nxt/contracts";
+import { lazy, Suspense } from "react";
 import { Navigate, useNavigate, useParams, type RouteObject } from "react-router-dom";
 import { ApiClientError } from "../api/client";
 import { getSession } from "../api/session";
 import { vaultClient } from "../api/vault";
+import { useNoIndex } from "../publication/noindex";
 import { LoginPage } from "./login-page";
 import { NotFoundPage } from "./not-found-page";
 import { OwnerShell } from "./owner-shell";
 import { useTheme } from "./providers";
+
+const PublicNotePage = lazy(async () => {
+  const module = await import("../publication/public-note-page");
+  return { default: module.PublicNotePage };
+});
 
 const LOGOUT_PATH = "/.auth/logout?post_logout_redirect_uri=/login";
 
@@ -121,9 +128,20 @@ const OwnerNoteGate = (): React.JSX.Element => {
   return parsed.success ? <OwnerGate noteId={parsed.data} /> : <NotFoundPage />;
 };
 
+const PublicNoteRoute = (): React.JSX.Element => {
+  useNoIndex();
+  const { publicId = "" } = useParams<{ publicId: string }>();
+  return (
+    <Suspense fallback={<main className="public-note-page"><div role="status" aria-label="Loading published note" /></main>}>
+      <PublicNotePage publicId={publicId} />
+    </Suspense>
+  );
+};
+
 export const appRoutes: RouteObject[] = [
   { path: "/", element: <Navigate to="/login" replace /> },
   { path: "/login", element: <LoginPage /> },
+  { path: "/p/:publicId", element: <PublicNoteRoute /> },
   { path: "/app/notes/:noteId", element: <OwnerNoteGate /> },
   { path: "/app/*", element: <OwnerGate /> },
   { path: "*", element: <NotFoundPage /> }

@@ -449,6 +449,16 @@ textarea:focus-visible,
   display: none;
 }
 
+@media (min-width: 768px) {
+  .owner-shell[data-mobile-destination="info"] .preview-region {
+    display: none;
+  }
+
+  .owner-shell[data-mobile-destination="info"] .info-region {
+    display: flex;
+  }
+}
+
 .context-tabs {
   display: flex;
   align-items: stretch;
@@ -963,6 +973,228 @@ textarea:focus-visible,
 .danger-action {
   border-color: var(--red);
   color: var(--accent-red);
+}
+
+.attachment-picker {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+.attachment-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.attachment-message {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 12;
+  width: min(310px, calc(100vw - 24px));
+  padding: 8px 10px;
+  border: 1px solid var(--red);
+  border-radius: 5px;
+  color: var(--text);
+  background: var(--panel);
+  font-size: 12px;
+}
+
+.attachment-list {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.attachment-card {
+  position: relative;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+}
+
+.attachment-card img,
+.attachment-card object {
+  display: block;
+  width: 100%;
+  max-height: 220px;
+  border: 0;
+  object-fit: contain;
+}
+
+.attachment-download,
+.publication-link,
+.publication-status button,
+.attachment-trash {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.attachment-download,
+.publication-link {
+  min-width: 0;
+  color: var(--blue);
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+
+.attachment-trash {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  color: var(--accent-red);
+  background: var(--surface);
+}
+
+.publication-status {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.publication-status .secondary-action,
+.publication-status .danger-action,
+.publication-status .publication-link {
+  min-width: 0;
+  padding: 0 7px;
+  font-size: 12px;
+}
+
+.command-dialog > [id$="-description"],
+.publish-dialog > [id$="-description"],
+.revoke-dialog > [id$="-description"],
+.command-dialog > [role="alert"] {
+  margin: 16px 18px 0;
+}
+
+.publication-facts {
+  display: grid;
+  gap: 8px;
+  margin: 16px 18px 0;
+}
+
+.publication-facts div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.publication-facts dt {
+  color: var(--muted);
+}
+
+.publication-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 18px;
+}
+
+.empty-info {
+  color: var(--muted) !important;
+}
+
+.public-note-page {
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 28px clamp(18px, 5vw, 72px) 72px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.public-note-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: min(760px, 100%);
+  margin: 0 auto 52px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.public-note-brand {
+  color: var(--yellow);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.public-note-document,
+.public-note-not-found {
+  width: min(760px, 100%);
+  margin: 0 auto;
+}
+
+.public-note-document > h1,
+.public-note-not-found h1 {
+  margin: 0 0 28px;
+  color: var(--text);
+  font-size: clamp(30px, 5vw, 48px);
+  line-height: 1.12;
+}
+
+.rendered-markdown {
+  font-size: 17px;
+  line-height: 1.72;
+}
+
+.rendered-markdown img,
+.rendered-markdown object,
+.public-asset-image,
+.public-asset-pdf {
+  display: block;
+  max-width: 100%;
+}
+
+.rendered-markdown pre,
+.rendered-markdown table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.public-assets {
+  display: grid;
+  gap: 18px;
+  margin-top: 40px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.public-asset-image,
+.public-asset-pdf {
+  width: 100%;
+  max-height: 620px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  object-fit: contain;
+}
+
+.public-asset-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+
+.public-note-not-found {
+  padding-top: 18vh;
 }
 
 .conflict-overlay {

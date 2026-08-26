@@ -1,5 +1,5 @@
 import type { WikiTargetResolution } from "@nxt/domain";
-import { lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { notesClient, type NotesClient } from "../api/notes";
 import { BacklinksPanel, type KnowledgeLink } from "../explorer/backlinks-panel";
 import { OutlinePanel, type OutlineHeading } from "../explorer/outline-panel";
@@ -21,6 +21,14 @@ export interface EditorWorkspaceState {
   readonly title: string;
   readonly path: string;
   readonly status: SaveStatus;
+  readonly version: string | null;
+  readonly source: string | null;
+}
+
+export interface AttachmentInsertion {
+  readonly token: number;
+  readonly noteId: string;
+  readonly markdown: string;
 }
 
 export interface EditorWorkspaceProps {
@@ -39,6 +47,7 @@ export interface EditorWorkspaceProps {
   readonly showStatus?: boolean | undefined;
   readonly onStateChange?: ((state: EditorWorkspaceState) => void) | undefined;
   readonly infoRegion?: ReactNode | undefined;
+  readonly attachmentInsertion?: AttachmentInsertion | null | undefined;
 }
 
 const systemNow = (): Date => new Date();
@@ -68,7 +77,8 @@ export const EditorWorkspace = ({
   now = systemNow,
   showStatus = true,
   onStateChange,
-  infoRegion
+  infoRegion,
+  attachmentInsertion
 }: EditorWorkspaceProps): React.JSX.Element => {
   const [contextTab, setContextTab] = useState<"preview" | "outline" | "backlinks">("preview");
   const [pendingOutlineId, setPendingOutlineId] = useState<string | null>(null);
@@ -86,14 +96,33 @@ export const EditorWorkspace = ({
     currentFolderId,
     now
   });
+  const handledInsertionRef = useRef<number | null>(null);
 
   useEffect(() => {
-    onStateChange?.({ title: state.title, path: state.path, status: state.status });
-  }, [onStateChange, state.path, state.status, state.title]);
+    onStateChange?.({
+      title: state.title,
+      path: state.path,
+      status: state.status,
+      version: state.version,
+      source: state.source
+    });
+  }, [onStateChange, state.path, state.source, state.status, state.title, state.version]);
+
+  useEffect(() => {
+    if (
+      attachmentInsertion === null || attachmentInsertion === undefined ||
+      attachmentInsertion.noteId !== noteId || state.source === null ||
+      handledInsertionRef.current === attachmentInsertion.token
+    ) return;
+    handledInsertionRef.current = attachmentInsertion.token;
+    const separator = state.source.endsWith("\n") ? "\n" : "\n\n";
+    onSourceChange(`${state.source}${separator}${attachmentInsertion.markdown}\n`);
+  }, [attachmentInsertion, noteId, onSourceChange, state.source]);
 
   useEffect(() => {
     setContextTab("preview");
     setPendingOutlineId(null);
+    handledInsertionRef.current = null;
   }, [noteId]);
 
   useEffect(() => setPendingOutlineId(null), [state.source]);

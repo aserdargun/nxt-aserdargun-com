@@ -1,5 +1,7 @@
 import { z } from "zod";
 export declare const MAX_NOTE_SOURCE_BYTES = 100000;
+export declare const MAX_ATTACHMENT_UPLOAD_BYTES: number;
+export declare const MAX_ATTACHMENT_BASE64_LENGTH: number;
 export declare const OpaqueIdSchema: z.ZodString;
 export declare const isOpaqueId: (value: unknown) => value is string;
 export declare const ConfirmationTokenSchema: z.ZodString;
@@ -258,6 +260,26 @@ export declare const PublishNoteRequestSchema: z.ZodObject<{
     expectedVersion: z.ZodString;
 }, z.core.$strict>;
 export type PublishNoteRequest = z.infer<typeof PublishNoteRequestSchema>;
+export declare const UploadAttachmentRequestSchema: z.ZodObject<{
+    noteId: z.ZodUUID;
+    name: z.ZodString;
+    declaredMime: z.ZodString;
+    bytesBase64: z.ZodString;
+}, z.core.$strict>;
+export type UploadAttachmentRequest = z.infer<typeof UploadAttachmentRequestSchema>;
+export declare const UploadAttachmentResponseSchema: z.ZodObject<{
+    asset: z.ZodObject<{
+        assetId: z.ZodString;
+        name: z.ZodString;
+        mimeType: z.ZodString;
+        size: z.ZodNumber;
+        disposition: z.ZodEnum<{
+            inline: "inline";
+            download: "download";
+        }>;
+    }, z.core.$strict>;
+}, z.core.$strict>;
+export type UploadAttachmentResponse = z.infer<typeof UploadAttachmentResponseSchema>;
 export declare const RevokePublicationRequestSchema: z.ZodObject<{
     publicId: z.ZodString;
 }, z.core.$strict>;
@@ -285,10 +307,28 @@ export declare const PublicationResponseSchema: z.ZodObject<{
     publishedAt: z.ZodISODateTime;
 }, z.core.$strict>;
 export type PublicationResponse = z.infer<typeof PublicationResponseSchema>;
+export declare const PublicationStatusSchema: z.ZodObject<{
+    publicId: z.ZodString;
+    publishedAt: z.ZodISODateTime;
+    sourceVersion: z.ZodString;
+    attachmentCount: z.ZodNumber;
+}, z.core.$strict>;
+export declare const PublicationStatusResponseSchema: z.ZodNullable<z.ZodObject<{
+    publicId: z.ZodString;
+    publishedAt: z.ZodISODateTime;
+    sourceVersion: z.ZodString;
+    attachmentCount: z.ZodNumber;
+}, z.core.$strict>>;
+export type PublicationStatus = z.infer<typeof PublicationStatusSchema>;
+export type PublicationStatusResponse = z.infer<typeof PublicationStatusResponseSchema>;
+export declare const RevokePublicationResponseSchema: z.ZodObject<{
+    revoked: z.ZodLiteral<true>;
+}, z.core.$strict>;
 export declare const PublicNoteResponseSchema: z.ZodObject<{
     title: z.ZodString;
     html: z.ZodString;
     publishedAt: z.ZodISODateTime;
+    sourceVersion: z.ZodString;
     assets: z.ZodArray<z.ZodObject<{
         assetId: z.ZodString;
         url: z.ZodString;

@@ -5,6 +5,8 @@ import { MAX_PUBLICATION_ASSETS, PublicIdSchema, PublishedAssetNameSchema } from
 import { PreferencesPanelStateSchema, PreferencesSchema, RescanRecoveryErrorSchema, VaultIndexEntrySchema } from "./vault.js";
 
 export const MAX_NOTE_SOURCE_BYTES = 100_000;
+export const MAX_ATTACHMENT_UPLOAD_BYTES = 20 * 1024 * 1024;
+export const MAX_ATTACHMENT_BASE64_LENGTH = Math.ceil(MAX_ATTACHMENT_UPLOAD_BYTES / 3) * 4;
 const utf8Bytes = (value: string): number => new TextEncoder().encode(value).byteLength;
 const PathSchema = z.string().trim().min(1).max(4096);
 const VersionSchema = z.string().min(1).max(512);
@@ -218,6 +220,27 @@ export const PublishNoteRequestSchema = z
 
 export type PublishNoteRequest = z.infer<typeof PublishNoteRequestSchema>;
 
+export const UploadAttachmentRequestSchema = z.object({
+  noteId: NoteIdSchema,
+  name: PublishedAssetNameSchema,
+  declaredMime: z.string().trim().max(256),
+  bytesBase64: z.string().min(4).max(MAX_ATTACHMENT_BASE64_LENGTH)
+}).strict();
+
+export type UploadAttachmentRequest = z.infer<typeof UploadAttachmentRequestSchema>;
+
+export const UploadAttachmentResponseSchema = z.object({
+  asset: z.object({
+    assetId: OpaqueIdSchema,
+    name: PublishedAssetNameSchema,
+    mimeType: z.string().trim().min(1).max(256),
+    size: z.number().int().nonnegative().max(MAX_ATTACHMENT_UPLOAD_BYTES),
+    disposition: z.enum(["inline", "download"])
+  }).strict()
+}).strict();
+
+export type UploadAttachmentResponse = z.infer<typeof UploadAttachmentResponseSchema>;
+
 export const RevokePublicationRequestSchema = z
   .object({
     publicId: PublicIdSchema
@@ -247,11 +270,26 @@ export const PublicationResponseSchema = z
 
 export type PublicationResponse = z.infer<typeof PublicationResponseSchema>;
 
+export const PublicationStatusSchema = z.object({
+  publicId: PublicIdSchema,
+  publishedAt: TimestampSchema,
+  sourceVersion: VersionSchema,
+  attachmentCount: z.number().int().nonnegative().max(MAX_PUBLICATION_ASSETS)
+}).strict();
+
+export const PublicationStatusResponseSchema = PublicationStatusSchema.nullable();
+
+export type PublicationStatus = z.infer<typeof PublicationStatusSchema>;
+export type PublicationStatusResponse = z.infer<typeof PublicationStatusResponseSchema>;
+
+export const RevokePublicationResponseSchema = z.object({ revoked: z.literal(true) }).strict();
+
 export const PublicNoteResponseSchema = z
   .object({
     title: NoteTitleSchema,
     html: z.string().refine((value) => utf8Bytes(value) <= 2 * 1024 * 1024),
     publishedAt: TimestampSchema,
+    sourceVersion: VersionSchema,
     assets: z.array(z.object({
       assetId: PublicIdSchema,
       url: z.string().regex(/^\/api\/public\/assets\/[A-Za-z0-9_-]{22}\/[A-Za-z0-9_-]{22}$/u),

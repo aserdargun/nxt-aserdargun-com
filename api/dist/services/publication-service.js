@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { NoteIdSchema, MAX_PUBLICATION_ASSETS, MAX_PUBLICATION_TOTAL_ASSET_BYTES, PublicIdSchema, PublicNoteResponseSchema } from "@nxt/contracts";
+import { NoteIdSchema, MAX_PUBLICATION_ASSETS, MAX_PUBLICATION_TOTAL_ASSET_BYTES, PublicIdSchema, PublicNoteResponseSchema, PublicationStatusSchema } from "@nxt/contracts";
 import { attachmentReferenceProjection, canonicalAttachmentReference, projectionReferencesAttachment, renderMarkdown } from "@nxt/domain";
 import { ApiResponseError } from "../http/api-response.js";
 import { StorageMutationNotAppliedError, StorageMutationOutcomeUnknownError, StorageOperationBudget, StorageOperationBudgetExceededError, StorageVersionConflictError } from "../storage/storage-port.js";
@@ -105,6 +105,25 @@ export class PublicationService {
         catch (error) {
             await this.abandonOperation(operation.operationId, operation.publicId, orphans).catch(() => undefined);
             throw toPrivateApiError(error);
+        }
+    }
+    async getStatus(noteId) {
+        this.assertNoteId(noteId);
+        try {
+            const snapshot = await this.options.manifestStore.read(this.context());
+            const entry = snapshot.value.entries.find((candidate) => candidate.sourceNoteId === noteId);
+            if (entry === undefined)
+                return null;
+            const revision = activeRevision(entry);
+            return PublicationStatusSchema.parse({
+                publicId: entry.publicId,
+                publishedAt: revision.publishedAt,
+                sourceVersion: revision.sourceVersion,
+                attachmentCount: revision.assets.length
+            });
+        }
+        catch (error) {
+            throw preserveApiError(error, "DRIVE_UNAVAILABLE");
         }
     }
     async revoke(input) {
@@ -541,6 +560,7 @@ export class PublicationService {
             title: input.source.note.frontmatter.title,
             html: input.renderedHtml,
             publishedAt,
+            sourceVersion: input.source.version,
             assets: copiedAssets.map((asset) => ({
                 assetId: asset.assetId,
                 url: `/api/public/assets/${input.operation.publicId}/${asset.assetId}`,
@@ -1140,7 +1160,8 @@ export class PublicPublicationReader {
                 mimeType: asset.mimeType,
                 disposition: asset.disposition
             }));
-            if (parsed.publishedAt !== revision.publishedAt || JSON.stringify(parsed.assets) !== JSON.stringify(expectedAssets))
+            if (parsed.publishedAt !== revision.publishedAt || parsed.sourceVersion !== revision.sourceVersion ||
+                JSON.stringify(parsed.assets) !== JSON.stringify(expectedAssets))
                 throw new Error("public note projection mismatch");
             if (revision.assets.reduce((total, asset) => total + asset.size, 0) > MAX_PUBLICATION_TOTAL_ASSET_BYTES)
                 throw new Error("public asset snapshot is too large");

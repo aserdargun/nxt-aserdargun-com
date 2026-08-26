@@ -6,7 +6,7 @@ interface JsonSchema<T> {
     | { readonly success: false };
 }
 
-type ApplicationApiPath = `/api/${string}`;
+export type ApplicationApiPath = `/api/${string}`;
 
 export class ApiContractError extends Error {
   public constructor() {
@@ -37,20 +37,19 @@ const readJson = async (response: Response): Promise<unknown> => {
   }
 };
 
+const fetchApplication = (path: ApplicationApiPath, init: RequestInit): Promise<Response> => {
+  const headers = new Headers(init.headers);
+  if (!headers.has("accept")) headers.set("accept", "application/json");
+  return fetch(path, { ...init, credentials: "same-origin", headers });
+};
+
 export const requestJson = async <T>(
   path: ApplicationApiPath,
   responseSchema: JsonSchema<T>,
   errorSchema: JsonSchema<ApiError> = ApiErrorSchema,
   init: RequestInit = {}
 ): Promise<T> => {
-  const response = await fetch(path, {
-    ...init,
-    credentials: "same-origin",
-    headers: {
-      accept: "application/json",
-      ...(init.headers as Record<string, string> | undefined)
-    }
-  });
+  const response = await fetchApplication(path, init);
   const body = await readJson(response);
 
   if (response.ok) {
@@ -65,5 +64,24 @@ export const requestJson = async <T>(
   if (!parsedError.success) {
     throw new ApiContractError();
   }
+  throw new ApiClientError(response.status, parsedError.data);
+};
+
+export const requestOptionalJson = async <T>(
+  path: ApplicationApiPath,
+  responseSchema: JsonSchema<T>,
+  errorSchema: JsonSchema<ApiError> = ApiErrorSchema,
+  init: RequestInit = {}
+): Promise<T | null> => {
+  const response = await fetchApplication(path, init);
+  const body = await readJson(response);
+  if (response.ok) {
+    const parsed = responseSchema.safeParse(body);
+    if (!parsed.success) throw new ApiContractError();
+    return parsed.data;
+  }
+  const parsedError = errorSchema.safeParse(body);
+  if (!parsedError.success) throw new ApiContractError();
+  if (response.status === 404 && parsedError.data.error.code === "NOT_FOUND") return null;
   throw new ApiClientError(response.status, parsedError.data);
 };

@@ -17,15 +17,53 @@ const request = (method: string, url: string, params: Record<string, string> = {
 });
 
 describe("Task 9 functions", () => {
-  it("registers exactly four Task 9 routes while preserving Task 7 and Task 8", () => {
+  it("registers the Task 13 owner status route while preserving Task 7 and Task 8", () => {
     expect(task7Routes).toHaveLength(12);
     expect(task8Routes).toHaveLength(3);
     expect(task9Routes.map(({ method, route }) => `${method} ${route}`)).toEqual([
       "POST private/notes/{noteId}/publish",
+      "GET private/notes/{noteId}/publication",
       "DELETE private/publications/{publicId}",
       "GET public/notes/{publicId}",
       "GET public/assets/{publicId}/{assetId}"
     ]);
+  });
+
+  it("authorizes publication status first and returns only the active revision projection", async () => {
+    const getStatus = vi.fn(async () => ({
+      publicId,
+      publishedAt: "2026-08-26T12:00:00.000Z",
+      sourceVersion: "7",
+      attachmentCount: 2,
+      activeRevisionId: "private-revision",
+      snapshotFolderId: "private-folder"
+    }));
+    const handlers = createPublicationHandlers({
+      authorize: () => ({ provider: "github", userId: "1", userDetails: "owner" }),
+      resolveServices: () => ({
+        publications: {
+          publish: vi.fn(),
+          revoke: vi.fn(),
+          getStatus
+        }
+      })
+    });
+    const noteId = "018f47d2-6a34-7b2a-9f21-8a7034963aef";
+    const response = await handlers.status(request(
+      "GET",
+      `https://nxt.example/api/private/notes/${noteId}/publication`,
+      { noteId }
+    ));
+
+    expect(response.status).toBe(200);
+    expect(response.jsonBody).toEqual({
+      publicId,
+      publishedAt: "2026-08-26T12:00:00.000Z",
+      sourceVersion: "7",
+      attachmentCount: 2
+    });
+    expect(JSON.stringify(response.jsonBody)).not.toMatch(/revision|folder|drive/iu);
+    expect(getStatus).toHaveBeenCalledWith(noteId);
   });
 
   it("authorizes private publication before resolving services", async () => {
@@ -44,7 +82,7 @@ describe("Task 9 functions", () => {
     const revoke = vi.fn(async () => ({ revoked: true as const }));
     const handlers = createPublicationHandlers({
       authorize: () => ({ provider: "github", userId: "1", userDetails: "owner" }),
-      resolveServices: () => ({ publications: { publish, revoke } })
+      resolveServices: () => ({ publications: { publish, revoke, getStatus: vi.fn(async () => null) } })
     });
     const response = await handlers.publish(request("POST", `https://nxt.example/api/private/notes/018f47d2-6a34-7b2a-9f21-8a7034963aef/publish`, { noteId: "018f47d2-6a34-7b2a-9f21-8a7034963aef" }, { expectedVersion: "7" }));
     expect(response.status).toBe(200);
@@ -63,6 +101,7 @@ describe("Task 9 functions", () => {
           title: "Public",
           html: "<p>safe</p>",
           publishedAt: "2026-08-24T12:00:00.000Z",
+          sourceVersion: "7",
           assets: [{ assetId, url: `/api/public/assets/${publicId}/${assetId}`, name: "safe.png", mimeType: "image/png", disposition: "inline" as const }]
         })
       })

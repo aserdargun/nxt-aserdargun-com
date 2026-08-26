@@ -1,4 +1,4 @@
-import { NoteIdSchema, PublicationResponseSchema, PublicIdSchema, PublishNoteRequestSchema } from "@nxt/contracts";
+import { NoteIdSchema, PublicationResponseSchema, PublicationStatusResponseSchema, PublicIdSchema, PublishNoteRequestSchema, RevokePublicationResponseSchema } from "@nxt/contracts";
 import { errorResponse, typedJson } from "../http/api-response.js";
 import { resolveTask9Services } from "../services/runtime-services.js";
 import { ownerFromRequest } from "./session.js";
@@ -7,13 +7,6 @@ const defaults = () => ({
     authorize: ownerFromRequest,
     resolveServices: () => ({ publications: resolveTask9Services().publications })
 });
-const revokeResponseSchema = {
-    parse(value) {
-        if (typeof value !== "object" || value === null || Array.isArray(value) || Object.keys(value).length !== 1 || value.revoked !== true)
-            throw new Error("invalid revoke response");
-        return { revoked: true };
-    }
-};
 export const createPublicationHandlers = (dependencies = defaults()) => ({
     publish: async (request) => {
         try {
@@ -28,12 +21,29 @@ export const createPublicationHandlers = (dependencies = defaults()) => ({
             return errorResponse(error);
         }
     },
+    status: async (request) => {
+        try {
+            dependencies.authorize(request);
+            assertNoQuery(request);
+            const noteId = pathValue(request, "noteId", NoteIdSchema);
+            const status = await dependencies.resolveServices().publications.getStatus(noteId);
+            return typedJson(status === null ? null : {
+                publicId: status.publicId,
+                publishedAt: status.publishedAt,
+                sourceVersion: status.sourceVersion,
+                attachmentCount: status.attachmentCount
+            }, PublicationStatusResponseSchema);
+        }
+        catch (error) {
+            return errorResponse(error);
+        }
+    },
     revoke: async (request) => {
         try {
             dependencies.authorize(request);
             assertNoQuery(request);
             const publicId = pathValue(request, "publicId", PublicIdSchema);
-            return typedJson(await dependencies.resolveServices().publications.revoke({ publicId }), revokeResponseSchema);
+            return typedJson(await dependencies.resolveServices().publications.revoke({ publicId }), RevokePublicationResponseSchema);
         }
         catch (error) {
             return errorResponse(error);
@@ -42,5 +52,6 @@ export const createPublicationHandlers = (dependencies = defaults()) => ({
 });
 const runtime = createPublicationHandlers();
 export const publishNoteHandler = runtime.publish;
+export const getPublicationStatusHandler = runtime.status;
 export const revokePublicationHandler = runtime.revoke;
 //# sourceMappingURL=publications.js.map

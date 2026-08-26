@@ -181,6 +181,30 @@ const rewriteCleanup = async (
 };
 
 describe("immutable publication snapshots", () => {
+  it("projects reload-safe publication status from the exact active revision and clears it on revoke", async () => {
+    const fixture = await setup();
+    expect(await fixture.service.getStatus(noteId)).toBeNull();
+
+    const published = await publishCurrent(fixture);
+    const status = await fixture.service.getStatus(noteId);
+    expect(status).toEqual({
+      publicId: published.publicId,
+      publishedAt: published.publishedAt,
+      sourceVersion: fixture.ids.note.version,
+      attachmentCount: 0
+    });
+    expect(Object.keys(status ?? {}).sort()).toEqual([
+      "attachmentCount",
+      "publicId",
+      "publishedAt",
+      "sourceVersion"
+    ]);
+    expect(await restartPublicationService(fixture).getStatus(noteId)).toEqual(status);
+
+    await fixture.service.revoke({ publicId: published.publicId });
+    expect(await restartPublicationService(fixture).getStatus(noteId)).toBeNull();
+  });
+
   it("commits a 128-bit public ID last and exposes only a sanitized frozen projection", async () => {
     const fixture = await setup({ source: sourceFor("Share me", "# Hello\n\n<script>private()</script>\n") });
     const result = await publishCurrent(fixture);

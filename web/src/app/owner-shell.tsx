@@ -21,18 +21,21 @@ import {
   serializeNote,
   type WikiTargetResolution
 } from "@nxt/domain";
-import type { DeleteFolderRequest } from "@nxt/contracts";
+import type { DeleteFolderRequest, PublicationStatus as PublicationStatusValue } from "@nxt/contracts";
 import {
   lazy,
   Suspense,
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
   type ComponentType
 } from "react";
 import { notesClient, type NotesClient } from "../api/notes";
+import { attachmentClient, type AttachmentClient, type UploadedAttachment } from "../api/attachments";
+import { publicationClient, type PublicationClient } from "../api/publications";
 import {
   attachmentResolverForNote,
   exactFolderForNote,
@@ -41,7 +44,9 @@ import {
   type CompleteVault
 } from "../api/vault";
 import type { DraftStore } from "../editor/draft-store";
-import type { EditorWorkspaceState } from "../editor/editor-workspace";
+import type { AttachmentInsertion, EditorWorkspaceState } from "../editor/editor-workspace";
+import { AttachmentPicker } from "../editor/attachment-picker";
+import { AttachmentView } from "../editor/attachment-view";
 import type { SaveStatus } from "../editor/use-autosave";
 import type { KnowledgeLink } from "../explorer/backlinks-panel";
 import { useCommandPaletteShortcut } from "../explorer/command-palette-shortcut";
@@ -59,6 +64,8 @@ import {
   type FolderExplorerNode
 } from "../explorer/file-tree";
 import { TagsPanel } from "../explorer/tags-panel";
+import { PublishDialog } from "../publication/publish-dialog";
+import { PublicationStatus } from "../publication/publication-status";
 
 const EditorWorkspace = lazy(async () => {
   const module = await import("../editor/editor-workspace");
@@ -209,7 +216,9 @@ const ShellHeader = ({
   showDesktopDestinations,
   noteTitle,
   notePath,
-  saveStatus
+  saveStatus,
+  attachmentAction,
+  publicationAction
 }: {
   readonly activeDestination: Destination;
   readonly onSelect: (destination: Destination) => void;
@@ -217,6 +226,8 @@ const ShellHeader = ({
   readonly noteTitle: string;
   readonly notePath: string;
   readonly saveStatus: SaveStatus;
+  readonly attachmentAction: React.ReactNode;
+  readonly publicationAction: React.ReactNode;
 }): React.JSX.Element => (
   <header className="shell-header">
     <div className="shell-header-explorer">
@@ -234,14 +245,8 @@ const ShellHeader = ({
       <MoreVertical size={23} strokeWidth={1.75} aria-hidden />
     </button>
     <div className="shell-actions" aria-label="Editor actions">
-      <button className="text-action touch-target" type="button">
-        <Paperclip size={19} strokeWidth={1.75} aria-hidden />
-        <span>Add attachment</span>
-      </button>
-      <button className="publish-action touch-target" type="button">
-        <Upload size={19} strokeWidth={1.75} aria-hidden />
-        <span>Publish</span>
-      </button>
+      {attachmentAction}
+      {publicationAction}
     </div>
     <ActiveNotePath className="mobile-path" path={notePath} withIcon />
     <SaveStatusOutput status={saveStatus} />
@@ -456,13 +461,23 @@ const PreviewRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Elem
   </section>
 );
 
-const InfoRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Element => (
+const InfoRegion = ({
+  hidden,
+  attachments,
+  publication
+}: {
+  readonly hidden: boolean;
+  readonly attachments?: React.ReactNode;
+  readonly publication?: React.ReactNode;
+}): React.JSX.Element => (
   <section className="context-region info-region" role="region" aria-label="Info" hidden={hidden}>
     <div className="region-toolbar"><span className="region-label">Info</span></div>
     <div className="info-content">
       <h1>Info</h1>
       <section><h2>Outline</h2></section>
       <section><h2>Backlinks</h2></section>
+      {attachments === undefined ? null : <section><h2>Attachments</h2>{attachments}</section>}
+      {publication === undefined ? null : <section><h2>Publication</h2>{publication}</section>}
     </div>
   </section>
 );
@@ -478,6 +493,8 @@ export interface OwnerShellProps {
   readonly onWikiNavigate?: (noteId: string) => void;
   readonly onNavigateNote?: (noteId: string) => void;
   readonly vaultApi?: VaultClient;
+  readonly attachmentApi?: AttachmentClient;
+  readonly publicationApi?: PublicationClient;
   readonly onRefreshVault?: () => void | Promise<void>;
   readonly onToggleTheme?: () => void;
   readonly onSignOut?: () => void;
@@ -500,6 +517,8 @@ export const OwnerShell = ({
   onWikiNavigate,
   onNavigateNote,
   vaultApi = vaultClient,
+  attachmentApi = attachmentClient,
+  publicationApi = publicationClient,
   onRefreshVault,
   onToggleTheme,
   onSignOut,
@@ -513,8 +532,21 @@ export const OwnerShell = ({
   const [editorState, setEditorState] = useState<EditorWorkspaceState>({
     title: noteId === undefined ? ACTIVE_NOTE.title : "",
     path: noteId === undefined ? ACTIVE_NOTE.path : "",
-    status: noteId === undefined ? "Saved" : "Saving"
+    status: noteId === undefined ? "Saved" : "Saving",
+    version: null,
+    source: null
   });
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [revokeOpen, setRevokeOpen] = useState(false);
+  const [attachmentInsertion, setAttachmentInsertion] = useState<AttachmentInsertion | null>(null);
+  const [publicationState, setPublicationState] = useState<{
+    readonly noteId: string | null;
+    readonly loading: boolean;
+    readonly status: PublicationStatusValue | null;
+    readonly error: boolean;
+  }>({ noteId: null, loading: false, status: null, error: false });
+  const insertionTokenRef = useRef(0);
+  const publishTriggerRef = useRef<HTMLButtonElement>(null);
   const isMobileViewport = useMobileViewport();
   const isWideDesktopViewport = useWideDesktopViewport();
   const selectedEntry = useMemo(
@@ -590,6 +622,64 @@ export const OwnerShell = ({
     await onRefreshVault?.();
   }, [onRefreshVault]);
 
+  useEffect(() => {
+    setPublishOpen(false);
+    setRevokeOpen(false);
+    setAttachmentInsertion(null);
+    if (noteId === undefined) {
+      setPublicationState({ noteId: null, loading: false, status: null, error: false });
+      return;
+    }
+    let active = true;
+    setPublicationState({ noteId, loading: true, status: null, error: false });
+    void publicationApi.getStatus(noteId).then((status) => {
+      if (active) setPublicationState({ noteId, loading: false, status, error: false });
+    }).catch(() => {
+      if (active) setPublicationState({ noteId, loading: false, status: null, error: true });
+    });
+    return () => { active = false; };
+  }, [noteId, publicationApi]);
+
+  const currentPublication = publicationState.noteId === noteId ? publicationState.status : null;
+  const publishDisabledReason = selectedEntry === undefined || editorState.version === null
+    ? "Select a saved note first."
+    : editorState.status !== "Saved"
+      ? "Save the current note before publishing."
+      : null;
+  const attachmentDisabledReason = selectedEntry === undefined || editorState.source === null
+    ? "Select a saved note first."
+    : editorState.status !== "Saved"
+      ? "Save the current note before adding an attachment."
+      : null;
+  const revokeDisabledReason = publicationState.noteId !== noteId || publicationState.loading
+    ? "Checking publication status."
+    : publicationState.error
+      ? "Publication status could not be verified."
+      : currentPublication === null
+        ? "This note is not published."
+        : null;
+
+  const attachmentMarkdown = useCallback((attachment: UploadedAttachment): string => {
+    if (noteId === undefined) throw new Error("A note is required.");
+    const label = [...attachment.name]
+      .map((character) => character === "\\" || character === "[" || character === "]" ? `\\${character}` : character)
+      .join("");
+    const reference = `_assets/${noteId}/${encodeURIComponent(attachment.name)}`;
+    const inlineImage = attachment.disposition === "inline" &&
+      ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(attachment.mimeType);
+    return inlineImage ? `![${label}](${reference})` : `[${label}](${reference})`;
+  }, [noteId]);
+
+  const completeAttachmentUpload = useCallback(async (attachment: UploadedAttachment): Promise<void> => {
+    if (noteId === undefined) return;
+    await refreshVault();
+    setAttachmentInsertion({
+      token: ++insertionTokenRef.current,
+      noteId,
+      markdown: attachmentMarkdown(attachment)
+    });
+  }, [attachmentMarkdown, noteId, refreshVault]);
+
   const openNoteOperation = useCallback((kind: "rename" | "move"): void => {
     if (selectedEntry === undefined || selectedFolder === undefined) return;
     setOperationError(null);
@@ -647,7 +737,6 @@ export const OwnerShell = ({
   const paletteActions = useMemo<readonly CommandPaletteAction[]>(() => {
     const noVault = "Open a complete vault first.";
     const noNote = "Select a note first.";
-    const publicationPending = "Available after publication is added.";
     return [
       {
         id: "new-note",
@@ -746,8 +835,16 @@ export const OwnerShell = ({
           await refreshVault();
         }
       },
-      { id: "publish", disabledReason: publicationPending, run: () => undefined },
-      { id: "revoke", disabledReason: publicationPending, run: () => undefined },
+      {
+        id: "publish",
+        disabledReason: publishDisabledReason,
+        run: () => setPublishOpen(true)
+      },
+      {
+        id: "revoke",
+        disabledReason: revokeDisabledReason,
+        run: () => setRevokeOpen(true)
+      },
       {
         id: "toggle-theme",
         disabledReason: onToggleTheme === undefined ? "Theme controls are unavailable." : null,
@@ -767,7 +864,9 @@ export const OwnerShell = ({
     onSignOut,
     onToggleTheme,
     openNoteOperation,
+    publishDisabledReason,
     refreshVault,
+    revokeDisabledReason,
     selectedEntry,
     selectedFolder,
     vault,
@@ -824,9 +923,73 @@ export const OwnerShell = ({
     setEditorState({
       title: noteId === undefined ? ACTIVE_NOTE.title : "",
       path: noteId === undefined ? ACTIVE_NOTE.path : "",
-      status: noteId === undefined ? "Saved" : "Saving"
+      status: noteId === undefined ? "Saved" : "Saving",
+      version: null,
+      source: null
     });
   }, [noteId]);
+
+  const attachmentAction = noteId === undefined ? (
+    <button className="text-action touch-target" type="button" disabled title="Select a saved note first.">
+      <Paperclip size={19} strokeWidth={1.75} aria-hidden />
+      <span>Add attachment</span>
+    </button>
+  ) : (
+    <AttachmentPicker
+      noteId={noteId}
+      client={attachmentApi}
+      disabledReason={attachmentDisabledReason}
+      onUploaded={completeAttachmentUpload}
+    />
+  );
+  const publicationAction = (
+    <button
+      ref={publishTriggerRef}
+      className="publish-action touch-target"
+      type="button"
+      disabled={publishDisabledReason !== null}
+      title={publishDisabledReason ?? undefined}
+      onClick={() => setPublishOpen(true)}
+    >
+      <Upload size={19} strokeWidth={1.75} aria-hidden />
+      <span>Publish</span>
+    </button>
+  );
+  const attachmentCards = selectedEntry === undefined || selectedEntry.attachments.length === 0 ? (
+    <p className="empty-info">No attachments</p>
+  ) : (
+    <div className="attachment-list">
+      {selectedEntry.attachments.map((attachment) => (
+        <AttachmentView
+          attachment={attachment}
+          key={attachment.assetId}
+          onTrash={async (assetId) => {
+            await attachmentApi.trash(assetId);
+            await refreshVault();
+          }}
+        />
+      ))}
+    </div>
+  );
+  const publicationPanel = publicationState.noteId !== noteId || publicationState.loading ? (
+    <div role="status">Checking publication status</div>
+  ) : publicationState.error ? (
+    <p role="alert">Publication status could not be verified.</p>
+  ) : currentPublication === null ? (
+    <p className="empty-info">Not published</p>
+  ) : (
+    <PublicationStatus
+      status={currentPublication}
+      client={publicationApi}
+      revokeOpen={revokeOpen}
+      onRevokeOpenChange={setRevokeOpen}
+      onRevoked={async () => {
+        await refreshVault();
+        publishTriggerRef.current?.focus();
+        setPublicationState({ noteId: noteId ?? null, loading: false, status: null, error: false });
+      }}
+    />
+  );
 
   return (
     <div
@@ -841,6 +1004,8 @@ export const OwnerShell = ({
         noteTitle={editorState.title}
         notePath={editorState.path}
         saveStatus={editorState.status}
+        attachmentAction={attachmentAction}
+        publicationAction={publicationAction}
       />
       <main className="workspace" aria-label="NXT workspace">
         <ExplorerRegion
@@ -859,7 +1024,7 @@ export const OwnerShell = ({
             <EditorRegion hidden={isHidden("editor")} />
             <div className="context-column">
               <PreviewRegion hidden={isHidden("preview")} />
-              <InfoRegion hidden={isHidden("info")} />
+              <InfoRegion hidden={isHidden("info")} attachments={attachmentCards} publication={publicationPanel} />
             </div>
           </>
         ) : (
@@ -879,7 +1044,8 @@ export const OwnerShell = ({
               now={now}
               showStatus={false}
               onStateChange={setEditorState}
-              infoRegion={<InfoRegion hidden={isHidden("info")} />}
+              attachmentInsertion={attachmentInsertion}
+              infoRegion={<InfoRegion hidden={isHidden("info")} attachments={attachmentCards} publication={publicationPanel} />}
             />
           </Suspense>
         )}
@@ -902,6 +1068,21 @@ export const OwnerShell = ({
           actions={paletteActions}
         />
       </Suspense>
+      {noteId === undefined || editorState.version === null ? null : (
+        <PublishDialog
+          open={publishOpen}
+          onOpenChange={setPublishOpen}
+          noteId={noteId}
+          sourceVersion={editorState.version}
+          attachmentCount={selectedEntry?.attachments.length ?? 0}
+          client={publicationApi}
+          onPublished={async (status) => {
+            setPublicationState({ noteId, loading: false, status, error: false });
+            await refreshVault();
+            setActiveDestination("info");
+          }}
+        />
+      )}
       {pendingOperation === null || vault === undefined ? null : (
         <ExplorerOperationDialog
           operation={pendingOperation.operation}

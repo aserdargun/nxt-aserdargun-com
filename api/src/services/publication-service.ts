@@ -5,10 +5,12 @@ import {
   MAX_PUBLICATION_TOTAL_ASSET_BYTES,
   PublicIdSchema,
   PublicNoteResponseSchema,
+  PublicationStatusSchema,
   type PublicationAsset,
   type PublicationManifest,
   type PublicationRevision,
   type PublicNoteResponse,
+  type PublicationStatus,
   type VaultAttachment,
   type VaultIndex
 } from "@nxt/contracts";
@@ -201,6 +203,24 @@ export class PublicationService {
     } catch (error) {
       await this.abandonOperation(operation.operationId, operation.publicId, orphans).catch(() => undefined);
       throw toPrivateApiError(error);
+    }
+  }
+
+  public async getStatus(noteId: string): Promise<PublicationStatus | null> {
+    this.assertNoteId(noteId);
+    try {
+      const snapshot = await this.options.manifestStore.read(this.context());
+      const entry = snapshot.value.entries.find((candidate) => candidate.sourceNoteId === noteId);
+      if (entry === undefined) return null;
+      const revision = activeRevision(entry);
+      return PublicationStatusSchema.parse({
+        publicId: entry.publicId,
+        publishedAt: revision.publishedAt,
+        sourceVersion: revision.sourceVersion,
+        attachmentCount: revision.assets.length
+      });
+    } catch (error) {
+      throw preserveApiError(error, "DRIVE_UNAVAILABLE");
     }
   }
 
@@ -651,6 +671,7 @@ export class PublicationService {
       title: input.source.note.frontmatter.title,
       html: input.renderedHtml,
       publishedAt,
+      sourceVersion: input.source.version,
       assets: copiedAssets.map((asset) => ({
         assetId: asset.assetId,
         url: `/api/public/assets/${input.operation.publicId}/${asset.assetId}`,
@@ -1337,7 +1358,10 @@ export class PublicPublicationReader {
         mimeType: asset.mimeType,
         disposition: asset.disposition
       }));
-      if (parsed.publishedAt !== revision.publishedAt || JSON.stringify(parsed.assets) !== JSON.stringify(expectedAssets)) throw new Error("public note projection mismatch");
+      if (
+        parsed.publishedAt !== revision.publishedAt || parsed.sourceVersion !== revision.sourceVersion ||
+        JSON.stringify(parsed.assets) !== JSON.stringify(expectedAssets)
+      ) throw new Error("public note projection mismatch");
       if (revision.assets.reduce((total, asset) => total + asset.size, 0) > MAX_PUBLICATION_TOTAL_ASSET_BYTES) throw new Error("public asset snapshot is too large");
       const safeAssets = [];
       for (const asset of revision.assets) {

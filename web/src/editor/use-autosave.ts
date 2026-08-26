@@ -10,6 +10,7 @@ export type SaveStatus = "Saving" | "Saved" | "Offline draft" | "Conflict" | "Er
 
 export interface EditorSessionState {
   readonly source: string | null;
+  readonly version: string | null;
   readonly title: string;
   readonly path: string;
   readonly status: SaveStatus;
@@ -61,6 +62,7 @@ interface DurableDraftWrite {
 
 const INITIAL_STATE: EditorSessionState = {
   source: null,
+  version: null,
   title: "",
   path: "",
   status: "Saving",
@@ -257,6 +259,7 @@ export const useAutosave = ({
       session.baseVersion = response.version;
       publish({
         source: response.source,
+        version: response.version,
         title: session.title,
         path: session.path ?? "",
         status,
@@ -725,6 +728,7 @@ export const useAutosave = ({
           session.needsReconcile = true;
           publish({
             source: draft.source,
+            version: draft.baseVersion,
             title: session.title,
             path: draft.path ?? "",
             status: isOfflineFailure(driveResult.reason) ? "Offline draft" : "Error"
@@ -783,6 +787,7 @@ export const useAutosave = ({
         session.needsReconcile = false;
         publish({
           source: draft.source,
+          version: drive.version,
           title: drive.note.frontmatter.title,
           path: drive.path,
           status: "Offline draft"
