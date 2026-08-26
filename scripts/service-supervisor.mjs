@@ -33,6 +33,7 @@ const readGate = async (path) => {
 
 const identity = await inspectProcess(process.pid);
 if (identity === null) throw new Error("Supervisor identity could not be observed.");
+const cancelledBeforeRegistration = await readGate(cancelPath);
 const registration = `${JSON.stringify({ version: 1, nonce, identity }, null, 2)}\n`;
 const registrationHandle = await open(registrationPath, "wx", 0o600);
 try {
@@ -42,13 +43,16 @@ try {
   await registrationHandle.close();
 }
 await chmod(registrationPath, 0o600);
+if (cancelledBeforeRegistration || await readGate(cancelPath)) process.exit(0);
 
 let released = false;
 while (!released) {
   if (await readGate(cancelPath)) process.exit(0);
   released = await readGate(releasePath);
+  if (released && await readGate(cancelPath)) process.exit(0);
   if (!released) await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
 }
+if (await readGate(cancelPath)) process.exit(0);
 
 const childEnvironment = { ...process.env };
 for (const name of Object.keys(childEnvironment)) if (name.startsWith("NXT_SERVICE_")) delete childEnvironment[name];

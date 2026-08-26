@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { access, chmod, mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
@@ -107,6 +107,8 @@ const createLauncherHarness = async (t) => {
     'try {',
     '  const stack = await startLocalStack({ testHooks: {',
     '    afterLease: async () => { if (mode === "lease") { await writeFile(marker, "leased"); await waitForRelease(); } },',
+    '    afterServicePlanned: async (name) => { if (mode === "planned" && name === target) { await writeFile(marker, name); await new Promise(() => {}); } },',
+    '    afterSupervisorSpawn: async (name, supervisor) => { if (mode === "spawned-unrecorded" && name === target) { await writeFile(marker, JSON.stringify({ name, pid: supervisor.pid })); await new Promise(() => {}); } },',
     '    afterService: async (name) => { if (mode === "crash" && name === target) { await writeFile(marker, name); await new Promise(() => {}); } },',
     '    beforeServiceRelease: async (name, supervisor) => { if (mode === "pre-release" && name === target) { await writeFile(marker, JSON.stringify({ name, pid: supervisor.pid })); await new Promise(() => {}); } }',
     '  } });',
@@ -289,6 +291,46 @@ test("controlled stop refuses corrupt records without affecting a harmless proce
   assert.equal((await inspectProcess(child.pid))?.listeningPorts.includes(port), true);
 });
 
+test("controlled stop rejects a lifecycle-reserved log path before signaling", async (t) => {
+  const { directory, childScript } = await fixture(t);
+  const localDirectory = join(directory, ".nxt-local");
+  const controlPath = join(localDirectory, "control.json");
+  await mkdir(localDirectory, { recursive: true });
+  const port = await reservePort();
+  const child = await startChild(childScript, port, directory);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  const record = await makeRecord({ checkoutPath: directory, controlPath, child, port });
+  const malformed = {
+    ...record,
+    services: record.services.map((service) => ({ ...service, logPath: join(localDirectory, "stop.lock") }))
+  };
+  await writeFile(controlPath, `${JSON.stringify(malformed, null, 2)}\n`, { mode: 0o600 });
+
+  await assert.rejects(stopControlledStack({ checkoutPath: directory, controlPath }), /refus|log|reserved/iu);
+  assert.equal((await inspectProcess(child.pid))?.listeningPorts.includes(port), true);
+  assert.equal(await readFile(controlPath, "utf8"), `${JSON.stringify(malformed, null, 2)}\n`);
+  assert.equal(await pathExists(join(localDirectory, "stop.lock")), false, "invalid input must be rejected before a Stop claim is acquired");
+});
+
+test("controlled stop rejects a symlinked exact service log before signaling", async (t) => {
+  const { directory, childScript } = await fixture(t);
+  const localDirectory = join(directory, ".nxt-local");
+  const controlPath = join(localDirectory, "control.json");
+  const sentinelPath = join(directory, "sentinel.log");
+  await mkdir(localDirectory, { recursive: true });
+  await writeFile(sentinelPath, "keep");
+  const port = await reservePort();
+  const child = await startChild(childScript, port, directory);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  await makeRecord({ checkoutPath: directory, controlPath, child, port });
+  await symlink(sentinelPath, join(localDirectory, "fixture.log"));
+
+  await assert.rejects(stopControlledStack({ checkoutPath: directory, controlPath }), /refus|log|unsafe/iu);
+  assert.equal((await inspectProcess(child.pid))?.listeningPorts.includes(port), true);
+  assert.match(await readFile(controlPath, "utf8"), /fixture/u);
+  assert.equal(await readFile(sentinelPath, "utf8"), "keep");
+});
+
 test("controlled stop refuses descendant-enumeration errors and retains ownership state", async (t) => {
   const { directory, childScript } = await fixture(t);
   const controlPath = join(directory, ".nxt-local", "control.json");
@@ -466,6 +508,37 @@ test("launcher SIGKILL before Vite release leaves only a recorded gated supervis
   await assert.doesNotReject(assertPortsAvailable([4280, 5173, 7071]));
   assert.equal(await pathExists(join(checkout, ".nxt-local")), false);
 });
+
+for (const [mode, markerLabel] of [["planned", "planned"], ["spawned-unrecorded", "spawned-unrecorded"]]) {
+  test(`Stop recovers a coordinator SIGKILL at the ${markerLabel} supervisor handoff`, { timeout: 120_000 }, async (t) => {
+    const { directory, script } = await createLauncherHarness(t);
+    const runner = spawnLauncher({ script, directory, id: mode, mode, target: "vite" });
+    const markerPath = join(directory, `${mode}-vite-${mode}.marker`);
+    const resultPath = join(directory, `result-${mode}.json`);
+    t.after(async () => {
+      await terminateRunner(runner);
+      await forceCleanupCheckoutStack();
+    });
+
+    await waitFor(async () => await pathExists(markerPath) || await pathExists(resultPath), 90_000);
+    assert.equal(
+      await pathExists(markerPath),
+      true,
+      await pathExists(resultPath) ? (JSON.parse(await readFile(resultPath, "utf8")).message ?? "service escaped the handoff barrier") : "missing handoff marker"
+    );
+    const provisional = JSON.parse(await readFile(join(checkout, ".nxt-local", "control.json"), "utf8"));
+    assert.equal(provisional.state, "starting");
+    assert.equal(provisional.services.length, 1);
+    assert.equal(provisional.services[0].status, "planned");
+    assert.equal(provisional.services[0].candidatePid, undefined);
+    await assert.doesNotReject(assertPortsAvailable([5173]));
+    await terminateRunner(runner);
+
+    assert.deepEqual(await stopControlledStack({ checkoutPath: checkout, termTimeoutMs: 2_000, killTimeoutMs: 1_000 }), { status: "stopped" });
+    await assert.doesNotReject(assertPortsAvailable([4280, 5173, 7071]));
+    assert.equal(await pathExists(join(checkout, ".nxt-local")), false);
+  });
+}
 
 for (const [serviceName, expectedCount] of [["vite", 1], ["functions", 2]]) {
   test(`Stop recovers a launcher SIGKILL after ${serviceName} is durably recorded`, { timeout: 120_000 }, async (t) => {

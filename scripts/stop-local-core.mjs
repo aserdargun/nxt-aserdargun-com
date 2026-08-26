@@ -99,7 +99,9 @@ const validateServiceSchema = (service, recordNonce, checkout, localDirectory) =
     service.port > 65_535 || typeof service.logPath !== "string" || service.nonce !== recordNonce) {
     throw refuse("invalid service identity");
   }
-  if (dirname(resolve(service.logPath)) !== localDirectory) throw refuse("foreign service log");
+  if (service.logPath !== join(localDirectory, `${service.name}.log`) || dirname(resolve(service.logPath)) !== localDirectory) {
+    throw refuse("foreign or reserved service log");
+  }
   const status = service.status ?? "ready";
   if (status !== "planned" && status !== "gated" && status !== "spawned" && status !== "ready") throw refuse("invalid service state");
   if (status === "planned") {
@@ -428,6 +430,19 @@ const readOptionalFile = async (path) => {
   catch (error) { if (error?.code === "ENOENT") return undefined; throw error; }
 };
 
+const assertSafeServiceArtifacts = async (record) => {
+  for (const service of record.services) {
+    const paths = [service.logPath, ...Object.values(service.gate ?? {})
+      .filter((value) => typeof value === "string" && value.endsWith(".json"))];
+    for (const path of paths) {
+      let metadata;
+      try { metadata = await lstat(path); }
+      catch (error) { if (error?.code === "ENOENT") continue; throw error; }
+      if (!metadata.isFile() || metadata.isSymbolicLink()) throw refuse(`unsafe ${service.name} lifecycle artifact`);
+    }
+  }
+};
+
 const acquireStopClaim = async ({ localDirectory, checkout, controlNonce, inspect }) => {
   const path = join(localDirectory, STOP_CLAIM_NAME);
   const owner = await inspect(process.pid);
@@ -503,14 +518,21 @@ const readSupervisorRegistration = async (service, checkout, inspect) => {
   return registration.identity;
 };
 
-const prepareGatedServices = async (record, checkout, inspect, timeoutMs) => {
+const cancelGatedServices = async (record) => {
+  for (const service of record.services) {
+    if (service.gate !== undefined && (service.status === "planned" || service.status === "gated")) {
+      await writeGateClaim(service.gate.cancelPath, service.gate.nonce);
+    }
+  }
+};
+
+const prepareGatedServices = async (record, checkout, inspect, timeoutMs, coordinatorStopped) => {
   const prepared = [];
   for (const service of record.services) {
     if (service.gate === undefined || (service.status !== "planned" && service.status !== "gated")) {
       prepared.push(service);
       continue;
     }
-    await writeGateClaim(service.gate.cancelPath, service.gate.nonce);
     if (service.status === "gated") {
       prepared.push(service);
       continue;
@@ -525,6 +547,7 @@ const prepareGatedServices = async (record, checkout, inspect, timeoutMs) => {
     }
     if (identity !== undefined) prepared.push({ ...service, status: "gated", launcher: identity });
     else if (service.candidatePid !== undefined && await inspect(service.candidatePid) === null) prepared.push(service);
+    else if (service.candidatePid === undefined && coordinatorStopped) prepared.push(service);
     else throw refuse(`${service.name} supervisor cleanup could not be proven`);
   }
   return { ...record, services: prepared };
@@ -566,6 +589,7 @@ export const stopControlledStack = async ({
   const localDirectory = await assertLocalDirectory(checkout, controlPath);
   const initialControlText = await readOptionalFile(controlPath);
   const initialRecord = initialControlText === undefined ? undefined : parseControlRecord(initialControlText, checkout, localDirectory);
+  if (initialRecord !== undefined) await assertSafeServiceArtifacts(initialRecord);
   const initialStartupText = await readOptionalFile(join(localDirectory, STARTUP_LEASE_NAME));
   const initialStoppingText = await readOptionalFile(join(localDirectory, stoppingLeaseName));
   if (initialStartupText !== undefined && initialStoppingText !== undefined) throw refuse("multiple startup lease states");
@@ -611,13 +635,17 @@ export const stopControlledStack = async ({
     coordinator: claimedLease.record.owner,
     services: []
   } : parseControlRecord(frozenControlText, checkout, localDirectory);
+  await assertSafeServiceArtifacts(record);
   if (claimedLease !== undefined && (record.nonce !== claimedLease.record.nonce || !identityMatches(record.coordinator, claimedLease.record.owner))) {
     throw refuse("startup lease and control record ownership differ");
   }
+  await cancelGatedServices(record);
+  let coordinatorStopped = false;
   if (claimedLease !== undefined && ownerNonce === undefined) {
     await stopCoordinator(claimedLease.record.owner, { termTimeoutMs, killTimeoutMs, inspect });
+    coordinatorStopped = true;
   }
-  record = await prepareGatedServices(record, checkout, inspect, termTimeoutMs);
+  record = await prepareGatedServices(record, checkout, inspect, termTimeoutMs, coordinatorStopped);
   await verifyRecordedServices(record, inspect);
   await stopServiceProcesses({ record, checkout, termTimeoutMs, killTimeoutMs, enumerateChildPids, enumerateGroupPids, inspect });
   for (const service of record.services) if (!await listenerIsClosed(service.port)) throw refuse(`${service.name} listener is still open`);

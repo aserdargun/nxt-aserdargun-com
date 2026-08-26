@@ -287,7 +287,11 @@ export const startLocalStack = async ({ checkout = checkoutPath, testHooks } = {
       const logPath = join(localDirectory, `${name}.log`);
       services.push({ name, status: "planned", gate, port, logPath, nonce });
       await persist();
+      await testHooks?.afterServicePlanned?.(name, services[index]);
+      if (interrupted) throw new Error("Local startup was interrupted.");
       const { child } = await spawnGated({ name, executable, args, cwd, env, localDirectory, gate });
+      await testHooks?.afterSupervisorSpawn?.(name, { pid: child.pid });
+      if (interrupted) throw new Error("Local startup was interrupted.");
       services[index] = { name, status: "planned", candidatePid: child.pid, gate, port, logPath, nonce };
       await persist();
       let launcherIdentity = await waitForSupervisorRegistration(child, gate);
