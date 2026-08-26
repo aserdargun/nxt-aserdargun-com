@@ -1,4 +1,5 @@
 import js from "@eslint/js";
+import globals from "globals";
 import tseslint from "typescript-eslint";
 
 const productionTypeScript = ["**/src/**/*.{ts,tsx}"];
@@ -16,6 +17,10 @@ export default [
     ]
   },
   js.configs.recommended,
+  {
+    files: ["*.config.js", "scripts/**/*.mjs", "tools/**/*.mjs"],
+    languageOptions: { globals: globals.node }
+  },
   ...tseslint.configs.recommended.map((config) => ({
     ...config,
     files: testTypeScript

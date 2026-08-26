@@ -19,11 +19,13 @@
     "artifact:verify": "node scripts/verify-artifacts.mjs",
     "dev:codex": "node scripts/local-dev.mjs",
     "stop:codex": "node scripts/stop-local.mjs",
-    "validate:codex": "pnpm lint && pnpm typecheck && pnpm api:build && pnpm web:build && pnpm artifact:verify && pnpm test && pnpm e2e && git diff --check"
+    "validate:codex": "pnpm lint && pnpm typecheck && pnpm api:build && pnpm web:build && pnpm artifact:verify && pnpm test && pnpm project:test && node --test --test-concurrency=1 tools/static-security.test.mjs tools/artifact-contract.test.mjs tools/local-lifecycle.integration.test.mjs && git diff --check"
   },
   "devDependencies": {
+    "@azure/static-web-apps-cli": "2.0.10",
     "@eslint/js": "10.0.1",
     "@types/node": "26.2.0",
+    "esbuild": "0.28.2",
     "eslint": "10.9.0",
     "globals": "17.11.0",
     "prettier": "3.9.6",

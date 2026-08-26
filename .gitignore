@@ -1,6 +1,7 @@
 .worktrees/
 node_modules/
 .env.local
+api/local.settings.json
 google-oauth-client*.json
 Desktop-app-client*.json
 client_secret_*.json

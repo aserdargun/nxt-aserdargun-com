@@ -2,4 +2,7 @@ packages:
   - "web"
   - "api"
   - "packages/*"
+allowBuilds:
+  esbuild: true
+  keytar: false
 injectWorkspacePackages: true
