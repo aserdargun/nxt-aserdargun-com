@@ -263,3 +263,48 @@ exit 0
 ```
 
 Tool evidence was Node `22.23.1`, pnpm `11.22.0`, and the Core Tools banner `4.13.0`. Final checks found no listeners on 4280/5173/7071, no `.nxt-local`, no surviving launcher/supervisor/test process, restored tracked `web/tsconfig.tsbuildinfo`, ignored/uncommitted build output, and a clean implementation commit. No browser IAB was opened for this lifecycle-only fix. No live Drive, GitHub, Azure, DNS, remote, workflow, deployment, push, or external mutable service access occurred; the root checkout and INF project were untouched.
+
+## Review fix round 3
+
+Independent review found two further Important lifecycle-validation gaps. Commit `bd5344a2def410cfd3f8b0667e3f3a984e038617` (`fix: harden lifecycle handoff validation`) closes them without changing the Azure artifact, auth-bypass, or macOS host-local sandbox contracts.
+
+- Stop now places the exact nonce-bound cancel tombstone before terminating a starting coordinator. A supervisor checks cancellation before registration, immediately after atomic registration, while awaiting release, after observing release, and immediately before the real child spawn. It therefore fails closed at every handoff stage.
+- A durable `planned` record without `candidatePid` or registration is cleanable only after Stop proves the exact coordinator identity has exited and completes a bounded registration wait. This distinguishes proven no-spawn from an ambiguous live handoff. A post-spawn/pre-candidate supervisor either registers its full identity for verified cleanup or consumes cancellation and exits; it never receives a service release.
+- Deterministic barriers cover coordinator SIGKILL immediately after planned persistence but before supervisor spawn, after supervisor spawn but before candidate persistence, and the existing registered/pre-release stage. All keep Vite 5173 closed and finish with no control, claim, gate, log, or process residue.
+- Control parsing now accepts only the canonical `${service.name}.log` path under the exact lifecycle directory. Reserved lifecycle names such as `stop.lock`, alternate same-directory names, and foreign paths are rejected before a Stop claim or signal. Existing exact log and gate files are also `lstat`-validated as regular non-symlink files before signaling.
+- Reserved-path and symlink regressions prove the harmless listener survives, the control record remains byte-identical, no invalid Stop claim is acquired, and the symlink target remains unchanged.
+
+### Fix-round-3 RED → GREEN evidence
+
+Exact Node 22 focused regressions were added before production edits and run with every live Drive key unset:
+
+```sh
+node --test --test-concurrency=1 \
+  --test-name-pattern='lifecycle-reserved log|symlinked exact service log|planned supervisor handoff|spawned-unrecorded supervisor handoff' \
+  tools/local-lifecycle.integration.test.mjs
+```
+
+```text
+RED: 0 passed, 4 failed, 0 skipped; 40.06 seconds
+GREEN: 4 passed, 0 failed, 0 skipped; 27.30 seconds
+```
+
+The complete focused security/artifact/lifecycle suite then passed `37/37` in `181.49` seconds. The final fresh full command explicitly unset all Drive/Google runtime keys and ran `pnpm validate:codex` under the pinned Node path:
+
+```text
+lint: PASS
+typecheck: PASS
+API/web builds: PASS
+artifact verifier: 13 web files, 3 API files, PASS
+contracts: 14 passed
+domain: 29 passed
+web: 169 passed
+API: 394 passed, 1 opt-in live Drive test skipped
+repository total: 606 passed, 1 skipped
+project contract: 2 passed
+focused Task 14: 37 passed in 171.39 seconds
+git diff --check: PASS
+exit 0
+```
+
+Final tool evidence remained Node `22.23.1`, pnpm `11.22.0`, and Functions Core Tools `4.13.0`. The tracked `web/tsconfig.tsbuildinfo` was restored; generated builds stayed ignored. Ports 4280/5173/7071 were closed, `.nxt-local` was absent, and no launcher, supervisor, lifecycle-test, or fixture process remained. No browser IAB was needed. No Drive, GitHub, Azure, DNS, remote, workflow, deployment, push, external mutable service, root-checkout, or INF access/mutation occurred.
