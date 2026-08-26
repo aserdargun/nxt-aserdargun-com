@@ -196,3 +196,91 @@ The files are intentionally outside the repository and remain uncommitted:
 - The Vite large-chunk warning is non-failing and remains visible rather than suppressed.
 - No Google Drive provisioning, GitHub, Azure, DNS, custom domain, certificate, deployment, push, remote, or other external mutable state was accessed or changed.
 - Commit: `acb6387`; push: none; deploy: none.
+
+## Review fix round 1/5 — 2026-08-26
+
+### Status
+
+DONE. The implementation fix is commit `ce10d650c8978f73ca71a8adca04f7515391e4d4` (`fix: harden vault navigation invariants`). An independent post-fix diff review found no remaining Critical, Important, or Minor issue.
+
+### Reviewer findings resolved
+
+- Kept every individual preferences page bounded to 100 while assembling complete preferences through `PreferencesSchema`; a two-page 101-favorite/101-recent vault now succeeds.
+- Bound vault pagination to a safe SHA-256 preferences checksum in both the opaque cursor and browser assembler. Reordered or otherwise changed preferences now conflict/fail closed instead of producing a hybrid snapshot; no raw Drive identifier was added to the browser response.
+- Enforced folder confirmation `expiresAt` with injectable time, timer-driven invalidation, fresh-token reset, server-conflict refresh, disabled Trash controls, and an explicit refresh reason in both the menu and an already-open dialog. Expired confirmation never reaches the Trash client.
+- Replaced positional/regex outline inference with the renderer's exact CommonMark AST and generated heading IDs. Setext and ATX headings, inline formatting, duplicate IDs, and renderer-excluded blockquote headings now match exactly; navigation scrolls the exact rendered ID.
+- Restored one composite tree tab stop, removed action triggers from the Tab sequence while retaining Shift+F10/context-menu access, made Enter/Space select folders, made ArrowRight on an expanded empty folder a no-op, and reconciled focus when a visible item disappears.
+- Removed `searchText` from worker results. Result validation now enforces the exact safe result shape, and a malformed response without a usable request ID terminates the worker and rejects all pending requests instead of hanging.
+
+### RED and focused GREEN evidence
+
+The initial reviewer reproducers produced:
+
+```text
+web focused: 126 passed, 11 failed (137 total)
+API vault-functions: 16 passed, 1 failed (17 total)
+```
+
+Those 12 failures covered the 101-item preferences assembly, preferences snapshot mutation, exact outline semantics/scroll target, tree selection/tab/focus/empty-folder behavior, expired folder confirmation, search result privacy, and unusable worker response ID.
+
+The independent final review found one additional dialog-expiry accessibility gap. Its timer-driven test first failed because the disabled in-dialog Trash button had no visible refresh explanation, then passed after the minimal patch:
+
+```text
+file-tree focused: 9/9 passed
+API vault-functions focused: 17/17 passed
+outline/tree/search/vault/editor focused: 65/65 passed
+post-fix complete web suite: 139/139 passed
+```
+
+### Fresh final validation
+
+All commands ran on Node `v22.23.1` with Google Drive/OAuth/live-integration variables explicitly unset.
+
+```text
+pnpm lint: PASS
+pnpm typecheck: contracts, domain, API, web PASS
+pnpm build: contracts, domain, API, web PASS
+pnpm project:test: 2/2 PASS
+pnpm test: exit 0
+```
+
+Final repository totals:
+
+```text
+contracts: 11 passed
+domain: 20 passed
+web: 139 passed
+API: 392 passed, 1 live Drive test skipped
+total: 562 passed, 1 skipped
+files: 34 passed, 1 skipped
+```
+
+The Vite build transformed 2,619 modules and emitted the expected non-failing large-chunk warning; final main/editor chunks were 905.57 kB and 616.75 kB before gzip. `git diff --check`, the production web-source Google/Drive-ID scan, and the built credential/Google-endpoint scan passed. `web/tsconfig.tsbuildinfo` was restored byte-for-byte to HEAD.
+
+`pnpm artifact:verify` still exits 1 only because `scripts/verify-artifacts.mjs` does not exist. This is the recorded Task 14 baseline (`MODULE_NOT_FOUND`), not a Task 12 regression.
+
+### Fix-round browser evidence
+
+The freshly built production artifact was served through a temporary loopback-only, read-only same-origin fixture; only deterministic session/vault/note GETs were available. The Codex in-app Browser was used exclusively.
+
+- Desktop 1505×1045: exact deep route and `NXT` title; one tree tab stop; every folder action trigger `tabIndex=-1`; Enter/Space folder selection; expanded-empty ArrowRight stayed on Empty; Shift+F10 opened the folder menu and focused Rename.
+- Exact outline labels were `2026 Yıllık Planı`, `Milestones`, `Risks and Mitigations`, `Repeat`, `Repeat`; the blockquote heading was excluded. The second duplicate switched to Preview and targeted `nxt-heading-repeat-2` exactly.
+- Search returned `2026 Plan / Plans`; the resolved wiki link reached the exact Other-note route; Publish was disabled with `Available after publication is added.`; Escape restored focus to Search files.
+- Folder confirmation showed the projected 1 note / 0 attachments / 1 Drive descendant counts without submitting Trash. A short-lived rebuilt fixture proved that an initially enabled open dialog became disabled at expiry, displayed `Refresh the vault before moving this folder to Trash.`, and linked that reason through `aria-describedby`.
+- Mobile 390×844: Files and Preview each rendered as the sole destination, document width remained 390 px without overflow, bottom navigation targets measured 67 px high, outline targets measured 44 px high, and the second duplicate targeted `nxt-heading-repeat-2`.
+- Final desktop/mobile console `warn`/`error` arrays were empty and framework overlay count was zero.
+
+Fix-round screenshots remain outside the repository and uncommitted:
+
+- `/Users/aserdargun/.codex/visualizations/2026/08/23/01a02e13-724b-7750-8202-cb4bc4a4da0f/task-12-fix1-desktop-1505x1045.png`
+- `/Users/aserdargun/.codex/visualizations/2026/08/23/01a02e13-724b-7750-8202-cb4bc4a4da0f/task-12-fix1-desktop-folder-dialog-1505x1045.png`
+- `/Users/aserdargun/.codex/visualizations/2026/08/23/01a02e13-724b-7750-8202-cb4bc4a4da0f/task-12-fix1-desktop-outline-1505x1045.png`
+- `/Users/aserdargun/.codex/visualizations/2026/08/23/01a02e13-724b-7750-8202-cb4bc4a4da0f/task-12-fix1-mobile-files-390x844.png`
+- `/Users/aserdargun/.codex/visualizations/2026/08/23/01a02e13-724b-7750-8202-cb4bc4a4da0f/task-12-fix1-mobile-outline-390x844.png`
+- `/Users/aserdargun/.codex/visualizations/2026/08/23/01a02e13-724b-7750-8202-cb4bc4a4da0f/task-12-fix1-desktop-expired-dialog-1505x1045.png`
+
+### Closeout
+
+- Ports 5173 and 5174 closed; the temporary fixture was removed.
+- Live Drive stayed unset and unexercised; the one opt-in test remained skipped.
+- No push, deploy, Drive, GitHub, Azure, DNS, certificate, secret, or other external mutation occurred.
