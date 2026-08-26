@@ -1,5 +1,15 @@
 import { expect, test as base, type Page } from "@playwright/test";
 
+const fixtureRoot = `${process.cwd()}/.nxt-local/fixtures/playwright`;
+
+const resetFixture = async (): Promise<void> => {
+  // @ts-expect-error This is an intentionally Node-only controller outside the browser bundle.
+  const { resetLocalFixtures } = await import("../scripts/local-fixtures.mjs") as {
+    resetLocalFixtures(input: { checkoutPath: string; fixtureRoot: string; environment: NodeJS.ProcessEnv }): Promise<unknown>;
+  };
+  await resetLocalFixtures({ checkoutPath: process.cwd(), fixtureRoot, environment: process.env });
+};
+
 export const loginAs = async (page: Page, userDetails = "aserdargun"): Promise<void> => {
   await page.goto("/login", { waitUntil: "domcontentloaded" });
   await page.getByRole("link", { name: "Continue with GitHub" }).click();
@@ -17,8 +27,14 @@ export const loginAs = async (page: Page, userDetails = "aserdargun"): Promise<v
   await page.waitForFunction(() => window.location.pathname === "/app" || window.location.pathname.startsWith("/app/"));
 };
 
-export const test = base.extend<{ ownerPage: Page }>({
-  ownerPage: async ({ page }, use) => {
+export const test = base.extend<{ fixtureReset: undefined; ownerPage: Page }>({
+  fixtureReset: [async ({}, use) => {
+    // One worker and a fresh browser context mean no application request exists at this pre-test boundary.
+    await resetFixture();
+    await use(undefined);
+  }, { auto: true }],
+  ownerPage: async ({ page, fixtureReset }, use) => {
+    void fixtureReset;
     await loginAs(page);
     await expect(page.getByTestId("owner-shell")).toBeVisible();
     await use(page);

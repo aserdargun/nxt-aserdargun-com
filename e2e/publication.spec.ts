@@ -2,19 +2,33 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "./fixtures";
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGP4DwQACfsD/fteaysAAAAASUVORK5CYII=", "base64");
+const expectNoSeriousViolations = async (page: Parameters<typeof AxeBuilder>[0]["page"], include?: string): Promise<void> => {
+  const builder = new AxeBuilder({ page });
+  const results = await (include === undefined ? builder : builder.include(include)).analyze();
+  expect(results.violations.filter(({ impact }) => impact === "serious" || impact === "critical")).toEqual([]);
+};
 
 test("persisted raster publishes as an unlisted snapshot and revoke makes it generic 404", async ({ ownerPage: page }) => {
-  await page.getByLabel("Search files").fill("2026 Planı");
-  const result = page.getByLabel("Search results").getByRole("button", { name: /2026 Planı/u });
-  await expect(result).toBeVisible();
-  await result.click();
-  await expect(page.getByRole("region", { name: "Editor" }).getByLabel("Active note path: Notes/Archive/2026 Planı.md")).toBeVisible();
+  await page.keyboard.press("Meta+K");
+  await page.getByLabel("Search commands").fill("New note");
+  await page.getByRole("button", { name: "New note" }).click();
+  await page.getByLabel("Title").fill("Publication proof");
+  await page.getByRole("button", { name: "Create" }).click();
+  const editor = page.getByLabel("Markdown editor");
+  await editor.click();
+  await page.keyboard.press("Meta+ArrowDown");
+  await page.keyboard.press("Backspace");
+  await page.keyboard.insertText("# Public proof\n");
+  await expect(page.getByLabel("Save status")).toHaveText("Saved");
   await page.getByLabel("Add attachment").setInputFiles({ name: "browser-proof.png", mimeType: "image/png", buffer: png });
   await expect(page.getByRole("region", { name: "Preview" }).getByAltText("browser-proof.png")).toBeVisible();
-  await expect(page.getByLabel("Markdown editor")).toContainText("browser-proof.png");
+  await expect(editor).toContainText("browser-proof.png");
   await expect(page.getByLabel("Save status")).toHaveText("Saved");
   await page.getByRole("button", { name: "Publish" }).click();
-  await page.getByRole("button", { name: "Publish snapshot" }).click();
+  const publishDialog = page.getByRole("dialog", { name: "Publish note" });
+  await expect(publishDialog).toHaveCSS("opacity", "1");
+  await expectNoSeriousViolations(page, ".publish-dialog");
+  await publishDialog.getByRole("button", { name: "Publish snapshot" }).click();
   const publicLink = page.getByRole("link", { name: "Open link" });
   await expect(publicLink).toBeVisible();
   const publicPath = await publicLink.getAttribute("href");
@@ -27,7 +41,7 @@ test("persisted raster publishes as an unlisted snapshot and revoke makes it gen
   const privateRequests: string[] = [];
   publicPage.on("request", (request) => { if (request.url().includes("/api/private/") || request.url().includes("/.auth/me")) privateRequests.push(request.url()); });
   await publicPage.goto(publicPath as string, { waitUntil: "domcontentloaded" });
-  await expect(publicPage.getByRole("heading", { level: 1, name: "2026 Planı" })).toBeVisible();
+  await expect(publicPage.getByRole("heading", { level: 1, name: "Publication proof" })).toBeVisible();
   const publicImage = publicPage.locator(".rendered-markdown").getByAltText("browser-proof.png");
   await expect(publicImage).toBeVisible();
   expect(privateRequests).toEqual([]);
@@ -36,8 +50,7 @@ test("persisted raster publishes as an unlisted snapshot and revoke makes it gen
   const imageResponse = await publicPage.request.get(await publicImage.getAttribute("src") as string);
   expect(imageResponse.status()).toBe(200);
   expect(imageResponse.headers()["content-type"]).toBe("image/png");
-  const axe = await new AxeBuilder({ page: publicPage }).analyze();
-  expect(axe.violations.filter(({ impact }) => impact === "serious" || impact === "critical")).toEqual([]);
+  await expectNoSeriousViolations(publicPage);
   await publicPage.screenshot({
     path: "test-results/playwright/task15-public-note.png",
     fullPage: true,
@@ -46,7 +59,10 @@ test("persisted raster publishes as an unlisted snapshot and revoke makes it gen
   await publicContext.close();
 
   await page.getByRole("button", { name: "Revoke" }).click();
-  await page.getByRole("button", { name: "Confirm revoke" }).click();
+  const revokeDialog = page.getByRole("dialog", { name: "Revoke publication" });
+  await expect(revokeDialog).toHaveCSS("opacity", "1");
+  await expectNoSeriousViolations(page, ".revoke-dialog");
+  await revokeDialog.getByRole("button", { name: "Confirm revoke" }).click();
   await expect(publicLink).toHaveCount(0);
   const anonymousVerifier = await browser!.newContext();
   const revoked = await anonymousVerifier.request.get(publicPath as string);

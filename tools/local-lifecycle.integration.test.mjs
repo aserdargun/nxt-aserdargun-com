@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { access, chmod, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
@@ -105,7 +105,7 @@ const createLauncherHarness = async (t) => {
     '  throw new Error("launcher barrier timeout");',
     '};',
     'try {',
-    '  const stack = await startLocalStack({ testHooks: {',
+    '  const stack = await startLocalStack({ localFixtures: process.env.NXT_TEST_LOCAL_FIXTURES === "1", testHooks: {',
     '    afterLease: async () => { if (mode === "lease") { await writeFile(marker, "leased"); await waitForRelease(); } },',
     '    afterServicePlanned: async (name) => { if (mode === "planned" && name === target) { await writeFile(marker, name); await new Promise(() => {}); } },',
     '    afterSupervisorSpawn: async (name, supervisor) => { if (mode === "spawned-unrecorded" && name === target) { await writeFile(marker, JSON.stringify({ name, pid: supervisor.pid })); await new Promise(() => {}); } },',
@@ -329,6 +329,28 @@ test("controlled stop rejects a symlinked exact service log before signaling", a
   assert.equal((await inspectProcess(child.pid))?.listeningPorts.includes(port), true);
   assert.match(await readFile(controlPath, "utf8"), /fixture/u);
   assert.equal(await readFile(sentinelPath, "utf8"), "keep");
+});
+
+test("controlled stop rejects a symlinked canonical runtime attestation before signaling", async (t) => {
+  const { directory, childScript } = await fixture(t);
+  const localDirectory = join(directory, ".nxt-local");
+  const controlPath = join(localDirectory, "control.json");
+  const fixtureRoot = join(localDirectory, "fixtures", "playwright");
+  const attestationPath = join(localDirectory, "functions.attestation.json");
+  const sentinelPath = join(directory, "sentinel-attestation.json");
+  await mkdir(fixtureRoot, { recursive: true });
+  await writeFile(sentinelPath, "keep");
+  const port = await reservePort();
+  const child = await startChild(childScript, port, directory);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  const record = await makeRecord({ checkoutPath: directory, controlPath, child, port });
+  await writeFile(controlPath, `${JSON.stringify({ ...record, fixtureRoot, runtimeAttestationPath: attestationPath }, null, 2)}\n`, { mode: 0o600 });
+  await symlink(sentinelPath, attestationPath);
+
+  await assert.rejects(stopControlledStack({ checkoutPath: directory, controlPath }), /refus|attestation|unsafe/iu);
+  assert.equal((await inspectProcess(child.pid))?.listeningPorts.includes(port), true);
+  assert.equal(await readFile(sentinelPath, "utf8"), "keep");
+  assert.match(await readFile(controlPath, "utf8"), /functions\.attestation/u);
 });
 
 test("controlled stop refuses descendant-enumeration errors and retains ownership state", async (t) => {
@@ -569,7 +591,7 @@ for (const [serviceName, expectedCount] of [["vite", 1], ["functions", 2]]) {
   });
 }
 
-test("caller-exported local auth bypass is removed from Vite and SWA and child-scoped to Functions", { timeout: 120_000 }, async (t) => {
+test("caller-exported local runtime keys are scrubbed and replaced only for Functions", { timeout: 120_000 }, async (t) => {
   const { directory, script } = await createLauncherHarness(t);
   const marker = `caller-${crypto.randomUUID()}`;
   const wrapper = join(directory, "pnpm");
@@ -579,7 +601,8 @@ test("caller-exported local auth bypass is removed from Vite and SWA and child-s
     "#!/usr/bin/env node",
     'const { spawnSync } = require("node:child_process");',
     'const { appendFileSync } = require("node:fs");',
-    'appendFileSync(process.env.NXT_TEST_BUILD_ENV_LOG, `${process.env.NXT_LOCAL_AUTH_BYPASS === undefined ? "absent" : "present"}\\n`);',
+    'const keys = ["NXT_LOCAL_AUTH_BYPASS", "NXT_LOCAL_STORAGE_MODE", "NXT_LOCAL_FIXTURE_ROOT", "NXT_LOCAL_CHECKOUT_ROOT", "NXT_LOCAL_CONTROL_NONCE"];',
+    'appendFileSync(process.env.NXT_TEST_BUILD_ENV_LOG, `${keys.every((key) => process.env[key] === undefined) ? "absent" : "present"}\\n`);',
     'const result = spawnSync(process.env.NXT_TEST_REAL_PNPM, process.argv.slice(2), { env: process.env, stdio: "inherit" });',
     'process.exit(result.status ?? 1);'
   ].join("\n"));
@@ -593,6 +616,11 @@ test("caller-exported local auth bypass is removed from Vite and SWA and child-s
       ...process.env,
       PATH: `${directory}:${process.env.PATH}`,
       NXT_LOCAL_AUTH_BYPASS: marker,
+      NXT_LOCAL_STORAGE_MODE: marker,
+      NXT_LOCAL_FIXTURE_ROOT: marker,
+      NXT_LOCAL_CHECKOUT_ROOT: marker,
+      NXT_LOCAL_CONTROL_NONCE: marker,
+      NXT_TEST_LOCAL_FIXTURES: "1",
       NXT_TEST_BUILD_ENV_LOG: buildEnvironmentLog,
       NXT_TEST_REAL_PNPM: realPnpm.trim()
     }
@@ -614,8 +642,14 @@ test("caller-exported local auth bypass is removed from Vite and SWA and child-s
     if (service.name === "functions") {
       assert.equal(/NXT_LOCAL_AUTH_BYPASS=1(?:\s|$)/u.test(stdout), true, "Functions must receive the child-only bypass.");
       assert.equal(stdout.includes(marker), false, "Functions must not inherit the caller bypass value.");
+      assert.match(stdout, /NXT_LOCAL_STORAGE_MODE=filesystem(?:\s|$)/u);
+      assert.match(stdout, new RegExp(`NXT_LOCAL_FIXTURE_ROOT=${record.fixtureRoot}(?:\\s|$)`, "u"));
+      assert.match(stdout, new RegExp(`NXT_LOCAL_CHECKOUT_ROOT=${checkout}(?:\\s|$)`, "u"));
+      assert.match(stdout, new RegExp(`NXT_LOCAL_CONTROL_NONCE=${record.nonce}(?:\\s|$)`, "u"));
     } else {
-      assert.equal(stdout.includes("NXT_LOCAL_AUTH_BYPASS="), false, `${service.name} must not inherit the auth bypass.`);
+      for (const key of ["NXT_LOCAL_AUTH_BYPASS", "NXT_LOCAL_STORAGE_MODE", "NXT_LOCAL_FIXTURE_ROOT", "NXT_LOCAL_CHECKOUT_ROOT", "NXT_LOCAL_CONTROL_NONCE"]) {
+        assert.equal(stdout.includes(`${key}=`), false, `${service.name} must not inherit ${key}.`);
+      }
     }
   }
   assert.deepEqual(await stopControlledStack({ checkoutPath: checkout }), { status: "stopped" });
@@ -657,7 +691,7 @@ test("partial startup rolls back and the real stack supports crash-safe Stop", {
   );
   await assert.doesNotReject(assertPortsAvailable([4280, 5173, 7071]));
 
-  const stack = await startLocalStack();
+  const stack = await startLocalStack({ localFixtures: true });
   t.after(async () => { await stopControlledStack({ checkoutPath: process.cwd() }).catch(() => {}); });
   assert.deepEqual(stack.services.map(({ name, port }) => ({ name, port })), [
     { name: "vite", port: 5173 },
@@ -668,6 +702,28 @@ test("partial startup rolls back and the real stack supports crash-safe Stop", {
   const session = await fetch("http://127.0.0.1:7071/api/private/session");
   assert.equal(session.status, 200);
   assert.deepEqual(await session.json(), { user: { userDetails: "aserdargun" } });
+  const record = JSON.parse(await readFile(join(checkout, ".nxt-local", "control.json"), "utf8"));
+  const functions = record.services.find(({ name }) => name === "functions");
+  assert(functions);
+  assert.equal(record.runtimeAttestationPath, join(checkout, ".nxt-local", "functions.attestation.json"));
+  const attestationMetadata = await lstat(record.runtimeAttestationPath);
+  assert.equal(attestationMetadata.isFile(), true);
+  assert.equal(attestationMetadata.isSymbolicLink(), false);
+  const attestation = JSON.parse(await readFile(record.runtimeAttestationPath, "utf8"));
+  assert.deepEqual(attestation.functions, Object.fromEntries(
+    ["pid", "pgid", "startTime", "cwd", "executable", "command", "port", "logPath"].map((key) => [key, functions[key]])
+  ));
+  const { stdout: childPidText } = await run("/usr/bin/pgrep", ["-P", String(functions.pid)], { encoding: "utf8" });
+  const workerPids = childPidText.trim().split(/\s+/u).map(Number);
+  const workers = [];
+  for (const pid of workerPids) {
+    const { stdout } = await run("/bin/ps", ["-p", String(pid), "-o", "ppid=,command="], { encoding: "utf8" });
+    if (stdout.includes("nodejsWorker.js")) workers.push({ pid, output: stdout.trim() });
+  }
+  assert.equal(workers.length, 1, "Core Tools topology must expose one direct Node worker child.");
+  assert.match(workers[0].output, new RegExp(`^${functions.pid}\\s+`, "u"));
+  const vault = await fetch("http://127.0.0.1:7071/api/private/vault?limit=100");
+  assert.equal(vault.status, 200, await vault.text());
   await assert.rejects(startLocalStack(), /occupied|existing/u);
 
   const swa = stack.services.find(({ name }) => name === "swa");

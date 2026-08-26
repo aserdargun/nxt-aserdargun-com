@@ -1105,6 +1105,14 @@ textarea:focus-visible,
   color: var(--muted);
 }
 
+.command-dialog .publication-facts dt {
+  color: var(--text);
+}
+
+.command-dialog .danger-action {
+  color: var(--text);
+}
+
 .publication-facts dd {
   margin: 0;
   overflow-wrap: anywhere;
@@ -1538,6 +1546,15 @@ textarea:focus-visible,
 
   .search-row input {
     height: 44px;
+  }
+
+  .folder-actions {
+    flex-basis: 44px;
+  }
+
+  .folder-actions-trigger {
+    width: 44px;
+    min-width: 44px;
   }
 
   .context-column {

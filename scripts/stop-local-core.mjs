@@ -11,6 +11,7 @@ export const STARTUP_LEASE_VERSION = 1;
 export const STARTUP_LEASE_NAME = "startup.lock";
 export const STOP_CLAIM_VERSION = 1;
 export const STOP_CLAIM_NAME = "stop.lock";
+export const RUNTIME_ATTESTATION_NAME = "functions.attestation.json";
 const stoppingLeaseName = "stopping.lock";
 
 const refuse = (reason) => new Error(`Refusing local lifecycle operation: ${reason}.`);
@@ -132,8 +133,13 @@ const parseControlRecord = (text, checkout, localDirectory) => {
     if (typeof record.updatedAt !== "string" || Number.isNaN(Date.parse(record.updatedAt))) throw refuse("invalid control update time");
     validateIdentitySchema(record.coordinator, checkout, "startup coordinator");
   }
-  if (record.fixtureRoot !== undefined && record.fixtureRoot !== join(localDirectory, "fixtures", "playwright")) {
-    throw refuse("foreign local fixture root");
+  if (record.fixtureRoot !== undefined) {
+    if (record.fixtureRoot !== join(localDirectory, "fixtures", "playwright")) throw refuse("foreign local fixture root");
+    if (record.runtimeAttestationPath !== join(localDirectory, RUNTIME_ATTESTATION_NAME)) {
+      throw refuse("foreign Functions runtime attestation path");
+    }
+  } else if (record.runtimeAttestationPath !== undefined) {
+    throw refuse("unexpected Functions runtime attestation path");
   }
   for (const service of record.services) validateServiceSchema(service, record.nonce, checkout, localDirectory);
   if (state === "ready" && record.services.some((service) => (service.status ?? "ready") !== "ready")) {
@@ -458,15 +464,16 @@ const readOptionalFile = async (path) => {
 };
 
 const assertSafeServiceArtifacts = async (record) => {
+  const paths = record.runtimeAttestationPath === undefined ? [] : [record.runtimeAttestationPath];
   for (const service of record.services) {
-    const paths = [service.logPath, ...Object.values(service.gate ?? {})
-      .filter((value) => typeof value === "string" && value.endsWith(".json"))];
-    for (const path of paths) {
+    paths.push(service.logPath, ...Object.values(service.gate ?? {})
+      .filter((value) => typeof value === "string" && value.endsWith(".json")));
+  }
+  for (const path of paths) {
       let metadata;
       try { metadata = await lstat(path); }
       catch (error) { if (error?.code === "ENOENT") continue; throw error; }
-      if (!metadata.isFile() || metadata.isSymbolicLink()) throw refuse(`unsafe ${service.name} lifecycle artifact`);
-    }
+      if (!metadata.isFile() || metadata.isSymbolicLink()) throw refuse("unsafe lifecycle artifact");
   }
 };
 
@@ -688,6 +695,7 @@ export const stopControlledStack = async ({
     }
     await rm(service.logPath, { force: true });
   }
+  if (record.runtimeAttestationPath !== undefined) await rm(record.runtimeAttestationPath, { force: true });
   await removeOwnedFixtureRoot(record, localDirectory);
   await beforeStopClaimRelease?.(stopClaim.record);
   await releaseOwnedStopClaim(stopClaim, inspect);

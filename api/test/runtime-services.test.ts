@@ -1,13 +1,29 @@
-import { mkdir, realpath, rm, rmdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, realpath, rename, rm, rmdir, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("../src/services/local-runtime-ownership.js", () => ({
+  verifyLocalRuntimeOwnership: vi.fn().mockResolvedValue({ nonce: "composition-test", functions: {} })
+}));
+
 const localKeys = [
   "NXT_LOCAL_STORAGE_MODE", "NXT_LOCAL_FIXTURE_ROOT", "NXT_LOCAL_CHECKOUT_ROOT",
-  "NODE_ENV", "AZURE_FUNCTIONS_ENVIRONMENT", "NXT_LOCAL_AUTH_BYPASS"
+  "NXT_LOCAL_CONTROL_NONCE", "NODE_ENV", "AZURE_FUNCTIONS_ENVIRONMENT", "NXT_LOCAL_AUTH_BYPASS"
 ] as const;
 const googleKeys = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"] as const;
 const original = new Map([...localKeys, ...googleKeys].map((key) => [key, process.env[key]]));
+
+const setLocalEnvironment = (checkout: string, fixtureRoot: string, nonce: string): void => {
+  process.env.NXT_LOCAL_STORAGE_MODE = "filesystem";
+  process.env.NXT_LOCAL_FIXTURE_ROOT = fixtureRoot;
+  process.env.NXT_LOCAL_CHECKOUT_ROOT = checkout;
+  process.env.NXT_LOCAL_CONTROL_NONCE = nonce;
+  process.env.NODE_ENV = "development";
+  process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
+  process.env.NXT_LOCAL_AUTH_BYPASS = "1";
+  for (const key of googleKeys) delete process.env[key];
+};
 
 afterEach(() => {
   for (const [key, value] of original) {
@@ -53,13 +69,7 @@ describe("runtime service composition", () => {
     };
     await fixtures.seedLocalFixtures({ checkoutPath: checkout, fixtureRoot, environment: {} });
     try {
-      process.env.NXT_LOCAL_STORAGE_MODE = "filesystem";
-      process.env.NXT_LOCAL_FIXTURE_ROOT = fixtureRoot;
-      process.env.NXT_LOCAL_CHECKOUT_ROOT = checkout;
-      process.env.NODE_ENV = "development";
-      process.env.AZURE_FUNCTIONS_ENVIRONMENT = "Development";
-      process.env.NXT_LOCAL_AUTH_BYPASS = "1";
-      for (const key of googleKeys) delete process.env[key];
+      setLocalEnvironment(checkout, fixtureRoot, randomUUID());
       const runtime = await import("../src/services/runtime-services.js");
       const task7 = await runtime.resolveTask7Services();
       const task9 = await runtime.resolveTask9Services();
@@ -72,4 +82,27 @@ describe("runtime service composition", () => {
       await rmdir(join(checkout, ".nxt-local")).catch(() => undefined);
     }
   }, 30_000);
+
+  it("rejects a symlinked local fixture descriptor even under a valid owned control", async () => {
+    const checkout = await realpath(join(import.meta.dirname, "..", ".."));
+    const fixtureRoot = join(checkout, ".nxt-local", "fixtures", "playwright");
+    // @ts-expect-error The local fixture controller is intentionally a Node-only module outside the API build.
+    const fixtures = await import("../../scripts/local-fixtures.mjs") as {
+      seedLocalFixtures(input: { checkoutPath: string; fixtureRoot: string; environment: Record<string, string> }): Promise<unknown>;
+    };
+    await fixtures.seedLocalFixtures({ checkoutPath: checkout, fixtureRoot, environment: {} });
+    const descriptor = join(fixtureRoot, ".fixture.json");
+    const target = join(fixtureRoot, ".fixture-target.json");
+    try {
+      setLocalEnvironment(checkout, fixtureRoot, randomUUID());
+      await rename(descriptor, target);
+      await symlink(target, descriptor);
+      const runtime = await import("../src/services/runtime-services.js");
+      await expect(runtime.resolveTask7Services()).rejects.toThrow("Local runtime is not permitted");
+    } finally {
+      await rm(fixtureRoot, { recursive: true, force: true });
+      await rmdir(join(checkout, ".nxt-local", "fixtures")).catch(() => undefined);
+      await rmdir(join(checkout, ".nxt-local")).catch(() => undefined);
+    }
+  });
 });

@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, chmod, lstat, mkdir, open, readFile, realpath, readdir, rm } from "node:fs/promises";
+import { access, chmod, link, lstat, mkdir, open, readFile, realpath, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { createRequire } from "node:module";
 import { delimiter, dirname, join, resolve, sep } from "node:path";
@@ -28,7 +28,7 @@ const driveKeys = [
   "NXT_ASSETS_DRIVE_FOLDER_ID", "NXT_PUBLISHED_DRIVE_FOLDER_ID", "NXT_VAULT_INDEX_DRIVE_FILE_ID",
   "NXT_PREFERENCES_DRIVE_FILE_ID", "NXT_PUBLICATION_MANIFEST_DRIVE_FILE_ID"
 ];
-const localRuntimeKeys = ["NXT_LOCAL_STORAGE_MODE", "NXT_LOCAL_FIXTURE_ROOT", "NXT_LOCAL_CHECKOUT_ROOT"];
+const localRuntimeKeys = ["NXT_LOCAL_STORAGE_MODE", "NXT_LOCAL_FIXTURE_ROOT", "NXT_LOCAL_CHECKOUT_ROOT", "NXT_LOCAL_CONTROL_NONCE"];
 export const FUNCTIONS_HOST_LOCAL_SANDBOX_PROFILE = '(version 1) (allow default) (deny network-inbound (require-all (remote ip "*:*") (require-not (remote ip "localhost:*"))))';
 
 const findExecutable = async (name) => {
@@ -192,6 +192,32 @@ const writeGate = async (path, nonce) => {
   await chmod(path, 0o600);
 };
 
+const writeFunctionsAttestation = async ({ path, localDirectory, checkoutRealpath, fixtureRoot, nonce, service }) => {
+  if (path !== join(localDirectory, "functions.attestation.json") || service.name !== "functions" || service.status !== "ready" ||
+    service.port !== 7071 || service.cwd !== join(checkoutRealpath, "api") || service.logPath !== join(localDirectory, "functions.log")) {
+    throw new Error("Refusing invalid Functions runtime attestation.");
+  }
+  const functions = Object.fromEntries(["pid", "pgid", "startTime", "cwd", "executable", "command", "port", "logPath"]
+    .map((key) => [key, service[key]]));
+  const temporary = join(localDirectory, `.functions-attestation-${process.pid}-${randomUUID()}.tmp`);
+  const text = `${JSON.stringify({ version: 1, checkoutRealpath, fixtureRoot, nonce, functions }, null, 2)}\n`;
+  let handle;
+  try {
+    handle = await open(temporary, "wx", 0o600);
+    await handle.writeFile(text, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await link(temporary, path);
+    await chmod(path, 0o600);
+  } catch (error) {
+    throw new Error("Functions runtime attestation could not be committed atomically.", { cause: error });
+  } finally {
+    await handle?.close();
+    await rm(temporary, { force: true });
+  }
+};
+
 const waitForSupervisorRegistration = async (child, gate, timeoutMs = 10_000) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -242,6 +268,7 @@ export const startLocalStack = async ({ checkout = checkoutPath, localFixtures =
   const services = [];
   const baseEnvironment = sanitizedBaseEnvironment();
   const fixtureRoot = localFixtures ? join(localDirectory, "fixtures", "playwright") : undefined;
+  const runtimeAttestationPath = fixtureRoot === undefined ? undefined : join(localDirectory, "functions.attestation.json");
   let interrupted = false;
   let record = {
     version: CONTROL_VERSION,
@@ -251,7 +278,7 @@ export const startLocalStack = async ({ checkout = checkoutPath, localFixtures =
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     coordinator: lease.record.owner,
-    ...(fixtureRoot === undefined ? {} : { fixtureRoot }),
+    ...(fixtureRoot === undefined ? {} : { fixtureRoot, runtimeAttestationPath }),
     services
   };
   const persist = async (state = "starting") => {
@@ -356,11 +383,19 @@ export const startLocalStack = async ({ checkout = checkoutPath, localFixtures =
         ...(fixtureRoot === undefined ? {} : {
           NXT_LOCAL_STORAGE_MODE: "filesystem",
           NXT_LOCAL_FIXTURE_ROOT: fixtureRoot,
-          NXT_LOCAL_CHECKOUT_ROOT: checkoutRealpath
+          NXT_LOCAL_CHECKOUT_ROOT: checkoutRealpath,
+          NXT_LOCAL_CONTROL_NONCE: nonce
         })
       },
       port: 7071
     });
+    if (fixtureRoot !== undefined && runtimeAttestationPath !== undefined) {
+      const functions = services.find(({ name }) => name === "functions");
+      if (functions === undefined) throw new Error("Functions identity is unavailable for runtime attestation.");
+      await writeFunctionsAttestation({
+        path: runtimeAttestationPath, localDirectory, checkoutRealpath, fixtureRoot, nonce, service: functions
+      });
+    }
     await addService({
       name: "swa", executable: process.execPath,
       args: [swaBin, "start", "http://127.0.0.1:5173", "--api-devserver-url", "http://127.0.0.1:7071", "--swa-config-location", join(checkoutRealpath, "web", "public"), "--host", "127.0.0.1", "--port", "4280"],

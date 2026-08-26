@@ -37,7 +37,9 @@ test("toolchain and Codex actions pin the secure local lifecycle", async () => {
   assert.equal(pkg.devDependencies["@azure/static-web-apps-cli"], "2.0.10");
   assert.equal(pkg.devDependencies.esbuild, "0.28.2");
   assert.match(pkg.scripts["validate:codex"], /local-lifecycle\.integration\.test\.mjs/u);
-  assert.doesNotMatch(pkg.scripts["validate:codex"], /\be2e\b/u);
+  assert.match(pkg.scripts["validate:codex"], /local-fixtures\.test\.mjs/u);
+  assert.match(pkg.scripts["validate:codex"], /e2e-runner\.integration\.test\.mjs/u);
+  assert.doesNotMatch(pkg.scripts["validate:codex"], /(?:^|\s)pnpm e2e(?:\s|$)/u);
 
   const workspace = await readFile("pnpm-workspace.yaml", "utf8");
   assert.match(workspace, /allowBuilds:\n {2}esbuild: true\n {2}keytar: false/u);

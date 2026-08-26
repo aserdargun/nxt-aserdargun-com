@@ -1,4 +1,5 @@
-import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 
 import { deriveIndex, parseNote, serializeNote } from "../packages/domain/dist/index.js";
@@ -56,6 +57,45 @@ const seedSource = serializeNote({
 });
 
 const stableJson = (value) => `${JSON.stringify(value, null, 2)}\n`;
+const QUIESCENCE_POLL_MS = 10;
+const QUIESCENCE_TIMEOUT_MS = 2_000;
+
+const delay = (milliseconds) => new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+
+const fixtureMutationIsActive = async (fixtureRoot) => {
+  try {
+    const metadata = await lstat(join(fixtureRoot, ".mutation.lock"));
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new Error("Refusing unsafe local fixture mutation lock.");
+    }
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+};
+
+const waitForFixtureQuiescence = async (fixtureRoot) => {
+  const deadline = Date.now() + QUIESCENCE_TIMEOUT_MS;
+  let consecutiveClearChecks = 0;
+  while (Date.now() <= deadline) {
+    if (await fixtureMutationIsActive(fixtureRoot)) consecutiveClearChecks = 0;
+    else consecutiveClearChecks += 1;
+    if (consecutiveClearChecks === 2) return;
+    await delay(QUIESCENCE_POLL_MS);
+  }
+  throw new Error("Refusing to reset a busy local fixture root.");
+};
+
+const assertSafeFixtureTree = async (directory) => {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    const metadata = await lstat(path);
+    if (metadata.isSymbolicLink()) throw new Error("Refusing unsafe local fixture artifact.");
+    if (metadata.isDirectory()) await assertSafeFixtureTree(path);
+    else if (!metadata.isFile()) throw new Error("Refusing unsafe local fixture artifact.");
+  }
+};
 
 export const seedLocalFixtures = async ({ checkoutPath, fixtureRoot, environment = process.env }) => {
   assertNoLiveDrive(environment);
@@ -135,5 +175,34 @@ export const corruptLocalFixtureManifest = async ({ checkoutPath, fixtureRoot })
 export const removeLocalFixtures = async ({ checkoutPath, fixtureRoot }) => {
   const safe = await assertFixturePath(checkoutPath, fixtureRoot, { requireExisting: true });
   await readDescriptor(checkoutPath, safe.fixtureRoot);
-  await rm(safe.fixtureRoot, { recursive: true });
+  await assertSafeFixtureTree(safe.fixtureRoot);
+  await rm(safe.fixtureRoot, { recursive: true, maxRetries: 3, retryDelay: 10 });
+};
+
+export const resetLocalFixtures = async ({ checkoutPath, fixtureRoot, environment = process.env }) => {
+  assertNoLiveDrive(environment);
+  const safe = await assertFixturePath(checkoutPath, fixtureRoot, { requireExisting: true });
+  await readDescriptor(checkoutPath, safe.fixtureRoot);
+  await waitForFixtureQuiescence(safe.fixtureRoot);
+  await assertSafeFixtureTree(safe.fixtureRoot);
+  const quarantine = join(dirname(safe.fixtureRoot), `.playwright-reset-${randomUUID()}`);
+  await rename(safe.fixtureRoot, quarantine);
+  try {
+    const seeded = await seedLocalFixtures({ checkoutPath: safe.checkout, fixtureRoot: safe.fixtureRoot, environment });
+    await assertSafeFixtureTree(quarantine);
+    await rm(quarantine, { recursive: true, maxRetries: 3, retryDelay: 10 });
+    return seeded;
+  } catch (error) {
+    const current = await lstat(safe.fixtureRoot).catch((candidateError) => {
+      if (candidateError?.code === "ENOENT") return undefined;
+      throw candidateError;
+    });
+    if (current !== undefined) {
+      if (!current.isDirectory() || current.isSymbolicLink()) throw error;
+      await assertSafeFixtureTree(safe.fixtureRoot);
+      await rm(safe.fixtureRoot, { recursive: true, maxRetries: 3, retryDelay: 10 });
+    }
+    await rename(quarantine, safe.fixtureRoot);
+    throw error;
+  }
 };

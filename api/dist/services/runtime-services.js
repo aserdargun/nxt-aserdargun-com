@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { PreferencesSchema, PublicationManifestSchema, VaultIndexSchema } from "@nxt/contracts";
 import { createGoogleDriveClient } from "../storage/google-drive-client.js";
@@ -13,6 +14,7 @@ import { AttachmentService } from "./attachment-service.js";
 import { SystemFileStore } from "./system-file-store.js";
 import { VaultService } from "./vault-service.js";
 import { PublicationService, PublicPublicationReader } from "./publication-service.js";
+import { verifyLocalRuntimeOwnership } from "./local-runtime-ownership.js";
 const GOOGLE_KEYS = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"];
 let compositionPromise;
 export const resolveTask7Services = () => {
@@ -64,10 +66,27 @@ const createLocalComposition = async () => {
     if (!metadata.isDirectory() || metadata.isSymbolicLink() || await realpath(fixtureRoot) !== fixtureRoot) {
         throw new Error("Local runtime is not permitted.");
     }
-    const descriptor = JSON.parse(await readFile(join(fixtureRoot, ".fixture.json"), "utf8"));
+    const controlNonce = requiredLocal("NXT_LOCAL_CONTROL_NONCE");
+    await verifyLocalRuntimeOwnership({ checkoutPath: checkout, fixtureRoot, nonce: controlNonce });
+    const descriptorPath = join(fixtureRoot, ".fixture.json");
+    let descriptorHandle;
+    let descriptor;
+    try {
+        descriptorHandle = await open(descriptorPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        if (!(await descriptorHandle.stat()).isFile())
+            throw new Error("Local runtime is not permitted.");
+        descriptor = JSON.parse(await descriptorHandle.readFile("utf8"));
+    }
+    catch {
+        throw new Error("Local runtime is not permitted.");
+    }
+    finally {
+        await descriptorHandle?.close();
+    }
     const ids = parseLocalDescriptor(descriptor, fixtureRoot);
     const raw = await LocalDriveAdapter.create(fixtureRoot);
-    const tokenSecret = createHash("sha256").update("nxt:local-runtime-service-tokens:v1\0").update(checkout).update("\0").update(fixtureRoot).digest("hex");
+    const tokenSecret = createHash("sha256").update("nxt:local-runtime-service-tokens:v1\0").update(checkout).update("\0")
+        .update(fixtureRoot).update("\0").update(controlNonce).digest("hex");
     return compose(new RootBoundaryStorage(raw, "vault"), new RootBoundaryStorage(raw, "private"), "private", ids, tokenSecret, [tokenSecret, tokenSecret]);
 };
 const compose = (vaultStorage, privateStorage, privateRootId, ids, tokenSecret, opaqueSecrets) => {

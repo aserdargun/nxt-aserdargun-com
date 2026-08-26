@@ -11,7 +11,7 @@ const driveKeys = [
   "NXT_NOTES_DRIVE_FOLDER_ID", "NXT_INBOX_DRIVE_FOLDER_ID", "NXT_PLANS_DRIVE_FOLDER_ID", "NXT_ARCHIVE_DRIVE_FOLDER_ID",
   "NXT_ASSETS_DRIVE_FOLDER_ID", "NXT_PUBLISHED_DRIVE_FOLDER_ID", "NXT_VAULT_INDEX_DRIVE_FILE_ID",
   "NXT_PREFERENCES_DRIVE_FILE_ID", "NXT_PUBLICATION_MANIFEST_DRIVE_FILE_ID", "NXT_LOCAL_STORAGE_MODE",
-  "NXT_LOCAL_FIXTURE_ROOT", "NXT_LOCAL_CHECKOUT_ROOT", "NXT_LOCAL_AUTH_BYPASS"
+  "NXT_LOCAL_FIXTURE_ROOT", "NXT_LOCAL_CHECKOUT_ROOT", "NXT_LOCAL_CONTROL_NONCE", "NXT_LOCAL_AUTH_BYPASS"
 ];
 const environment = { ...process.env };
 for (const key of driveKeys) delete environment[key];
@@ -28,16 +28,33 @@ const assertTeardown = async () => {
 };
 
 let interrupted = false;
-const interrupt = () => { interrupted = true; };
+let activeController;
+const interrupt = () => {
+  interrupted = true;
+  activeController?.abort();
+};
 process.once("SIGINT", interrupt);
 process.once("SIGTERM", interrupt);
 
+const runActive = async (file, args, options) => {
+  const controller = new AbortController();
+  activeController = controller;
+  if (interrupted) controller.abort();
+  try {
+    return await run(file, args, { ...options, signal: controller.signal });
+  } finally {
+    if (activeController === controller) activeController = undefined;
+  }
+};
+
 let testError;
 try {
-  await run("pnpm", ["dev:codex", "--", "--e2e"], { cwd: checkout, env: environment, maxBuffer: 32 * 1024 * 1024 });
+  await runActive("pnpm", ["dev:codex", "--", "--e2e"], { cwd: checkout, env: environment, maxBuffer: 32 * 1024 * 1024 });
   if (interrupted) throw new Error("E2E run was interrupted before Chromium started.");
-  const args = ["exec", "playwright", "test", ...process.argv.slice(2)];
-  const result = await run("pnpm", args, { cwd: checkout, env: environment, maxBuffer: 64 * 1024 * 1024 });
+  const forwarded = process.argv.slice(2);
+  if (forwarded[0] === "--") forwarded.shift();
+  const args = ["exec", "playwright", "test", ...forwarded];
+  const result = await runActive("pnpm", args, { cwd: checkout, env: environment, maxBuffer: 64 * 1024 * 1024 });
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
   if (interrupted) throw new Error("E2E run was interrupted during Chromium acceptance.");
@@ -47,7 +64,9 @@ try {
   if (typeof error?.stderr === "string") process.stderr.write(error.stderr);
 } finally {
   try {
-    const stopped = await run("pnpm", ["stop:codex"], { cwd: checkout, env: environment, maxBuffer: 8 * 1024 * 1024 });
+    const stopped = await run("pnpm", ["stop:codex"], {
+      cwd: checkout, env: environment, maxBuffer: 8 * 1024 * 1024, timeout: 60_000
+    });
     process.stdout.write(stopped.stdout);
     process.stderr.write(stopped.stderr);
     await assertTeardown();
