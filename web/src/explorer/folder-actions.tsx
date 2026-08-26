@@ -61,6 +61,10 @@ export const FolderActions = ({
 
   useEffect(() => {
     setConfirmationStale(false);
+    setError(null);
+  }, [confirmation?.confirmationToken, confirmation?.expiresAt]);
+
+  useEffect(() => {
     if (confirmation === null) return;
     const delay = Date.parse(confirmation.expiresAt) - now().getTime();
     if (!Number.isFinite(delay) || delay <= 0) {

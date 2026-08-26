@@ -238,4 +238,66 @@ describe("accessible file tree", () => {
       vi.useRealTimers();
     }
   });
+
+  it("clears stale Trash feedback when a fresh confirmation arrives and submits its token", async () => {
+    const user = userEvent.setup();
+    const now = (): Date => new Date("2026-08-25T12:04:00.000Z");
+    const onTrashFolder = vi.fn()
+      .mockRejectedValueOnce(new Error("stale confirmation"))
+      .mockResolvedValueOnce(undefined);
+    const { rerender } = render(<FileTree
+      tree={treeFixture}
+      selectedId={noteFixture.id}
+      onTrashFolder={onTrashFolder}
+      now={now}
+    />);
+
+    await user.click(screen.getByRole("button", { name: "Plans actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Move to Trash" }));
+    const dialog = screen.getByRole("dialog", { name: "Move Plans to Trash" });
+    await user.click(within(dialog).getByRole("button", { name: "Move to Trash" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("confirmation is stale");
+
+    rerender(<FileTree
+      tree={[{ ...notesFixture, children: [plansFixture] }]}
+      selectedId={noteFixture.id}
+      onTrashFolder={onTrashFolder}
+      now={now}
+    />);
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("confirmation is stale");
+
+    const refreshedToken = `c1.${"d".repeat(120)}.${"e".repeat(43)}`;
+    const refreshedTree: readonly ExplorerNode[] = [{
+      ...notesFixture,
+      children: [{
+        ...plansFixture,
+        deleteConfirmation: {
+          ...plansFixture.deleteConfirmation!,
+          expiresAt: "2026-08-25T12:10:00.000Z",
+          confirmationToken: refreshedToken
+        }
+      }]
+    }];
+    rerender(<FileTree
+      tree={refreshedTree}
+      selectedId={noteFixture.id}
+      onTrashFolder={onTrashFolder}
+      now={now}
+    />);
+
+    await waitFor(() => {
+      expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+      expect(within(dialog).getByRole("button", { name: "Move to Trash" })).toBeEnabled();
+    });
+    await user.click(within(dialog).getByRole("button", { name: "Move to Trash" }));
+
+    await waitFor(() => expect(onTrashFolder).toHaveBeenCalledTimes(2));
+    expect(onTrashFolder).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: "plans" }),
+      {
+        expectedTreeVersion: "a".repeat(64),
+        confirmationToken: refreshedToken
+      }
+    );
+  });
 });
