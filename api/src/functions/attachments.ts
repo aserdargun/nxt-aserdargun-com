@@ -40,7 +40,8 @@ export const createAttachmentHandlers = (dependencies: PrivateHandlerDependencie
       dependencies.authorize(request);
       assertNoQuery(request);
       const body = await parseUploadBody(request);
-      const uploaded = await dependencies.resolveServices().attachments.upload(body);
+      const services = await Promise.resolve(dependencies.resolveServices());
+      const uploaded = await services.attachments.upload(body);
       return typedJson({
         asset: {
           assetId: dependencies.idCodec.encode(uploaded.driveId),

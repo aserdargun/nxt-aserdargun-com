@@ -1,14 +1,15 @@
 import { PublicIdSchema, PublicNoteResponseSchema } from "@nxt/contracts";
 import { resolveTask9Services } from "../services/runtime-services.js";
 import { hasNoQuery, newPublicRequestId, publicHeaders, publicNotFound } from "./public-http.js";
-const defaults = () => ({ resolveReader: () => resolveTask9Services().reader });
+const defaults = () => ({ resolveReader: async () => (await resolveTask9Services()).reader });
 export const createPublicNoteHandler = (dependencies = defaults()) => async (request) => {
     const requestId = newPublicRequestId();
     try {
         if (!hasNoQuery(request.url))
             return publicNotFound(requestId);
         const publicId = PublicIdSchema.parse(request.params.publicId);
-        const note = await dependencies.resolveReader().getNote(publicId);
+        const reader = await Promise.resolve(dependencies.resolveReader());
+        const note = await reader.getNote(publicId);
         if (note === null)
             return publicNotFound(requestId);
         const parsed = PublicNoteResponseSchema.parse(note);

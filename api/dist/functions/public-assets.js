@@ -2,7 +2,7 @@ import { PublicIdSchema } from "@nxt/contracts";
 import { rfc5987AttachmentFilename } from "../services/attachment-policy.js";
 import { resolveTask9Services } from "../services/runtime-services.js";
 import { hasNoQuery, newPublicRequestId, publicHeaders, publicNotFound } from "./public-http.js";
-const defaults = () => ({ resolveReader: () => resolveTask9Services().reader });
+const defaults = () => ({ resolveReader: async () => (await resolveTask9Services()).reader });
 export const createPublicAssetHandler = (dependencies = defaults()) => async (request) => {
     const requestId = newPublicRequestId();
     try {
@@ -10,7 +10,8 @@ export const createPublicAssetHandler = (dependencies = defaults()) => async (re
             return publicNotFound(requestId);
         const publicId = PublicIdSchema.parse(request.params.publicId);
         const assetId = PublicIdSchema.parse(request.params.assetId);
-        const delivery = await dependencies.resolveReader().getAsset(publicId, assetId);
+        const reader = await Promise.resolve(dependencies.resolveReader());
+        const delivery = await reader.getAsset(publicId, assetId);
         const headers = publicHeaders(requestId, delivery.mimeType);
         if (delivery.disposition === "download")
             headers["content-disposition"] = `attachment; filename*=UTF-8''${rfc5987AttachmentFilename(delivery.name)}`;

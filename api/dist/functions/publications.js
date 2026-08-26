@@ -5,7 +5,7 @@ import { ownerFromRequest } from "./session.js";
 import { assertNoQuery, parseBody, pathValue } from "./private-api.js";
 const defaults = () => ({
     authorize: ownerFromRequest,
-    resolveServices: () => ({ publications: resolveTask9Services().publications })
+    resolveServices: async () => ({ publications: (await resolveTask9Services()).publications })
 });
 export const createPublicationHandlers = (dependencies = defaults()) => ({
     publish: async (request) => {
@@ -14,7 +14,8 @@ export const createPublicationHandlers = (dependencies = defaults()) => ({
             assertNoQuery(request);
             const noteId = pathValue(request, "noteId", NoteIdSchema);
             const body = await parseBody(request, PublishNoteRequestSchema);
-            const result = await dependencies.resolveServices().publications.publish({ noteId, expectedVersion: body.expectedVersion });
+            const services = await Promise.resolve(dependencies.resolveServices());
+            const result = await services.publications.publish({ noteId, expectedVersion: body.expectedVersion });
             return typedJson({ publicId: result.publicId, publishedAt: result.publishedAt }, PublicationResponseSchema);
         }
         catch (error) {
@@ -26,7 +27,8 @@ export const createPublicationHandlers = (dependencies = defaults()) => ({
             dependencies.authorize(request);
             assertNoQuery(request);
             const noteId = pathValue(request, "noteId", NoteIdSchema);
-            const status = await dependencies.resolveServices().publications.getStatus(noteId);
+            const services = await Promise.resolve(dependencies.resolveServices());
+            const status = await services.publications.getStatus(noteId);
             return typedJson(status === null ? null : {
                 publicId: status.publicId,
                 publishedAt: status.publishedAt,
@@ -43,7 +45,8 @@ export const createPublicationHandlers = (dependencies = defaults()) => ({
             dependencies.authorize(request);
             assertNoQuery(request);
             const publicId = pathValue(request, "publicId", PublicIdSchema);
-            return typedJson(await dependencies.resolveServices().publications.revoke({ publicId }), RevokePublicationResponseSchema);
+            const services = await Promise.resolve(dependencies.resolveServices());
+            return typedJson(await services.publications.revoke({ publicId }), RevokePublicationResponseSchema);
         }
         catch (error) {
             return errorResponse(error);

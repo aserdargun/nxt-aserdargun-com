@@ -5,7 +5,9 @@ export interface PublicationHandlerDependencies {
     authorize(request: HttpRequest): OwnerIdentity;
     resolveServices(): {
         publications: Pick<PublicationService, "publish" | "getStatus" | "revoke">;
-    };
+    } | Promise<{
+        publications: Pick<PublicationService, "publish" | "getStatus" | "revoke">;
+    }>;
 }
 export declare const createPublicationHandlers: (dependencies?: PublicationHandlerDependencies) => {
     publish: (request: HttpRequest) => Promise<HttpResponseInit>;

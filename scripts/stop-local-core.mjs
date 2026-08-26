@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -132,6 +132,9 @@ const parseControlRecord = (text, checkout, localDirectory) => {
     if (typeof record.updatedAt !== "string" || Number.isNaN(Date.parse(record.updatedAt))) throw refuse("invalid control update time");
     validateIdentitySchema(record.coordinator, checkout, "startup coordinator");
   }
+  if (record.fixtureRoot !== undefined && record.fixtureRoot !== join(localDirectory, "fixtures", "playwright")) {
+    throw refuse("foreign local fixture root");
+  }
   for (const service of record.services) validateServiceSchema(service, record.nonce, checkout, localDirectory);
   if (state === "ready" && record.services.some((service) => (service.status ?? "ready") !== "ready")) {
     throw refuse("incomplete ready control record");
@@ -146,6 +149,30 @@ const parseControlRecord = (text, checkout, localDirectory) => {
     new Set(record.services.map(({ port }) => port)).size !== record.services.length ||
     new Set(identities.map(({ pid }) => pid)).size !== identities.length) throw refuse("duplicate service identity");
   return { ...record, state };
+};
+
+const removeOwnedFixtureRoot = async (record, localDirectory) => {
+  if (record.fixtureRoot === undefined) return;
+  const fixtureRoot = join(localDirectory, "fixtures", "playwright");
+  if (record.fixtureRoot !== fixtureRoot) throw refuse("foreign local fixture root");
+  let rootMetadata;
+  try { rootMetadata = await lstat(fixtureRoot); }
+  catch (error) { if (error?.code === "ENOENT") return; throw error; }
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink() || await realpath(fixtureRoot) !== fixtureRoot) {
+    throw refuse("unsafe local fixture root");
+  }
+  const verifyTree = async (directory) => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      const metadata = await lstat(path);
+      if (metadata.isSymbolicLink()) throw refuse("unsafe local fixture artifact");
+      if (metadata.isDirectory()) await verifyTree(path);
+      else if (!metadata.isFile()) throw refuse("unsafe local fixture artifact");
+    }
+  };
+  await verifyTree(fixtureRoot);
+  await rm(fixtureRoot, { recursive: true });
+  await rmdir(join(localDirectory, "fixtures")).catch((error) => { if (error?.code !== "ENOTEMPTY" && error?.code !== "ENOENT") throw error; });
 };
 
 const parseLeaseRecord = (text, checkout) => {
@@ -661,6 +688,7 @@ export const stopControlledStack = async ({
     }
     await rm(service.logPath, { force: true });
   }
+  await removeOwnedFixtureRoot(record, localDirectory);
   await beforeStopClaimRelease?.(stopClaim.record);
   await releaseOwnedStopClaim(stopClaim, inspect);
   claimReleased = true;

@@ -16,7 +16,7 @@ export interface IdCodec {
 }
 export interface PrivateHandlerDependencies {
     authorize(request: HttpRequest): OwnerIdentity;
-    resolveServices(): Task7Services;
+    resolveServices(): Task7Services | Promise<Task7Services>;
     idCodec: IdCodec;
 }
 export declare const defaultPrivateHandlerDependencies: () => PrivateHandlerDependencies;

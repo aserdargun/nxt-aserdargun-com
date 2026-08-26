@@ -188,6 +188,21 @@ describe("requireOwner", () => {
     }
   );
 
+  it("does not replace a supplied wrong-owner principal with the local bypass identity", () => {
+    expectAuthFailure(
+      () =>
+        requireOwner({
+          header: encode({ ...ownerPrincipal, userDetails: "not-aserdargun" }),
+          host: "127.0.0.1:4280",
+          environment: "development",
+          allowedUser: "aserdargun",
+          localBypass: true
+        }),
+      403,
+      "FORBIDDEN"
+    );
+  });
+
   it.each([
     "localhost.example",
     "localhost.",
@@ -376,6 +391,25 @@ describe("private session handler", () => {
 
     const response = await sessionHandler(request);
     expect(response.status).toBe(401);
+  });
+
+  it("rejects a supplied wrong-owner principal even when the local bypass is enabled", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("NXT_ALLOWED_GITHUB_USER", "aserdargun");
+    vi.stubEnv("NXT_LOCAL_AUTH_BYPASS", "1");
+    const request = new HttpRequest({
+      method: "GET",
+      url: "http://127.0.0.1:4280/api/private/session",
+      headers: {
+        host: "127.0.0.1:4280",
+        "x-ms-client-principal": encode({ ...ownerPrincipal, userDetails: "not-aserdargun" })
+      }
+    });
+
+    const response = await sessionHandler(request);
+
+    expect(response.status).toBe(403);
+    expect(response.jsonBody).toMatchObject({ error: { code: "FORBIDDEN" } });
   });
 
   it.each([

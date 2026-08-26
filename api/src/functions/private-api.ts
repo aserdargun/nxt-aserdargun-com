@@ -26,15 +26,16 @@ export interface IdCodec {
 
 export interface PrivateHandlerDependencies {
   authorize(request: HttpRequest): OwnerIdentity;
-  resolveServices(): Task7Services;
+  resolveServices(): Task7Services | Promise<Task7Services>;
   idCodec: IdCodec;
 }
 
 export const defaultPrivateHandlerDependencies = (): PrivateHandlerDependencies => ({
   authorize: ownerFromRequest,
-  resolveServices: () => {
+  resolveServices: async () => {
+    const services = await resolveTask7Services();
     runtimeIdCodec();
-    return resolveTask7Services();
+    return services;
   },
   idCodec: {
     encode: (value) => runtimeIdCodec().encode(value),
@@ -87,7 +88,7 @@ export const handlePrivate = async (
 ): Promise<HttpResponseInit> => {
   try {
     dependencies.authorize(request);
-    return await action(dependencies.resolveServices());
+    return await action(await Promise.resolve(dependencies.resolveServices()));
   } catch (error) {
     return errorResponse(error);
   }
@@ -132,7 +133,17 @@ export const pathValue = (request: HttpRequest, key: string, schema: { parse(val
 let cachedCodec: OpaqueIdCodec | undefined;
 const runtimeIdCodec = (): OpaqueIdCodec => {
   if (cachedCodec !== undefined) return cachedCodec;
-  cachedCodec = createRuntimeOpaqueIdCodec(process.env.GOOGLE_CLIENT_SECRET, process.env.GOOGLE_REFRESH_TOKEN);
+  if (process.env.NXT_LOCAL_STORAGE_MODE === "filesystem") {
+    const localSecret = createHash("sha256")
+      .update("nxt:local-opaque-id:v1\0")
+      .update(process.env.NXT_LOCAL_CHECKOUT_ROOT ?? "")
+      .update("\0")
+      .update(process.env.NXT_LOCAL_FIXTURE_ROOT ?? "")
+      .digest("hex");
+    cachedCodec = createRuntimeOpaqueIdCodec(localSecret, localSecret);
+  } else {
+    cachedCodec = createRuntimeOpaqueIdCodec(process.env.GOOGLE_CLIENT_SECRET, process.env.GOOGLE_REFRESH_TOKEN);
+  }
   return cachedCodec;
 };
 

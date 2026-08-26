@@ -16,7 +16,7 @@ export interface RequireOwnerInput {
 }
 
 export const requireOwner = (input: RequireOwnerInput): OwnerIdentity => {
-  if (input.localBypass === true && isLocalEnvironment(input.environment) && isLoopbackHost(input.host)) {
+  if (input.header === null && input.localBypass === true && isLocalEnvironment(input.environment) && isLoopbackHost(input.host)) {
     return {
       provider: "github",
       userId: "local-bypass",

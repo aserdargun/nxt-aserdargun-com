@@ -112,6 +112,24 @@ describe("accessible file tree", () => {
     expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Rename" }));
   });
 
+  it("keeps folder actions outside the owned tree semantics and restores treeitem focus", async () => {
+    const user = userEvent.setup();
+    const onRename = vi.fn();
+    render(<FileTree tree={treeFixture} selectedId={noteFixture.id} onRenameFolder={onRename} />);
+
+    const tree = screen.getByRole("tree", { name: "Files" });
+    const plans = within(tree).getByRole("treeitem", { name: "Plans" });
+    const actions = screen.getByRole("button", { name: "Plans actions" });
+    expect(tree).not.toContainElement(actions);
+
+    plans.focus();
+    await user.keyboard("{Shift>}{F10}{/Shift}");
+    await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+
+    expect(onRename).toHaveBeenCalledWith(expect.objectContaining({ id: "plans" }));
+    await waitFor(() => expect(document.activeElement).toBe(plans));
+  });
+
   it("does not move to a sibling when ArrowRight is pressed on an expanded empty folder", async () => {
     const user = userEvent.setup();
     const emptyTree: readonly ExplorerNode[] = [

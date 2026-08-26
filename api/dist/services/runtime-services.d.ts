@@ -4,6 +4,6 @@ export interface Task9Services {
     publications: PublicationService;
     reader: PublicPublicationReader;
 }
-export declare const resolveTask7Services: () => Task7Services;
-export declare const resolveTask9Services: () => Task9Services;
+export declare const resolveTask7Services: () => Promise<Task7Services>;
+export declare const resolveTask9Services: () => Promise<Task9Services>;
 //# sourceMappingURL=runtime-services.d.ts.map

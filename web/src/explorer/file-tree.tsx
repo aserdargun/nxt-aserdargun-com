@@ -210,29 +210,31 @@ export const FileTree = ({
   };
 
   return (
-    <div
-      ref={root}
-      className="file-tree"
-      role="tree"
-      aria-label="Files"
-      onFocusCapture={() => { treeOwnedFocus.current = true; }}
-      onBlurCapture={() => {
-        queueMicrotask(() => {
-          if (root.current?.contains(document.activeElement) !== true) treeOwnedFocus.current = false;
-        });
-      }}
-    >
-      {visible.map(({ node, level, parentId }, index) => {
-        const isFolder = node.kind === "folder";
-        const isExpanded = isFolder && expanded.has(node.id);
-        return (
-          <div className="tree-node-row" style={{ "--tree-level": level } as React.CSSProperties} key={node.id}>
+    <div className="file-tree-layout">
+      <div
+        ref={root}
+        className="file-tree"
+        role="tree"
+        aria-label="Files"
+        onFocusCapture={() => { treeOwnedFocus.current = true; }}
+        onBlurCapture={() => {
+          queueMicrotask(() => {
+            if (root.current?.contains(document.activeElement) !== true) treeOwnedFocus.current = false;
+          });
+        }}
+      >
+        {visible.map(({ node, level, parentId }, index) => {
+          const isFolder = node.kind === "folder";
+          const isExpanded = isFolder && expanded.has(node.id);
+          return (
             <button
+              key={node.id}
               ref={(element) => {
                 if (element === null) itemRefs.current.delete(node.id);
                 else itemRefs.current.set(node.id, element);
               }}
               className={`tree-row touch-target${activeSelectedId === node.id ? " selected" : ""}`}
+              style={{ "--tree-level": level } as React.CSSProperties}
               type="button"
               role="treeitem"
               aria-level={level}
@@ -272,6 +274,12 @@ export const FileTree = ({
               {isFolder ? <Folder size={18} strokeWidth={1.75} aria-hidden /> : <File size={18} strokeWidth={1.75} aria-hidden />}
               <span>{node.name}</span>
             </button>
+          );
+        })}
+      </div>
+      <div className="file-tree-actions">
+        {visible.map(({ node }) => (
+          <div className="tree-action-row" key={node.id}>
             {node.kind === "folder" ? (
               <FolderActions
                 folder={node}
@@ -281,12 +289,15 @@ export const FileTree = ({
                 onTrash={onTrashFolder}
                 now={now}
                 menuOpen={menuFolderId === node.id}
-                onMenuOpenChange={(open) => setMenuFolderId(open ? node.id : null)}
+                onMenuOpenChange={(open) => {
+                  setMenuFolderId(open ? node.id : null);
+                  if (!open) queueMicrotask(() => itemRefs.current.get(node.id)?.focus());
+                }}
               />
             ) : null}
           </div>
-        );
-      })}
+        ))}
+      </div>
     </div>
   );
 };

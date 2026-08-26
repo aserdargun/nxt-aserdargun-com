@@ -1,7 +1,7 @@
 import { decodeClientPrincipal } from "./client-principal.js";
 import { ApiResponseError } from "../http/api-response.js";
 export const requireOwner = (input) => {
-    if (input.localBypass === true && isLocalEnvironment(input.environment) && isLoopbackHost(input.host)) {
+    if (input.header === null && input.localBypass === true && isLocalEnvironment(input.environment) && isLoopbackHost(input.host)) {
         return {
             provider: "github",
             userId: "local-bypass",

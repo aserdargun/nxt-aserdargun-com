@@ -637,21 +637,35 @@ textarea:focus-visible,
   font-size: 12px;
 }
 
+.file-tree-layout {
+  position: relative;
+  min-width: 0;
+}
+
 .file-tree {
   min-width: 0;
 }
 
-.tree-node-row {
-  position: relative;
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  padding-left: calc((var(--tree-level) - 1) * 18px);
+.file-tree > .tree-row {
+  padding-right: 54px;
+  padding-left: calc((var(--tree-level) - 1) * 18px + 10px);
 }
 
-.tree-node-row > .tree-row {
-  flex: 1 1 auto;
-  min-width: 0;
+.file-tree-actions {
+  position: absolute;
+  inset: 0 0 auto 0;
+  pointer-events: none;
+}
+
+.tree-action-row {
+  display: flex;
+  justify-content: flex-end;
+  min-height: 44px;
+  pointer-events: none;
+}
+
+.tree-action-row .folder-actions {
+  pointer-events: auto;
 }
 
 .tree-disclosure-spacer {

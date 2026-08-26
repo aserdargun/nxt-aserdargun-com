@@ -12,7 +12,7 @@
     "lint": "eslint .",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "e2e": "playwright test",
+    "e2e": "node scripts/run-e2e.mjs",
     "project:test": "node --test tools/project-contract.test.mjs",
     "api:build": "node scripts/build-api.mjs",
     "web:build": "pnpm --filter @nxt/web build",
@@ -22,6 +22,8 @@
     "validate:codex": "pnpm lint && pnpm typecheck && pnpm api:build && pnpm web:build && pnpm artifact:verify && pnpm test && pnpm project:test && node --test --test-concurrency=1 tools/static-security.test.mjs tools/artifact-contract.test.mjs tools/local-lifecycle.integration.test.mjs && git diff --check"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@playwright/test": "1.62.1",
     "@azure/static-web-apps-cli": "2.0.10",
     "@eslint/js": "10.0.1",
     "@types/node": "26.2.0",

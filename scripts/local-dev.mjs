@@ -16,6 +16,7 @@ import {
   stopControlledStack,
   writeOwnedControlRecord
 } from "./stop-local-core.mjs";
+import { seedLocalFixtures } from "./local-fixtures.mjs";
 
 const run = promisify(execFile);
 const checkoutPath = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -27,6 +28,7 @@ const driveKeys = [
   "NXT_ASSETS_DRIVE_FOLDER_ID", "NXT_PUBLISHED_DRIVE_FOLDER_ID", "NXT_VAULT_INDEX_DRIVE_FILE_ID",
   "NXT_PREFERENCES_DRIVE_FILE_ID", "NXT_PUBLICATION_MANIFEST_DRIVE_FILE_ID"
 ];
+const localRuntimeKeys = ["NXT_LOCAL_STORAGE_MODE", "NXT_LOCAL_FIXTURE_ROOT", "NXT_LOCAL_CHECKOUT_ROOT"];
 export const FUNCTIONS_HOST_LOCAL_SANDBOX_PROFILE = '(version 1) (allow default) (deny network-inbound (require-all (remote ip "*:*") (require-not (remote ip "localhost:*"))))';
 
 const findExecutable = async (name) => {
@@ -221,10 +223,11 @@ const sameProcessInstance = (left, right) => left.pid === right.pid && left.pgid
 const sanitizedBaseEnvironment = () => {
   const environment = { ...process.env };
   delete environment.NXT_LOCAL_AUTH_BYPASS;
+  for (const key of localRuntimeKeys) delete environment[key];
   return environment;
 };
 
-export const startLocalStack = async ({ checkout = checkoutPath, testHooks } = {}) => {
+export const startLocalStack = async ({ checkout = checkoutPath, localFixtures = false, testHooks } = {}) => {
   const checkoutRealpath = await realpath(checkout);
   const localDirectory = join(checkoutRealpath, ".nxt-local");
   const controlPath = join(localDirectory, "control.json");
@@ -238,6 +241,7 @@ export const startLocalStack = async ({ checkout = checkoutPath, testHooks } = {
   const lease = await acquireStartupLease({ checkoutPath: checkoutRealpath, controlPath, nonce });
   const services = [];
   const baseEnvironment = sanitizedBaseEnvironment();
+  const fixtureRoot = localFixtures ? join(localDirectory, "fixtures", "playwright") : undefined;
   let interrupted = false;
   let record = {
     version: CONTROL_VERSION,
@@ -247,6 +251,7 @@ export const startLocalStack = async ({ checkout = checkoutPath, testHooks } = {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     coordinator: lease.record.owner,
+    ...(fixtureRoot === undefined ? {} : { fixtureRoot }),
     services
   };
   const persist = async (state = "starting") => {
@@ -270,6 +275,10 @@ export const startLocalStack = async ({ checkout = checkoutPath, testHooks } = {
     if (interrupted) throw new Error("Local startup was interrupted.");
     await run(tools.pnpmPath, ["artifact:verify"], { cwd: checkoutRealpath, env: baseEnvironment, maxBuffer: 20 * 1024 * 1024 });
     if (interrupted) throw new Error("Local startup was interrupted.");
+    if (fixtureRoot !== undefined) {
+      await seedLocalFixtures({ checkoutPath: checkoutRealpath, fixtureRoot, environment: baseEnvironment });
+      if (interrupted) throw new Error("Local startup was interrupted.");
+    }
     const vitePackage = createRequire(join(checkoutRealpath, "web", "package.json")).resolve("vite/package.json");
     const viteBin = join(dirname(vitePackage), "bin/vite.js");
     const swaBin = await resolvePackageBin("@azure/static-web-apps-cli", "dist/cli/bin.js", checkoutRealpath);
@@ -343,7 +352,12 @@ export const startLocalStack = async ({ checkout = checkoutPath, testHooks } = {
         AZURE_FUNCTIONS_ENVIRONMENT: "Development",
         FUNCTIONS_WORKER_RUNTIME: "node",
         NXT_LOCAL_AUTH_BYPASS: "1",
-        NXT_ALLOWED_GITHUB_USER: process.env.NXT_ALLOWED_GITHUB_USER?.trim() || "aserdargun"
+        NXT_ALLOWED_GITHUB_USER: process.env.NXT_ALLOWED_GITHUB_USER?.trim() || "aserdargun",
+        ...(fixtureRoot === undefined ? {} : {
+          NXT_LOCAL_STORAGE_MODE: "filesystem",
+          NXT_LOCAL_FIXTURE_ROOT: fixtureRoot,
+          NXT_LOCAL_CHECKOUT_ROOT: checkoutRealpath
+        })
       },
       port: 7071
     });
@@ -377,6 +391,6 @@ if (process.argv.includes("--check")) {
   const tools = await preflightTools();
   process.stdout.write(`Node ${tools.node}; Functions Core Tools ${tools.func}.\n`);
 } else if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
-  const result = await startLocalStack();
+  const result = await startLocalStack({ localFixtures: process.argv.includes("--e2e") });
   process.stdout.write(`NXT is ready at ${result.url}. Logs: ${result.localDirectory}.\n`);
 }
