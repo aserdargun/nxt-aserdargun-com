@@ -108,7 +108,9 @@ describe("private vault handlers", () => {
     const serialized = JSON.stringify(response.jsonBody);
 
     expect(response.status).toBe(200);
-    expect(VaultResponseSchema.parse(response.jsonBody).folders).toHaveLength(1);
+    const projection = VaultResponseSchema.parse(response.jsonBody);
+    expect(projection.folders).toHaveLength(1);
+    expect(identityCodec.decode(projection.entries[0]!.attachments[0]!.assetId)).toBe("raw-asset-drive-id");
     expect(serialized).not.toMatch(/raw-note-drive-id|raw-asset-drive-id|"driveId"/u);
   });
 
@@ -292,7 +294,10 @@ describe("private vault handlers", () => {
       for (const projected of page.entries) {
         projected.outboundNoteIds.forEach((id) => seen.outbound.add(id));
         projected.unresolvedWikiTargets.forEach((target) => seen.unresolved.add(target));
-        projected.attachments.forEach((attachment) => seen.attachments.add(attachment.name));
+        projected.attachments.forEach((attachment) => {
+          expect(identityCodec.decode(attachment.assetId)).toMatch(/^raw-asset-/u);
+          seen.attachments.add(attachment.name);
+        });
         projected.backlinks.forEach((id) => seen.backlinks.add(id));
       }
       page.preferences.favorites.forEach((id) => seen.favorites.add(id));

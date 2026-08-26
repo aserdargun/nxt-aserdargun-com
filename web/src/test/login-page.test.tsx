@@ -127,13 +127,33 @@ describe("typed session boundary", () => {
 
 describe("session-gated owner route", () => {
   it("renders the owner shell only after a valid 200 session", async () => {
+    const fetchMock = vi.fn<typeof fetch>((input) => {
+      if (input === "/api/private/session") {
+        return Promise.resolve(responseJson({ user: { userDetails: "owner" } }));
+      }
+      if (input === "/api/private/vault?limit=100") {
+        return Promise.resolve(responseJson({
+          entries: [],
+          preferences: { schemaVersion: 1, favorites: [], recent: [], theme: "dark" },
+          folders: [],
+          treeVersion: "a".repeat(64),
+          cursor: null,
+          complete: true
+        }));
+      }
+      return Promise.reject(new Error("Unexpected request."));
+    });
     vi.stubGlobal(
       "fetch",
-      vi.fn<typeof fetch>().mockResolvedValue(responseJson({ user: { userDetails: "owner" } }))
+      fetchMock
     );
     renderRoute("/app");
 
     expect(await screen.findByRole("main", { name: "NXT workspace" })).toBeVisible();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/private/vault?limit=100",
+      expect.objectContaining({ method: "GET", credentials: "same-origin" })
+    );
   });
 
   it("redirects an unauthorized session to /login", async () => {

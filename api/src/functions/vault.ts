@@ -51,7 +51,7 @@ export const createVaultHandlers = (dependencies: PrivateHandlerDependencies = d
     while (entries.length < page.limit && nextEntryOffset < index.value.entries.length) {
       const entry = index.value.entries[nextEntryOffset];
       if (entry === undefined) break;
-      const candidate = projectEntryPage(entry, relationOffsets);
+      const candidate = projectEntryPage(entry, relationOffsets, (id) => dependencies.idCodec.encode(id));
       const bytes = new TextEncoder().encode(JSON.stringify(candidate)).byteLength;
       if (entries.length > 0 && entryBytes + bytes > MAX_ENTRY_PAGE_BYTES) break;
       entries.push(candidate);
@@ -179,7 +179,8 @@ const emptyRelationOffsets = (): RelationOffsets => ({ outbound: 0, unresolved: 
 
 const projectEntryPage = (
   entry: VaultIndexEntry,
-  offsets: RelationOffsets
+  offsets: RelationOffsets,
+  encodeId: (value: string) => string
 ) => {
   const projected = {
     id: entry.id,
@@ -194,7 +195,7 @@ const projectEntryPage = (
     excerpt: entry.excerpt,
     outboundNoteIds: [] as string[],
     unresolvedWikiTargets: [] as string[],
-    attachments: [] as Array<{ name: string; mimeType: string; size: number }>,
+    attachments: [] as Array<{ assetId: string; name: string; mimeType: string; size: number; disposition?: "inline" | "download" }>,
     backlinks: [] as string[]
   };
   const positions = { ...offsets };
@@ -207,7 +208,7 @@ const projectEntryPage = (
         blocked.add(kind);
         continue;
       }
-      const item = relationItem(entry, kind, positions[kind]);
+      const item = relationItem(entry, kind, positions[kind], encodeId);
       if (item === undefined) {
         blocked.add(kind);
         continue;
@@ -229,7 +230,7 @@ const projectEntryPage = (
 type ProjectedEntry = {
   outboundNoteIds: string[];
   unresolvedWikiTargets: string[];
-  attachments: Array<{ name: string; mimeType: string; size: number }>;
+  attachments: Array<{ assetId: string; name: string; mimeType: string; size: number; disposition?: "inline" | "download" }>;
   backlinks: string[];
 };
 
@@ -238,18 +239,31 @@ const projectedLength = (entry: ProjectedEntry, kind: keyof RelationOffsets): nu
     kind === "unresolved" ? entry.unresolvedWikiTargets.length :
       kind === "attachments" ? entry.attachments.length : entry.backlinks.length;
 
-const relationItem = (entry: VaultIndexEntry, kind: keyof RelationOffsets, position: number): string | { name: string; mimeType: string; size: number } | undefined => {
+type ProjectedAttachment = { assetId: string; name: string; mimeType: string; size: number; disposition?: "inline" | "download" };
+
+const relationItem = (
+  entry: VaultIndexEntry,
+  kind: keyof RelationOffsets,
+  position: number,
+  encodeId: (value: string) => string
+): string | ProjectedAttachment | undefined => {
   if (kind === "outbound") return entry.outboundNoteIds[position];
   if (kind === "unresolved") return entry.unresolvedWikiTargets[position];
   if (kind === "backlinks") return entry.backlinks[position];
   const attachment = entry.attachments[position];
-  return attachment === undefined ? undefined : { name: attachment.name, mimeType: attachment.mimeType, size: attachment.size };
+  return attachment === undefined ? undefined : {
+    assetId: encodeId(attachment.driveId),
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    size: attachment.size,
+    ...(attachment.disposition === undefined ? {} : { disposition: attachment.disposition })
+  };
 };
 
-const pushRelationItem = (entry: ProjectedEntry, kind: keyof RelationOffsets, item: string | { name: string; mimeType: string; size: number }): void => {
+const pushRelationItem = (entry: ProjectedEntry, kind: keyof RelationOffsets, item: string | ProjectedAttachment): void => {
   if (kind === "outbound") entry.outboundNoteIds.push(item as string);
   else if (kind === "unresolved") entry.unresolvedWikiTargets.push(item as string);
-  else if (kind === "attachments") entry.attachments.push(item as { name: string; mimeType: string; size: number });
+  else if (kind === "attachments") entry.attachments.push(item as ProjectedAttachment);
   else entry.backlinks.push(item as string);
 };
 

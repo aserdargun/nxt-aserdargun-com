@@ -5,6 +5,7 @@ export declare const isOpaqueId: (value: unknown) => value is string;
 export declare const ConfirmationTokenSchema: z.ZodString;
 export declare const ScanCursorSchema: z.ZodString;
 export declare const SafeVaultAttachmentSchema: z.ZodObject<{
+    assetId: z.ZodString;
     name: z.ZodString;
     mimeType: z.ZodString;
     size: z.ZodNumber;
@@ -27,6 +28,7 @@ export declare const SafeVaultIndexEntrySchema: z.ZodObject<{
     outboundNoteIds: z.ZodArray<z.ZodUUID>;
     unresolvedWikiTargets: z.ZodArray<z.ZodString>;
     attachments: z.ZodArray<z.ZodObject<{
+        assetId: z.ZodString;
         name: z.ZodString;
         mimeType: z.ZodString;
         size: z.ZodNumber;
@@ -122,6 +124,7 @@ export declare const VaultResponseSchema: z.ZodObject<{
         outboundNoteIds: z.ZodArray<z.ZodUUID>;
         unresolvedWikiTargets: z.ZodArray<z.ZodString>;
         attachments: z.ZodArray<z.ZodObject<{
+            assetId: z.ZodString;
             name: z.ZodString;
             mimeType: z.ZodString;
             size: z.ZodNumber;

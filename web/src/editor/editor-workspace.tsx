@@ -1,6 +1,8 @@
 import type { WikiTargetResolution } from "@nxt/domain";
-import { lazy, Suspense, useEffect, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import { notesClient, type NotesClient } from "../api/notes";
+import { BacklinksPanel, type KnowledgeLink } from "../explorer/backlinks-panel";
+import { deriveOutline, OutlinePanel, type OutlineHeading } from "../explorer/outline-panel";
 import { ConflictDialog } from "./conflict-dialog";
 import { browserDraftStore, type DraftStore } from "./draft-store";
 import { useAutosave, type SaveStatus } from "./use-autosave";
@@ -31,6 +33,8 @@ export interface EditorWorkspaceProps {
   readonly resolveAttachment?: ((canonicalReference: string) => string | undefined) | undefined;
   readonly resolveWikiLink?: ((target: string) => WikiTargetResolution) | undefined;
   readonly onWikiNavigate?: ((noteId: string) => void) | undefined;
+  readonly backlinks?: readonly KnowledgeLink[] | undefined;
+  readonly wikiLinks?: readonly KnowledgeLink[] | undefined;
   readonly now?: (() => Date) | undefined;
   readonly showStatus?: boolean | undefined;
   readonly onStateChange?: ((state: EditorWorkspaceState) => void) | undefined;
@@ -59,11 +63,14 @@ export const EditorWorkspace = ({
   resolveAttachment,
   resolveWikiLink,
   onWikiNavigate,
+  backlinks = [],
+  wikiLinks = [],
   now = systemNow,
   showStatus = true,
   onStateChange,
   infoRegion
 }: EditorWorkspaceProps): React.JSX.Element => {
+  const [contextTab, setContextTab] = useState<"preview" | "outline" | "backlinks">("preview");
   const {
     state,
     onSourceChange,
@@ -82,6 +89,17 @@ export const EditorWorkspace = ({
   useEffect(() => {
     onStateChange?.({ title: state.title, path: state.path, status: state.status });
   }, [onStateChange, state.path, state.status, state.title]);
+
+  useEffect(() => setContextTab("preview"), [noteId]);
+
+  const navigateOutline = (heading: OutlineHeading): void => {
+    if (state.source === null) return;
+    const index = deriveOutline(state.source).findIndex((candidate) => candidate.line === heading.line);
+    if (index < 0) return;
+    const rendered = document.querySelectorAll<HTMLElement>(".markdown-preview h1, .markdown-preview h2, .markdown-preview h3, .markdown-preview h4, .markdown-preview h5, .markdown-preview h6")[index];
+    if (rendered === undefined) return;
+    if (typeof rendered.scrollIntoView === "function") rendered.scrollIntoView({ block: "start" });
+  };
 
   return (
     <>
@@ -121,12 +139,21 @@ export const EditorWorkspace = ({
           hidden={hiddenPreview}
         >
           <div className="context-tabs" role="tablist" aria-label="Preview">
-            <button className="context-tab touch-target active" type="button" role="tab" aria-selected="true">Preview</button>
-            <button className="context-tab touch-target" type="button" role="tab" aria-selected="false">Outline</button>
-            <button className="context-tab touch-target" type="button" role="tab" aria-selected="false">Backlinks</button>
+            {(["preview", "outline", "backlinks"] as const).map((tab) => (
+              <button
+                className={`context-tab touch-target${contextTab === tab ? " active" : ""}`}
+                type="button"
+                role="tab"
+                aria-selected={contextTab === tab}
+                onClick={() => setContextTab(tab)}
+                key={tab}
+              >
+                {tab === "preview" ? "Preview" : tab === "outline" ? "Outline" : "Backlinks"}
+              </button>
+            ))}
           </div>
           <div className="preview-content" aria-busy={state.source === null}>
-            {state.source === null ? null : (
+            {state.source === null ? null : contextTab === "preview" ? (
               <Suspense fallback={null}>
                 <MarkdownPreview
                   source={state.source}
@@ -136,6 +163,10 @@ export const EditorWorkspace = ({
                   onWikiNavigate={onWikiNavigate}
                 />
               </Suspense>
+            ) : contextTab === "outline" ? (
+              <OutlinePanel source={state.source} onNavigate={navigateOutline} />
+            ) : (
+              <BacklinksPanel backlinks={backlinks} wikiLinks={wikiLinks} onNavigate={(id) => onWikiNavigate?.(id)} />
             )}
           </div>
         </section>

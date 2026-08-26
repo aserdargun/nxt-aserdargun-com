@@ -1,0 +1,251 @@
+import { ChevronRight, File, Folder } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { DeleteFolderRequest, FolderDeleteConfirmationSchema } from "@nxt/contracts";
+import type { CompleteVault } from "../api/vault";
+import { FolderActions } from "./folder-actions";
+
+export interface NoteExplorerNode {
+  readonly kind: "note";
+  readonly id: string;
+  readonly name: string;
+  readonly path: string;
+  readonly version: string;
+  readonly attachmentCount: number;
+}
+
+export interface FolderExplorerNode {
+  readonly kind: "folder";
+  readonly id: string;
+  readonly name: string;
+  readonly path: string;
+  readonly version: string;
+  readonly protected: boolean;
+  readonly deleteConfirmation: ReturnType<typeof FolderDeleteConfirmationSchema.parse> | null;
+  readonly children: readonly ExplorerNode[];
+}
+
+export type ExplorerNode = NoteExplorerNode | FolderExplorerNode;
+
+export const buildExplorerTree = (vault: CompleteVault): readonly ExplorerNode[] => {
+  const folders = new Map<string, FolderExplorerNode>();
+  for (const folder of vault.folders) {
+    if (folders.has(folder.id)) throw new Error("Duplicate folder projection.");
+    folders.set(folder.id, {
+      kind: "folder",
+      id: folder.id,
+      name: folder.name,
+      path: folder.path,
+      version: folder.version,
+      protected: folder.protected,
+      deleteConfirmation: folder.deleteConfirmation ?? null,
+      children: []
+    });
+  }
+  const mutableChildren = new Map<string, ExplorerNode[]>();
+  for (const folder of folders.values()) mutableChildren.set(folder.id, []);
+  const roots: ExplorerNode[] = [];
+  const folderByPath = new Map([...folders.values()].map((folder) => [folder.path, folder]));
+  if (folderByPath.size !== folders.size) throw new Error("Ambiguous folder path projection.");
+
+  for (const folder of folders.values()) {
+    const separator = folder.path.lastIndexOf("/");
+    const parent = separator < 0 ? undefined : folderByPath.get(folder.path.slice(0, separator));
+    if (parent === undefined) roots.push(folder);
+    else mutableChildren.get(parent.id)?.push(folder);
+  }
+  for (const note of vault.entries) {
+    const separator = note.path.lastIndexOf("/");
+    const parent = separator < 0 ? undefined : folderByPath.get(note.path.slice(0, separator));
+    if (parent === undefined) throw new Error("A note has no exact projected folder.");
+    mutableChildren.get(parent.id)?.push({
+      kind: "note",
+      id: note.id,
+      name: note.title,
+      path: note.path,
+      version: note.driveVersion,
+      attachmentCount: note.attachments.length
+    });
+  }
+  const populate = (node: ExplorerNode, ancestors: ReadonlySet<string>): ExplorerNode => {
+    if (node.kind === "note") return node;
+    if (ancestors.has(node.id)) throw new Error("Folder projection contains a cycle.");
+    const nextAncestors = new Set(ancestors).add(node.id);
+    const children = [...(mutableChildren.get(node.id) ?? [])]
+      .sort((first, second) => first.name.localeCompare(second.name, "tr-TR") || first.id.localeCompare(second.id))
+      .map((child) => populate(child, nextAncestors));
+    return { ...node, children };
+  };
+  return roots.sort((first, second) => first.name.localeCompare(second.name, "tr-TR") || first.id.localeCompare(second.id)).map((root) => populate(root, new Set()));
+};
+
+interface FlatNode {
+  readonly node: ExplorerNode;
+  readonly level: number;
+  readonly parentId: string | null;
+}
+
+export interface FileTreeProps {
+  readonly tree: readonly ExplorerNode[];
+  readonly selectedId?: string | undefined;
+  readonly onSelect?: ((node: ExplorerNode) => void) | undefined;
+  readonly onRenameFolder?: ((folder: FolderExplorerNode) => void) | undefined;
+  readonly onMoveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
+  readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
+  readonly onTrashFolder?: ((folder: FolderExplorerNode, input: DeleteFolderRequest) => Promise<void>) | undefined;
+}
+
+const flattenVisible = (
+  nodes: readonly ExplorerNode[],
+  expanded: ReadonlySet<string>,
+  level = 1,
+  parentId: string | null = null,
+  output: FlatNode[] = []
+): FlatNode[] => {
+  for (const node of nodes) {
+    output.push({ node, level, parentId });
+    if (node.kind === "folder" && expanded.has(node.id)) {
+      flattenVisible(node.children, expanded, level + 1, node.id, output);
+    }
+  }
+  return output;
+};
+
+const allIds = (nodes: readonly ExplorerNode[], output = new Set<string>()): Set<string> => {
+  for (const node of nodes) {
+    output.add(node.id);
+    if (node.kind === "folder") allIds(node.children, output);
+  }
+  return output;
+};
+
+const ancestorFolderIds = (
+  nodes: readonly ExplorerNode[],
+  targetId: string | undefined,
+  ancestors: readonly string[] = []
+): readonly string[] => {
+  if (targetId === undefined) return [];
+  for (const node of nodes) {
+    if (node.id === targetId) return ancestors;
+    if (node.kind !== "folder") continue;
+    const result = ancestorFolderIds(node.children, targetId, [...ancestors, node.id]);
+    if (result.length > 0) return result;
+  }
+  return [];
+};
+
+export const FileTree = ({
+  tree,
+  selectedId,
+  onSelect,
+  onRenameFolder,
+  onMoveFolder,
+  onArchiveFolder,
+  onTrashFolder
+}: FileTreeProps): React.JSX.Element => {
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(
+    () => new Set(ancestorFolderIds(tree, selectedId))
+  );
+  const [focusedId, setFocusedId] = useState<string | null>(() => selectedId ?? tree[0]?.id ?? null);
+  const root = useRef<HTMLDivElement>(null);
+  const itemRefs = useRef(new Map<string, HTMLButtonElement>());
+  const visible = useMemo(() => flattenVisible(tree, expanded), [expanded, tree]);
+  const effectiveFocusedId = visible.some(({ node }) => node.id === focusedId)
+    ? focusedId
+    : visible.find(({ node }) => node.id === selectedId)?.node.id ?? visible[0]?.node.id ?? null;
+
+  useEffect(() => {
+    const validIds = allIds(tree);
+    if (focusedId !== null && validIds.has(focusedId)) return;
+    const next = selectedId !== undefined && validIds.has(selectedId) ? selectedId : tree[0]?.id ?? null;
+    const shouldRestoreFocus = root.current?.contains(document.activeElement) === true;
+    setFocusedId(next);
+    if (shouldRestoreFocus && next !== null) requestAnimationFrame(() => itemRefs.current.get(next)?.focus());
+  }, [focusedId, selectedId, tree]);
+
+  useEffect(() => {
+    const ancestors = ancestorFolderIds(tree, selectedId);
+    if (ancestors.length === 0) return;
+    setExpanded((current) => {
+      const next = new Set(current);
+      for (const id of ancestors) next.add(id);
+      return next.size === current.size ? current : next;
+    });
+  }, [selectedId, tree]);
+
+  const focusAt = (index: number): void => {
+    const item = visible[index];
+    if (item === undefined) return;
+    setFocusedId(item.node.id);
+    itemRefs.current.get(item.node.id)?.focus();
+  };
+
+  const toggle = (id: string, open?: boolean): void => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      const shouldOpen = open ?? !next.has(id);
+      if (shouldOpen) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  return (
+    <div ref={root} className="file-tree" role="tree" aria-label="Files">
+      {visible.map(({ node, level, parentId }, index) => {
+        const isFolder = node.kind === "folder";
+        const isExpanded = isFolder && expanded.has(node.id);
+        return (
+          <div className="tree-node-row" style={{ "--tree-level": level } as React.CSSProperties} key={node.id}>
+            <button
+              ref={(element) => {
+                if (element === null) itemRefs.current.delete(node.id);
+                else itemRefs.current.set(node.id, element);
+              }}
+              className={`tree-row touch-target${selectedId === node.id ? " selected" : ""}`}
+              type="button"
+              role="treeitem"
+              aria-level={level}
+              aria-selected={selectedId === node.id}
+              {...(isFolder ? { "aria-expanded": isExpanded } : {})}
+              tabIndex={effectiveFocusedId === node.id ? 0 : -1}
+              onFocus={() => setFocusedId(node.id)}
+              onClick={() => onSelect?.(node)}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown") focusAt(Math.min(index + 1, visible.length - 1));
+                else if (event.key === "ArrowUp") focusAt(Math.max(index - 1, 0));
+                else if (event.key === "Home") focusAt(0);
+                else if (event.key === "End") focusAt(visible.length - 1);
+                else if (event.key === "ArrowRight" && isFolder) {
+                  if (!isExpanded) toggle(node.id, true);
+                  else focusAt(index + 1);
+                } else if (event.key === "ArrowLeft") {
+                  if (isFolder && isExpanded) toggle(node.id, false);
+                  else if (parentId !== null) {
+                    const parentIndex = visible.findIndex(({ node: candidate }) => candidate.id === parentId);
+                    focusAt(parentIndex);
+                  }
+                } else if (event.key === "Enter" || event.key === " ") {
+                  onSelect?.(node);
+                } else return;
+                event.preventDefault();
+              }}
+            >
+              {isFolder ? <ChevronRight className={isExpanded ? "disclosure disclosure-open" : "disclosure"} size={16} aria-hidden /> : <span className="tree-disclosure-spacer" />}
+              {isFolder ? <Folder size={18} strokeWidth={1.75} aria-hidden /> : <File size={18} strokeWidth={1.75} aria-hidden />}
+              <span>{node.name}</span>
+            </button>
+            {node.kind === "folder" ? (
+              <FolderActions
+                folder={node}
+                onRename={onRenameFolder}
+                onMove={onMoveFolder}
+                onArchive={onArchiveFolder}
+                onTrash={onTrashFolder}
+              />
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+};

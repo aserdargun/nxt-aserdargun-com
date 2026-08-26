@@ -1,11 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { NoteIdSchema } from "@nxt/contracts";
-import { Navigate, useParams, type RouteObject } from "react-router-dom";
+import { Navigate, useNavigate, useParams, type RouteObject } from "react-router-dom";
 import { ApiClientError } from "../api/client";
 import { getSession } from "../api/session";
+import { vaultClient } from "../api/vault";
 import { LoginPage } from "./login-page";
 import { NotFoundPage } from "./not-found-page";
 import { OwnerShell } from "./owner-shell";
+import { useTheme } from "./providers";
 
 const LOGOUT_PATH = "/.auth/logout?post_logout_redirect_uri=/login";
 
@@ -17,6 +19,57 @@ const RouteState = ({ children }: { readonly children: React.ReactNode }): React
     <main className="route-main">{children}</main>
   </div>
 );
+
+const OwnerVaultGate = ({ noteId }: { readonly noteId?: string }): React.JSX.Element => {
+  const navigate = useNavigate();
+  const { mode, setMode } = useTheme();
+  const vault = useQuery({
+    queryKey: ["private-vault"],
+    queryFn: () => vaultClient.loadCompleteVault()
+  });
+
+  if (vault.isPending) {
+    return (
+      <RouteState>
+        <div role="status" aria-label="Loading vault" aria-busy="true" />
+      </RouteState>
+    );
+  }
+  if (vault.isError) {
+    return (
+      <RouteState>
+        <h1>Error</h1>
+        <p>The vault could not be loaded safely.</p>
+      </RouteState>
+    );
+  }
+
+  if (noteId !== undefined && !vault.data.entries.some((entry) => entry.id === noteId)) {
+    return <NotFoundPage />;
+  }
+  if (noteId === undefined) {
+    const entryIds = new Set(vault.data.entries.map((entry) => entry.id));
+    const firstRecent = vault.data.preferences.recent.find((id) => entryIds.has(id));
+    const first = firstRecent ?? vault.data.entries[0]?.id;
+    if (first !== undefined) return <Navigate to={`/app/notes/${first}`} replace />;
+  }
+
+  return (
+    <OwnerShell
+      {...(noteId === undefined ? {} : { noteId })}
+      vault={vault.data}
+      vaultApi={vaultClient}
+      onNavigateNote={(id) => {
+        void navigate(`/app/notes/${id}`);
+      }}
+      onRefreshVault={async () => {
+        await vault.refetch();
+      }}
+      onToggleTheme={() => setMode(mode === "dark" ? "light" : "dark")}
+      onSignOut={() => window.location.assign(LOGOUT_PATH)}
+    />
+  );
+};
 
 const OwnerGate = ({ noteId }: { readonly noteId?: string }): React.JSX.Element => {
   const session = useQuery({
@@ -59,7 +112,7 @@ const OwnerGate = ({ noteId }: { readonly noteId?: string }): React.JSX.Element 
     );
   }
 
-  return noteId === undefined ? <OwnerShell /> : <OwnerShell noteId={noteId} />;
+  return <OwnerVaultGate {...(noteId === undefined ? {} : { noteId })} />;
 };
 
 const OwnerNoteGate = (): React.JSX.Element => {

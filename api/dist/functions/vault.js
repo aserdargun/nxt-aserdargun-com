@@ -46,7 +46,7 @@ export const createVaultHandlers = (dependencies = defaultPrivateHandlerDependen
             const entry = index.value.entries[nextEntryOffset];
             if (entry === undefined)
                 break;
-            const candidate = projectEntryPage(entry, relationOffsets);
+            const candidate = projectEntryPage(entry, relationOffsets, (id) => dependencies.idCodec.encode(id));
             const bytes = new TextEncoder().encode(JSON.stringify(candidate)).byteLength;
             if (entries.length > 0 && entryBytes + bytes > MAX_ENTRY_PAGE_BYTES)
                 break;
@@ -166,7 +166,7 @@ const parseVaultPage = (request, dependencies) => {
     };
 };
 const emptyRelationOffsets = () => ({ outbound: 0, unresolved: 0, attachments: 0, backlinks: 0 });
-const projectEntryPage = (entry, offsets) => {
+const projectEntryPage = (entry, offsets, encodeId) => {
     const projected = {
         id: entry.id,
         title: entry.title,
@@ -193,7 +193,7 @@ const projectEntryPage = (entry, offsets) => {
                 blocked.add(kind);
                 continue;
             }
-            const item = relationItem(entry, kind, positions[kind]);
+            const item = relationItem(entry, kind, positions[kind], encodeId);
             if (item === undefined) {
                 blocked.add(kind);
                 continue;
@@ -215,7 +215,7 @@ const projectEntryPage = (entry, offsets) => {
 const projectedLength = (entry, kind) => kind === "outbound" ? entry.outboundNoteIds.length :
     kind === "unresolved" ? entry.unresolvedWikiTargets.length :
         kind === "attachments" ? entry.attachments.length : entry.backlinks.length;
-const relationItem = (entry, kind, position) => {
+const relationItem = (entry, kind, position, encodeId) => {
     if (kind === "outbound")
         return entry.outboundNoteIds[position];
     if (kind === "unresolved")
@@ -223,7 +223,13 @@ const relationItem = (entry, kind, position) => {
     if (kind === "backlinks")
         return entry.backlinks[position];
     const attachment = entry.attachments[position];
-    return attachment === undefined ? undefined : { name: attachment.name, mimeType: attachment.mimeType, size: attachment.size };
+    return attachment === undefined ? undefined : {
+        assetId: encodeId(attachment.driveId),
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        size: attachment.size,
+        ...(attachment.disposition === undefined ? {} : { disposition: attachment.disposition })
+    };
 };
 const pushRelationItem = (entry, kind, item) => {
     if (kind === "outbound")

@@ -18,6 +18,7 @@ import { RouterProvider, createMemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiClientError, ApiContractError } from "../api/client";
 import { notesClient, type NotesClient } from "../api/notes";
+import type { CompleteVault, VaultClient } from "../api/vault";
 import { OwnerShell } from "../app/owner-shell";
 import { AppProviders } from "../app/providers";
 import { appRoutes } from "../app/router";
@@ -36,6 +37,7 @@ const OTHER_NOTE_ID = "028f47d2-6a34-7b2a-9f21-8a7034963aef";
 const RECOVERED_NOTE_ID = "038f47d2-6a34-7b2a-9f21-8a7034963aef";
 const FOLDER_ID = "v1.abcdefghijklmnop.folder_1.abcdefghijklmnopqrstuv";
 const ATTACHMENT_ID = "v1.abcdefghijklmnop.asset_1.abcdefghijklmnopqrstuv";
+const INBOX_FOLDER_ID = "v1.abcdefghijklmnop.folder_2.abcdefghijklmnopqrstuv";
 const REQUEST_ID = "00000000-0000-4000-8000-000000000001";
 
 const source = (
@@ -105,6 +107,55 @@ const MERGED_RESPONSE = response("# Merged", {
   updated: "2026-08-23T09:16:00.000Z",
   version: "9"
 });
+
+const OWNER_VAULT: CompleteVault = {
+  entries: [
+    {
+      id: NOTE_ID,
+      title: "Plan",
+      aliases: [],
+      path: "Notes/Plan.md",
+      created: "2026-08-23T09:00:00.000Z",
+      updated: "2026-08-23T09:03:00.000Z",
+      driveVersion: "7",
+      tags: ["plan"],
+      searchText: "drive plan other",
+      excerpt: "Drive",
+      outboundNoteIds: [OTHER_NOTE_ID],
+      unresolvedWikiTargets: ["Missing"],
+      attachments: [{
+        assetId: ATTACHMENT_ID,
+        name: "diagram.png",
+        mimeType: "image/png",
+        size: 42,
+        disposition: "inline"
+      }],
+      backlinks: [OTHER_NOTE_ID]
+    },
+    {
+      id: OTHER_NOTE_ID,
+      title: "Other",
+      aliases: ["Reference"],
+      path: "Notes/Other.md",
+      created: "2026-08-23T09:00:00.000Z",
+      updated: "2026-08-23T09:03:00.000Z",
+      driveVersion: "2",
+      tags: ["reference"],
+      searchText: "other reference",
+      excerpt: "Other",
+      outboundNoteIds: [],
+      unresolvedWikiTargets: [],
+      attachments: [],
+      backlinks: [NOTE_ID]
+    }
+  ],
+  folders: [
+    { id: FOLDER_ID, name: "Notes", path: "Notes", version: "3", protected: true },
+    { id: INBOX_FOLDER_ID, name: "Inbox", path: "Notes/Inbox", version: "2", protected: true }
+  ],
+  preferences: { schemaVersion: 1, favorites: [NOTE_ID], recent: [NOTE_ID], theme: "dark" },
+  treeVersion: "a".repeat(64)
+};
 
 class MemoryDraftStore implements DraftStore {
   public readonly drafts = new Map<string, LocalDraft>();
@@ -180,13 +231,27 @@ interface NotesHarness {
   readonly getNote: ReturnType<typeof vi.fn<NotesClient["getNote"]>>;
   readonly updateNote: ReturnType<typeof vi.fn<NotesClient["updateNote"]>>;
   readonly createNote: ReturnType<typeof vi.fn<NotesClient["createNote"]>>;
+  readonly moveNote: ReturnType<typeof vi.fn<NotesClient["moveNote"]>>;
+  readonly archiveNote: ReturnType<typeof vi.fn<NotesClient["archiveNote"]>>;
+  readonly trashNote: ReturnType<typeof vi.fn<NotesClient["trashNote"]>>;
 }
 
 const notesHarness = (initial: NoteResponse = BASE_RESPONSE): NotesHarness => {
   const getNote = vi.fn<NotesClient["getNote"]>().mockResolvedValue(initial);
   const updateNote = vi.fn<NotesClient["updateNote"]>().mockResolvedValue(LOCAL_RESPONSE);
   const createNote = vi.fn<NotesClient["createNote"]>();
-  return { client: { getNote, updateNote, createNote }, getNote, updateNote, createNote };
+  const moveNote = vi.fn<NotesClient["moveNote"]>();
+  const archiveNote = vi.fn<NotesClient["archiveNote"]>();
+  const trashNote = vi.fn<NotesClient["trashNote"]>();
+  return {
+    client: { getNote, updateNote, createNote, moveNote, archiveNote, trashNote },
+    getNote,
+    updateNote,
+    createNote,
+    moveNote,
+    archiveNote,
+    trashNote
+  };
 };
 
 const deferred = <T,>(): {
@@ -1277,10 +1342,154 @@ describe("owner-shell integration", () => {
     expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
   });
 
+  it("injects the complete vault tree, canonical attachment, and exact wiki navigation", async () => {
+    const user = userEvent.setup();
+    const store = new MemoryDraftStore();
+    const linked = response(
+      `# Drive\n\n[[Other|Open other]]\n\n![diagram](../_assets/${NOTE_ID}/diagram.png)`
+    );
+    const notes = notesHarness(linked);
+    const onNavigateNote = vi.fn();
+
+    render(
+      <OwnerShell
+        noteId={NOTE_ID}
+        vault={OWNER_VAULT}
+        notes={notes.client}
+        draftStore={store}
+        onNavigateNote={onNavigateNote}
+      />
+    );
+
+    expect(await screen.findByRole("tree", { name: "Files" })).toBeVisible();
+    expect(await screen.findByRole("searchbox", { name: "Search files" })).toBeVisible();
+    expect(await screen.findByRole("img", { name: "diagram" })).toHaveAttribute(
+      "src",
+      `/api/private/attachments/${ATTACHMENT_ID}`
+    );
+    await user.click(screen.getByRole("button", { name: "Open other" }));
+    expect(onNavigateNote).toHaveBeenCalledWith(OTHER_NOTE_ID);
+
+    const preview = screen.getByRole("region", { name: "Preview" });
+    await user.click(within(preview).getByRole("tab", { name: "Outline" }));
+    expect(within(preview).getByRole("navigation", { name: "Outline" })).toHaveTextContent("Drive");
+    await user.click(within(preview).getByRole("tab", { name: "Backlinks" }));
+    expect(within(preview).getAllByLabelText("Other, Resolved")[0]).toBeVisible();
+    expect(within(preview).getByLabelText("Missing, Unresolved")).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("derives the recovery destination from the selected note's exact opaque parent", async () => {
+    const user = userEvent.setup();
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    notes.getNote.mockResolvedValueOnce(BASE_RESPONSE).mockResolvedValueOnce(LATEST_DRIVE_RESPONSE);
+    notes.updateNote.mockRejectedValueOnce(conflictError());
+    const recoveredTitle = "Plan Recovered 2026-08-23T12:34:56.789Z";
+    notes.createNote.mockResolvedValueOnce(response(LOCAL_SOURCE, {
+      id: RECOVERED_NOTE_ID,
+      title: recoveredTitle,
+      version: "1",
+      path: "Notes/Plan Recovered.md"
+    }));
+    render(
+      <OwnerShell
+        noteId={NOTE_ID}
+        vault={OWNER_VAULT}
+        notes={notes.client}
+        draftStore={store}
+        now={() => new Date("2026-08-23T15:34:56.789+03:00")}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, LOCAL_SOURCE);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await flushMicrotasks();
+    vi.useRealTimers();
+
+    await user.click(await screen.findByRole("button", { name: "Save local as a new note" }));
+    expect(notes.createNote).toHaveBeenCalledWith({
+      title: recoveredTitle,
+      body: LOCAL_SOURCE,
+      folderId: FOLDER_ID
+    });
+  });
+
+  it("creates and moves a note keyboard-only through real command handlers and restores focus", async () => {
+    const user = userEvent.setup();
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    const created = response("", {
+      id: RECOVERED_NOTE_ID,
+      title: "New idea",
+      version: "1",
+      path: "Notes/New idea.md"
+    });
+    notes.createNote.mockResolvedValueOnce(created);
+    notes.moveNote.mockResolvedValueOnce({ ...BASE_RESPONSE, path: "Notes/Inbox/Plan.md", version: "8" });
+    const vaultApi: VaultClient = {
+      loadCompleteVault: vi.fn(() => Promise.resolve(OWNER_VAULT)),
+      createFolder: vi.fn(),
+      updateFolder: vi.fn(),
+      trashFolder: vi.fn(),
+      updatePreferences: vi.fn(() => Promise.resolve(OWNER_VAULT.preferences)),
+      rescanVault: vi.fn(() => Promise.resolve([]))
+    };
+    const onNavigateNote = vi.fn();
+    const onRefreshVault = vi.fn(() => Promise.resolve());
+    render(
+      <OwnerShell
+        noteId={NOTE_ID}
+        vault={OWNER_VAULT}
+        notes={notes.client}
+        draftStore={store}
+        vaultApi={vaultApi}
+        onNavigateNote={onNavigateNote}
+        onRefreshVault={onRefreshVault}
+      />
+    );
+    await getEditorView();
+    const origin = screen.getByRole("button", { name: "Add attachment" });
+    origin.focus();
+
+    await user.keyboard("{Control>}k{/Control}");
+    await user.type(screen.getByRole("textbox", { name: "Search commands" }), "New note{Enter}");
+    const newNoteDialog = await screen.findByRole("dialog", { name: "New note" });
+    await user.type(within(newNoteDialog).getByRole("textbox", { name: "Title" }), "New idea{Enter}");
+    await waitFor(() => expect(notes.createNote).toHaveBeenCalledWith({
+      title: "New idea",
+      body: "",
+      folderId: FOLDER_ID
+    }));
+    expect(onNavigateNote).toHaveBeenCalledWith(RECOVERED_NOTE_ID);
+
+    origin.focus();
+    await user.keyboard("{Control>}k{/Control}");
+    await user.type(screen.getByRole("textbox", { name: "Search commands" }), "Move{Enter}");
+    const moveDialog = await screen.findByRole("dialog", { name: "Move note" });
+    const destination = within(moveDialog).getByRole("combobox", { name: "Destination" });
+    destination.focus();
+    await user.keyboard("{ArrowDown}{Enter}");
+    await user.click(within(moveDialog).getByRole("button", { name: "Move" }));
+    await waitFor(() => expect(notes.moveNote).toHaveBeenCalledWith(NOTE_ID, {
+      expectedVersion: "7",
+      folderId: INBOX_FOLDER_ID
+    }));
+
+    origin.focus();
+    await user.keyboard("{Control>}k{/Control}{Escape}");
+    await waitFor(() => expect(document.activeElement).toBe(origin));
+    expect(onRefreshVault).toHaveBeenCalledTimes(2);
+  });
+
   it("reaches the selected production note through the exact deep owner route", async () => {
     const fetchMock = vi.fn<typeof fetch>((input) => {
       if (input === "/api/private/session") {
         return Promise.resolve(responseJson({ user: { userDetails: "owner" } }));
+      }
+      if (input === "/api/private/vault?limit=100") {
+        return Promise.resolve(responseJson({ ...OWNER_VAULT, cursor: null, complete: true }));
       }
       if (input === `/api/private/notes/${NOTE_ID}`) return Promise.resolve(responseJson(BASE_RESPONSE));
       const requestedPath = typeof input === "string" || input instanceof URL ? input.toString() : input.url;
@@ -1297,6 +1506,10 @@ describe("owner-shell integration", () => {
 
     expect((await getEditorView()).state.doc.toString()).toBe(BASE_SOURCE);
     expect(router.state.location.pathname).toBe(`/app/notes/${NOTE_ID}`);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/private/vault?limit=100",
+      expect.objectContaining({ method: "GET", credentials: "same-origin" })
+    );
     expect(fetchMock).toHaveBeenCalledWith(
       `/api/private/notes/${NOTE_ID}`,
       expect.objectContaining({ method: "GET", credentials: "same-origin" })

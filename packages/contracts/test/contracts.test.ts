@@ -168,7 +168,12 @@ it("defines strict Drive-ID-free private response contracts", () => {
     excerpt: "",
     outboundNoteIds: [],
     unresolvedWikiTargets: [],
-    attachments: [{ name: "x.png", mimeType: "image/png", size: 1 }],
+    attachments: [{
+      assetId: `v1.${"d".repeat(16)}.${"e".repeat(8)}.${"f".repeat(22)}`,
+      name: "x.png",
+      mimeType: "image/png",
+      size: 1
+    }],
     backlinks: []
   };
   const preferences = { schemaVersion: 1 as const, favorites: [], recent: [], theme: "system" as const };
@@ -225,6 +230,14 @@ it("defines strict Drive-ID-free private response contracts", () => {
     checksum: "a".repeat(64)
   }).path).toBe("Notes/Plan.md");
   expect(() => VaultResponseSchema.parse({ entries: [{ ...safeEntry, driveId: "raw" }], preferences, folders: [], treeVersion: "a".repeat(64), cursor: null, complete: true })).toThrow();
+  expect(() => VaultResponseSchema.parse({
+    entries: [{ ...safeEntry, attachments: [{ name: "x.png", mimeType: "image/png", size: 1, assetId: "raw-drive-id" }] }],
+    preferences,
+    folders: [],
+    treeVersion: "a".repeat(64),
+    cursor: null,
+    complete: true
+  })).toThrow();
   expect(() => NoteResponseSchema.parse({ note: {}, driveId: "raw", version: "1", path: "Notes/x.md" })).toThrow();
   expect(() => RescanVaultResponseSchema.parse({
     cursor: null,

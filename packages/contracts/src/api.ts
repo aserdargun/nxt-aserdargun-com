@@ -16,6 +16,7 @@ export const ConfirmationTokenSchema = z.string().max(512).regex(/^c1\.[A-Za-z0-
 export const ScanCursorSchema = z.string().max(512).regex(/^s1\.[A-Za-z0-9_-]{16,430}\.[A-Za-z0-9_-]{43}$/u);
 
 export const SafeVaultAttachmentSchema = z.object({
+  assetId: OpaqueIdSchema,
   name: AttachmentNameSchema,
   mimeType: z.string().trim().min(1).max(256),
   size: z.number().int().nonnegative(),
