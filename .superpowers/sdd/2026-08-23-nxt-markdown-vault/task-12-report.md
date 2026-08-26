@@ -284,3 +284,42 @@ Fix-round screenshots remain outside the repository and uncommitted:
 - Ports 5173 and 5174 closed; the temporary fixture was removed.
 - Live Drive stayed unset and unexercised; the one opt-in test remained skipped.
 - No push, deploy, Drive, GitHub, Azure, DNS, certificate, secret, or other external mutation occurred.
+
+## Review fix round 2/5 — 2026-08-26
+
+### Status
+
+DONE. The single confirmed Minor is resolved in implementation commit `8ed1d7bed0eb2d177e56a0567ed126426cfe51ab` (`fix: reset stale folder confirmation feedback`).
+
+### Finding and root cause
+
+After a folder Trash request failed with a stale server confirmation, `FolderActions` correctly disabled the old confirmation and displayed an alert. When a refreshed folder projection supplied a fresh confirmation token while the dialog remained open, the token-change effect reset `confirmationStale` and re-enabled Trash but left the prior stale `error` state visible. The dialog therefore contradicted itself.
+
+The reset is now scoped to confirmation token/expiry identity changes: a fresh confirmation clears its stale feedback, while an unrelated rerender or `now` function change does not prematurely clear the existing error. The open dialog then submits the exact refreshed tree version and token.
+
+### RED/GREEN and validation evidence
+
+The deterministic component test first reproduced the contradiction:
+
+```text
+file-tree RED: 9 passed, 1 failed (10 total)
+failure: stale alert remained after the fresh token enabled Trash
+```
+
+After the minimal state-effect split:
+
+```text
+file-tree focused: 10/10 passed
+file-tree + editor-workspace focused: 55/55 passed
+pnpm lint: PASS
+pnpm typecheck: contracts, domain, API, web PASS
+git diff --check: PASS
+```
+
+The regression test also proves that an unrelated same-confirmation rerender retains the stale alert and that the next successful click carries the literal refreshed confirmation token. The behavior is fully covered through the real rendered dialog DOM and callback boundary, so no additional IAB run was needed.
+
+### Closeout
+
+- `web/tsconfig.tsbuildinfo` remained byte-identical to HEAD.
+- Ports 5173 and 5174 remained closed; no local server was started.
+- Live Drive remained unset; no push, deploy, Drive, GitHub, Azure, DNS, secret, or other external mutation occurred.
