@@ -240,3 +240,29 @@ The root IAB rerun used a fresh same-origin fixture note at the nested path `Not
 ```
 
 The Publish dialog showed `Version 8` and `1 referenced attachments`; Cancel restored focus to the Publish button. Console warnings/errors were empty and the emitted screenshot was visually clean. The rebound IAB viewport was 1280 px wide, so the original Task 13 desktop 1505×1045 and mobile 390×844 acceptance evidence above remains the responsive-layout evidence; this rerun specifically validates the three review fixes. The temporary fixture was stopped, ports 5173/5174 were closed, tracked build info was restored, and no Drive, GitHub, Azure, DNS, deployment, push, secret, or other external mutable state was accessed.
+
+## Review fix round 2 — 2026-08-26
+
+A subsequent review found one Important label-parsing defect. Valid persisted filenames containing an email autolink, such as `mail <user@example.com>.pdf`, could produce a nested/sibling `mailto:` link instead of one attachment link with the exact server filename. Commit `91a66b9` (`fix: preserve attachment labels in Markdown`) replaces the bracket-only label escape with the complete CommonMark ASCII punctuation class ``[!-/:-@[-`{-~]``. Unicode is not escaped, while generated labels cannot activate HTML, autolinks, emphasis, code, or link syntax. The percent-encoded angle destination and canonical projection remain unchanged.
+
+RED was observed before the production edit:
+
+```text
+domain: 1 file; 6 failed, 6 passed
+web production MarkdownPreview DOM: 1 failed, 3 passed, 49 skipped
+reason: mail <user@example.com>.pdf became two anchors, including mailto:user@example.com
+```
+
+GREEN covers `<done>.png`, `mail <user@example.com>.pdf`, every permitted ASCII Markdown punctuation, and NFC Unicode. The generated source is passed through the production parser, sanitizer, URL rewrite, attachment projection, deletion fence, and publication fence. Inline image alt text and download-link text equal the exact normalized server filename; each case has only its intended same-origin attachment URL and no nested anchor, `mailto:`, external URL, executable element, or synthetic HTML element.
+
+```text
+focused domain: 12/12 passed
+focused real web DOM plus owner insertion: 5/5 passed, 48 skipped
+lint/typecheck/build: PASS
+full live-Drive-unset tests: 38 files passed, 1 skipped; 606 passed, 1 skipped
+project contract: 2/2 passed
+git diff --check: PASS
+source/JavaScript/declaration dist public-helper parity: 1/1/1
+```
+
+The sole skip remains the opt-in live Drive test and the existing non-failing Vite large-chunk warning remains unchanged. No additional IAB run was needed: this defect is the serialized DOM shape produced by the production Markdown parser/sanitizer, and the new jsdom test asserts that exact visible alt/link behavior directly without introducing a layout or browser-only claim. Tracked build info was restored, ports 5173/5174 remained closed, and no external state was accessed.
