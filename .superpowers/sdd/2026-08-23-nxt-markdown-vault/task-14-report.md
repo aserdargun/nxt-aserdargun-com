@@ -148,3 +148,59 @@ macOS classifies every address owned by this same Mac as `localhost` for that pr
 - No deployment workflow was created. Tasks 17/18 must revalidate the real `nxt-aserdargun-com` repository identity/remote and receive explicit action-time authorization.
 - The root checkout was not edited. Implementation stayed in the approved worktree and branch.
 - Built artifacts and local lifecycle files are ignored/uncommitted. Ports 4280, 5173, and 7071 are closed, `.nxt-local` is absent, and implementation commit `193dba9` contains no build output.
+
+## Review fix round 1
+
+Independent review found five Important and two Minor lifecycle gaps. Commit `2f0612737d6b142eab78c3597dfb0b5e66096530` (`fix: harden local lifecycle ownership`) closes them without changing the approved Azure policy or macOS Functions sandbox boundary:
+
+- Artifact verification now `lstat`s the exact checkout-owned `web/dist` and `api-dist` roots, rejects root symlinks/non-directories/redirects, and revalidates root device/inode identities immediately before success.
+- Run acquires a mode-0600 atomic `wx` startup lease before port probes, cleanup, or builds. The lease binds checkout, nonce, and full coordinator PID/start-time/cwd/executable/command/PGID identity. Only that owner may replace provisional control state or clean a failed startup.
+- Control state is persisted atomically as `starting` immediately after lease acquisition, again after every spawn, observed same-process exec transition, and listener identity update, then as `ready`. Stop claims the lease and recovers recorded partial services after launcher SIGKILL.
+- Rollback and Stop no longer send negative-PID process-group signals. They repeatedly enumerate descendants and recorded PGIDs, require checkout ownership, capture each full identity, and revalidate PID, start time, cwd, executable, command, and PGID before every individual TERM/KILL.
+- Child enumeration propagates every error except exact `pgrep` no-child exit 1. TERM/KILL phases repeat discovery until two verified empty passes, so late forks and non-listening descendants cannot escape. Enumeration/refusal errors retain control ownership state.
+- Caller-provided `NXT_LOCAL_AUTH_BYPASS` is deleted from build, Vite, and SWA environments; only the non-production Functions child receives exact value `1`.
+- The Codex Validate action is named `Validate bounded lifecycle (leaves stack stopped)` because it runs real bounded lifecycle integration and cleans all services.
+
+The controller's IAB observation that SWA CLI proxy responses omit configured `globalHeaders` is recorded as an emulator-evidence limitation, not a source-policy defect. The exact `staticwebapp.config.json` global headers and artifact verifier remain unchanged and fail closed. No local workaround weakens the CSP or other headers; Azure production header evidence remains a later deployment-validation responsibility.
+
+### Fix-round RED → GREEN evidence
+
+Focused RED, exact Node 22 command before lifecycle production edits:
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH node --test --test-concurrency=1 tools/static-security.test.mjs tools/artifact-contract.test.mjs tools/local-lifecycle.integration.test.mjs
+```
+
+```text
+30 tests: 20 passed, 10 failed, 0 skipped
+expected failures: artifact-root symlinks; missing/mismatched PGID; suppressed enumeration error; surviving late fork; absent startup lease; absent provisional Vite/Functions state after launcher SIGKILL; inherited auth bypass; inaccurate Validate label
+exit 1
+```
+
+Focused GREEN used the same command:
+
+```text
+30 tests: 30 passed, 0 failed, 0 skipped, 0 cancelled
+duration: 95.34 seconds
+exit 0
+```
+
+Full validation explicitly removed every live Drive key and ran `pnpm validate:codex` under Node `22.23.1`:
+
+```text
+lint: PASS
+typecheck: PASS
+API/web builds: PASS
+artifact verifier: 13 web files, 3 API files, PASS
+contracts: 14 passed
+domain: 29 passed
+web: 169 passed
+API: 394 passed, 1 opt-in live Drive test skipped
+repository total: 606 passed, 1 skipped
+project contract: 2 passed
+focused Task 14: 30 passed
+git diff --check: PASS
+exit 0
+```
+
+The real simultaneous-launch barrier, Vite/Functions launcher-SIGKILL recovery, partial rollback, full stack, auth-environment scope, late fork, forced escalation, and refusal fixtures all completed bounded cleanup. Ports 4280, 5173, and 7071 are closed; `.nxt-local` is absent; generated artifacts remain ignored; `web/tsconfig.tsbuildinfo` was restored. Fix round 1 made no network request and did not access or mutate Drive, GitHub, Azure, DNS, remotes, workflows, deployment state, or secrets. Browser IAB remains with the controller.
