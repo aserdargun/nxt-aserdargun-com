@@ -204,3 +204,62 @@ exit 0
 ```
 
 The real simultaneous-launch barrier, Vite/Functions launcher-SIGKILL recovery, partial rollback, full stack, auth-environment scope, late fork, forced escalation, and refusal fixtures all completed bounded cleanup. Ports 4280, 5173, and 7071 are closed; `.nxt-local` is absent; generated artifacts remain ignored; `web/tsconfig.tsbuildinfo` was restored. Fix round 1 made no network request and did not access or mutate Drive, GitHub, Azure, DNS, remotes, workflows, deployment state, or secrets. Browser IAB remains with the controller.
+
+## Review fix round 2
+
+Independent review found one remaining Important coordinator-crash window and one Minor Stop/Stop/Run ownership race. Commit `591bbdcc8e6d89e704e15f1ba1a2a273d7fbecdb` (`fix: close lifecycle crash windows`) closes both without changing Azure policy, local authentication scope, or the corrected macOS Functions host-local sandbox ruling.
+
+- Every service now starts behind checkout-owned `service-supervisor.mjs`. Run first persists a `planned` gate, then persists the supervisor's complete OS-observed PID/start-time/cwd/executable/command/PGID identity as `gated`, and only then atomically creates the nonce-bound release file. The supervisor cannot spawn or exec Vite, Functions, or SWA before release.
+- A coordinator SIGKILL immediately before Vite release leaves only the durably recorded gated supervisor. Stop writes the exact cancel gate, revalidates the supervisor identity, terminates only that checkout-owned process, proves all three ports closed, and removes the exact gate/control/log artifacts. No port-based or broad process cleanup was added.
+- Every non-idle Stop now obtains a mode-0600 atomic `wx` `stop.lock` bound to checkout realpath, control nonce, a fresh Stop nonce, and the stopper's complete OS process identity. A concurrent Stop is refused while the exact owner is active; Run also refuses the claim even after process/control/log cleanup and cannot start until the owner removes its own claim last.
+- Gate registration/release/cancel paths are exact checkout children with closed names. Stop understands `planned`, `gated`, and `ready` records, preserves full identity checks through cleanup, and removes only record-owned gate files and logs.
+- The prior host-local Functions sandbox remains exact: macOS may admit same-machine interface aliases classified as `localhost`, other machines are denied, and Vite/SWA remain literal `127.0.0.1`. No SWA CLI global-header workaround or policy weakening was introduced; the emulator header-evidence gap remains documented for later Azure validation.
+
+### Fix-round-2 RED → GREEN evidence
+
+The three new regressions ran before production edits under exact Node 22 with all live Drive keys unset:
+
+```sh
+node --test --test-concurrency=1 \
+  --test-name-pattern='concurrent Stops|before Vite release|ready Stop keeps Run' \
+  tools/local-lifecycle.integration.test.mjs
+```
+
+```text
+RED: 0 passed, 3 failed, 0 skipped; 66.05 seconds
+missing behavior: no exclusive Stop claim; service released before its gate; Run not held behind final Stop cleanup
+GREEN: 3 passed, 0 failed, 0 skipped; 46.67 seconds
+```
+
+The complete focused security/artifact/lifecycle run then passed `33/33` in `143.92` seconds. It includes simultaneous Run, concurrent Stop, ready Stop/Run, exact pre-release coordinator SIGKILL, post-Vite and post-Functions coordinator SIGKILL, partial rollback, late fork, forced escalation, foreign/stale/reused identities, auth-environment scope, deterministic API hashes, and artifact-root symlink refusal.
+
+The first full run exposed a test-diagnostic timeout in the existing post-Functions crash fixture after all 606 repository tests had passed. The same exact crash test immediately passed `1/1` in `17.32` seconds. Its wait was narrowed to surface an early launcher result instead of hiding it behind a 90-second marker timeout; no production behavior changed. The final fresh full run was:
+
+```sh
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH \
+env -u GOOGLE_CLIENT_ID -u GOOGLE_CLIENT_SECRET -u GOOGLE_REFRESH_TOKEN \
+  -u NXT_VAULT_DRIVE_FOLDER_ID -u NXT_PRIVATE_DRIVE_FOLDER_ID \
+  -u NXT_NOTES_DRIVE_FOLDER_ID -u NXT_INBOX_DRIVE_FOLDER_ID \
+  -u NXT_PLANS_DRIVE_FOLDER_ID -u NXT_ARCHIVE_DRIVE_FOLDER_ID \
+  -u NXT_ASSETS_DRIVE_FOLDER_ID -u NXT_PUBLISHED_DRIVE_FOLDER_ID \
+  -u NXT_VAULT_INDEX_DRIVE_FILE_ID -u NXT_PREFERENCES_DRIVE_FILE_ID \
+  -u NXT_PUBLICATION_MANIFEST_DRIVE_FILE_ID pnpm validate:codex
+```
+
+```text
+lint: PASS
+typecheck: PASS
+API/web builds: PASS
+artifact verifier: 13 web files, 3 API files, PASS
+contracts: 14 passed
+domain: 29 passed
+web: 169 passed
+API: 394 passed, 1 opt-in live Drive test skipped
+repository total: 606 passed, 1 skipped
+project contract: 2 passed
+focused Task 14: 33 passed in 145.98 seconds
+git diff --check: PASS
+exit 0
+```
+
+Tool evidence was Node `22.23.1`, pnpm `11.22.0`, and the Core Tools banner `4.13.0`. Final checks found no listeners on 4280/5173/7071, no `.nxt-local`, no surviving launcher/supervisor/test process, restored tracked `web/tsconfig.tsbuildinfo`, ignored/uncommitted build output, and a clean implementation commit. No browser IAB was opened for this lifecycle-only fix. No live Drive, GitHub, Azure, DNS, remote, workflow, deployment, push, or external mutable service access occurred; the root checkout and INF project were untouched.
