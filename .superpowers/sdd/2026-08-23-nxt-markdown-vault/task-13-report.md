@@ -195,3 +195,48 @@ The Browser full-page capture path showed a backend scale anomaly after changing
 - The Vite large-chunk warning remains visible and non-failing. The anonymous page itself is route-split into a 2.62 kB chunk.
 - No Google Drive provisioning/access, GitHub, Azure, DNS, custom domain, deployment, push, remote, secret, or external mutable state was accessed or changed.
 - Implementation commit: `988ec48`; push: none; deploy: none.
+
+## Review fix round 1 — 2026-08-26
+
+Independent review found three Important defects and no Critical or Minor defects. Commit `39ada26` (`fix: harden attachment publication workflow`) closes all three without widening Task 13 into Task 14:
+
+- The attachment picker now rearms its mounted generation during React StrictMode effect replay. A real `<StrictMode>` test requires one valid selection to produce exactly one upload and completion, restore the enabled state, and retain the existing concurrency, note-change, and true-unmount fences.
+- A pure domain helper now creates NFC, note-directory-relative POSIX `_assets/<note-id>/<server-name>` references. It uses Markdown angle destinations, RFC 3986-safe path-segment encoding, and escaped labels; OwnerShell inserts only the persisted server name. Root, nested, and deep paths plus Unicode normalization, spaces, brackets, `#`, `?`, `%`, `<`, `>`, matched and unmatched parentheses, apostrophe, and other punctuation all round-trip through the production attachment projection and both deletion/publication fences. Literal backslash remains forbidden by the existing published-asset-name contract; label backslashes remain escaped.
+- Owner publication state is bound to the current editor note ID as well as its non-null source/version, non-empty path, and exact `Saved` state. The confirmation count is derived from `attachmentReferenceProjection(source, path)` and counts only selected-note attachments accepted by canonical name or opaque private reference. Persisted-but-unreferenced assets report zero, and duplicate links count their attachment once.
+
+Focused RED evidence before each production fix:
+
+```text
+StrictMode picker: 1 failed, 7 passed; upload/completion stayed at zero and busy stayed true
+portable helper: 5 failed, 3 passed; createPortableAttachmentMarkdown was absent
+owner nested insertion: 1 failed, 45 skipped; old root-relative/non-angle link did not match
+referenced count: 2 failed, 1 passed, 46 skipped; expected 0/2 but received 1/3
+```
+
+Focused GREEN evidence:
+
+```text
+domain attachment references: 1 file, 8 passed
+web attachment picker + editor/owner integration: 2 files, 57 passed
+```
+
+Fresh Node `v22.23.1`, pnpm `11.22.0`, live-Drive-unset repository validation:
+
+```text
+lint: PASS
+typecheck: contracts, domain, API, web PASS
+build: contracts, domain, API, web PASS
+tests: 38 files passed, 1 skipped; 598 passed, 1 skipped
+project contract: 2/2 passed
+git diff --check: PASS
+```
+
+The only skip remains the opt-in live Google Drive integration test. Vite retained the existing non-failing large-chunk warning; the route-split anonymous page remained 2.62 kB before gzip. `pnpm artifact:verify` still exits 1 only because Task 14's `scripts/verify-artifacts.mjs` does not yet exist. Production web sensitive-name scan and the anonymous chunk private/session/owner/Drive scan each returned zero matches; the new helper is present in domain source, JavaScript dist, and declaration dist.
+
+The root IAB rerun used a fresh same-origin fixture note at the nested path `Notes/Inbox/Plan.md` and the production StrictMode root. One file choice produced exactly one upload and one autosave update, returned to `Saved` at Version 8, rendered one private preview image, and inserted exactly:
+
+```markdown
+![Café \[draft\] #1? report).png](<../../_assets/8c8e1b93-2b52-4c0e-9c87-4c9333a25765/Caf%C3%A9%20%5Bdraft%5D%20%231%3F%20report%29.png>)
+```
+
+The Publish dialog showed `Version 8` and `1 referenced attachments`; Cancel restored focus to the Publish button. Console warnings/errors were empty and the emitted screenshot was visually clean. The rebound IAB viewport was 1280 px wide, so the original Task 13 desktop 1505×1045 and mobile 390×844 acceptance evidence above remains the responsive-layout evidence; this rerun specifically validates the three review fixes. The temporary fixture was stopped, ports 5173/5174 were closed, tracked build info was restored, and no Drive, GitHub, Azure, DNS, deployment, push, secret, or other external mutable state was accessed.
