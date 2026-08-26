@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -94,4 +94,22 @@ test("artifact verifier refuses extra API files and artifact symlinks", async ()
   } finally {
     await rm(link);
   }
+});
+
+test("artifact verifier refuses symlinked web and API artifact roots", async (t) => {
+  await buildApi({ checkoutPath: checkout });
+  const temporary = await mkdtemp(join(tmpdir(), "nxt-artifact-roots-"));
+  t.after(async () => rm(temporary, { recursive: true, force: true }));
+
+  const webLinkCheckout = join(temporary, "web-link");
+  await mkdir(join(webLinkCheckout, "web"), { recursive: true });
+  await cp(join(checkout, "api-dist"), join(webLinkCheckout, "api-dist"), { recursive: true });
+  await symlink(join(checkout, "web", "dist"), join(webLinkCheckout, "web", "dist"));
+  await assert.rejects(verifyArtifacts({ checkoutPath: webLinkCheckout }), /symlink|root/u);
+
+  const apiLinkCheckout = join(temporary, "api-link");
+  await mkdir(join(apiLinkCheckout, "web"), { recursive: true });
+  await cp(join(checkout, "web", "dist"), join(apiLinkCheckout, "web", "dist"), { recursive: true });
+  await symlink(join(checkout, "api-dist"), join(apiLinkCheckout, "api-dist"));
+  await assert.rejects(verifyArtifacts({ checkoutPath: apiLinkCheckout }), /symlink|root/u);
 });

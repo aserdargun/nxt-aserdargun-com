@@ -27,8 +27,27 @@ const forbiddenNames = /(?:^|\/)(?:\.env(?:\.|$)|control\.json$|.*(?:credential|
 const forbiddenExtensions = new Set([".map", ".pem", ".p12", ".pfx", ".key"]);
 const expectedCsp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
 
+const inspectArtifactRoot = async (root, label) => {
+  let metadata;
+  try {
+    metadata = await lstat(root);
+  } catch {
+    throw new Error(`Missing ${label} artifact tree.`);
+  }
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) throw new Error(`Unsafe symlink or non-directory ${label} artifact root.`);
+  const resolved = await realpath(root);
+  if (resolved !== root) throw new Error(`Unsafe redirected ${label} artifact root.`);
+  return { device: metadata.dev, inode: metadata.ino };
+};
+
+const revalidateArtifactRoot = async (root, label, identity) => {
+  const current = await inspectArtifactRoot(root, label);
+  if (current.device !== identity.device || current.inode !== identity.inode) throw new Error(`${label} artifact root changed during verification.`);
+};
+
 const collectTree = async (root, label, maximum) => {
-  const rootRealpath = await realpath(root).catch(() => { throw new Error(`Missing ${label} artifact tree.`); });
+  const identity = await inspectArtifactRoot(root, label);
+  const rootRealpath = root;
   const files = [];
   const visit = async (directory) => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -45,7 +64,7 @@ const collectTree = async (root, label, maximum) => {
     }
   };
   await visit(rootRealpath);
-  return files.sort((a, b) => a.relative.localeCompare(b.relative));
+  return { files: files.sort((a, b) => a.relative.localeCompare(b.relative)), identity };
 };
 
 const readJson = async (path, label) => {
@@ -98,10 +117,12 @@ export const verifyArtifacts = async ({ checkoutPath = moduleCheckout } = {}) =>
   const checkout = await realpath(resolve(checkoutPath));
   const webRoot = join(checkout, "web", "dist");
   const apiRoot = join(checkout, "api-dist");
-  const [webFiles, apiFiles] = await Promise.all([
+  const [webTree, apiTree] = await Promise.all([
     collectTree(webRoot, "web", maxWebFiles),
     collectTree(apiRoot, "API", maxApiFiles)
   ]);
+  const { files: webFiles } = webTree;
+  const { files: apiFiles } = apiTree;
   if (webFiles.reduce((sum, file) => sum + file.size, 0) >= maxWebBytes) throw new Error("Web artifacts exceed the 250 MiB limit.");
   for (const required of ["index.html", "staticwebapp.config.json"]) {
     if (!webFiles.some((file) => file.relative === required)) throw new Error(`Missing web artifact ${required}.`);
@@ -128,6 +149,10 @@ export const verifyArtifacts = async ({ checkoutPath = moduleCheckout } = {}) =>
   if (!entry.includes("@azure/functions") || entry.includes("sourceMappingURL")) throw new Error("Invalid Functions entrypoint.");
   verifyStaticConfig(await readJson(join(webRoot, "staticwebapp.config.json"), "Static Web Apps config"));
   await scanFiles([...webFiles, ...apiFiles]);
+  await Promise.all([
+    revalidateArtifactRoot(webRoot, "web", webTree.identity),
+    revalidateArtifactRoot(apiRoot, "API", apiTree.identity)
+  ]);
   return { webFiles: webFiles.length, apiFiles: apiFiles.length };
 };
 

@@ -1,14 +1,21 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, chmod, lstat, mkdir, open, realpath, readdir, rm, rmdir } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, open, realpath, readdir, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { createRequire } from "node:module";
 import { delimiter, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { CONTROL_VERSION, inspectProcess, writeControlRecord } from "./stop-local-core.mjs";
+import {
+  CONTROL_VERSION,
+  acquireStartupLease,
+  inspectProcess,
+  releaseOwnedStartupLease,
+  stopControlledStack,
+  writeOwnedControlRecord
+} from "./stop-local-core.mjs";
 
 const run = promisify(execFile);
 const checkoutPath = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -25,12 +32,7 @@ const findExecutable = async (name) => {
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     if (directory.length === 0) continue;
     const candidate = join(directory, name);
-    try {
-      await access(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      continue;
-    }
+    try { await access(candidate, constants.X_OK); return candidate; } catch { continue; }
   }
   throw new Error(`Required executable ${name} was not found.`);
 };
@@ -113,12 +115,15 @@ const descendants = async (pid) => {
   return found;
 };
 
-const waitForListener = async (child, port, timeoutMs = 30_000) => {
+const waitForListener = async (child, port, onLauncherIdentity, timeoutMs = 30_000) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`Local child exited before port ${port} became ready.`);
-    const candidates = [child.pid, ...await descendants(child.pid)];
-    for (const pid of candidates) {
+    const launcher = await inspectProcess(child.pid);
+    if (launcher === null) throw new Error(`Local child identity disappeared before port ${port} became ready.`);
+    await onLauncherIdentity(launcher);
+    if (launcher.listeningPorts.includes(port)) return launcher;
+    for (const pid of await descendants(child.pid)) {
       const observed = await inspectProcess(pid);
       if (observed?.listeningPorts.includes(port)) return observed;
     }
@@ -127,45 +132,22 @@ const waitForListener = async (child, port, timeoutMs = 30_000) => {
   throw new Error(`Timed out waiting for local port ${port}.`);
 };
 
-const terminateLaunched = async (children) => {
-  for (const child of children.toReversed()) {
-    const observed = await inspectProcess(child.pid);
-    if (observed !== null && observed.startTime === child.identity?.startTime) {
-      try { process.kill(-child.pid, "SIGTERM"); } catch (error) { if (error?.code !== "ESRCH") throw error; }
-    }
-  }
-  const deadline = Date.now() + 3_000;
-  while (Date.now() < deadline && children.some((child) => child.exitCode === null)) {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-  }
-  for (const child of children.toReversed()) {
-    if (child.exitCode === null) {
-      const observed = await inspectProcess(child.pid);
-      if (observed !== null && observed.startTime === child.identity?.startTime) {
-        try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if (error?.code !== "ESRCH") throw error; }
-      }
-    }
-  }
-};
-
-const ensureLocalDirectory = async (checkout, localDirectory, controlPath) => {
+const ensureLocalDirectory = async (checkout, localDirectory) => {
   let metadata;
-  try { metadata = await lstat(localDirectory); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+  try { metadata = await lstat(localDirectory); }
+  catch (error) { if (error?.code !== "ENOENT") throw error; }
   if (metadata?.isSymbolicLink() || (metadata !== undefined && !metadata.isDirectory())) throw new Error("Refusing unsafe .nxt-local path.");
   if (metadata !== undefined && await realpath(localDirectory) !== localDirectory) throw new Error("Refusing foreign .nxt-local path.");
-  try {
-    await lstat(controlPath);
-    throw new Error("Refusing an existing local control record. Run Stop after verifying its ownership.");
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
   await mkdir(localDirectory, { recursive: true, mode: 0o700 });
   await chmod(localDirectory, 0o700);
-  for (const entry of await readdir(localDirectory)) {
-    if (!/^(?:vite|functions|swa)\.log$/u.test(entry)) throw new Error("Refusing unexpected local lifecycle artifact.");
-    await rm(join(localDirectory, entry), { force: true });
-  }
   if (!localDirectory.startsWith(`${checkout}${sep}`)) throw new Error("Refusing foreign local lifecycle directory.");
+};
+
+const clearOwnedStaleLogs = async (localDirectory) => {
+  for (const entry of await readdir(localDirectory)) {
+    if (/^(?:vite|functions|swa)\.log$/u.test(entry)) await rm(join(localDirectory, entry), { force: true });
+    else if (entry !== "control.json" && entry !== "startup.lock") throw new Error("Refusing unexpected local lifecycle artifact.");
+  }
 };
 
 const resolvePackageBin = async (packageName, relativeBin, from) => {
@@ -179,16 +161,21 @@ const spawnLogged = async ({ name, executable, args, cwd, env, localDirectory })
   const child = spawn(executable, args, { cwd, env, detached: true, stdio: ["ignore", log.fd, log.fd] });
   child.unref();
   await log.close();
-  child.identity = await inspectProcess(child.pid);
-  if (child.identity === null) throw new Error(`${name} failed before identity observation.`);
-  return { child, logPath };
+  const identity = await inspectProcess(child.pid);
+  if (identity === null) throw new Error(`${name} failed before identity observation.`);
+  return { child, identity, logPath };
 };
 
-const removeKnownLocalArtifacts = async (localDirectory) => {
-  for (const name of ["control.json", "vite.log", "functions.log", "swa.log"]) await rm(join(localDirectory, name), { force: true });
-  await rmdir(localDirectory).catch((error) => {
-    if (error?.code !== "ENOTEMPTY" && error?.code !== "ENOENT") throw error;
-  });
+const sameIdentity = (left, right) => left.pid === right.pid && left.pgid === right.pgid && left.startTime === right.startTime &&
+  left.cwd === right.cwd && left.executable === right.executable && left.command === right.command;
+
+const sameProcessInstance = (left, right) => left.pid === right.pid && left.pgid === right.pgid && left.startTime === right.startTime &&
+  left.cwd === right.cwd;
+
+const sanitizedBaseEnvironment = () => {
+  const environment = { ...process.env };
+  delete environment.NXT_LOCAL_AUTH_BYPASS;
+  return environment;
 };
 
 export const startLocalStack = async ({ checkout = checkoutPath, testHooks } = {}) => {
@@ -199,65 +186,91 @@ export const startLocalStack = async ({ checkout = checkoutPath, testHooks } = {
     if (typeof process.env[key] === "string" && process.env[key].trim().length > 0) throw new Error(`Refusing live Drive environment key ${key}.`);
   }
   const tools = await preflightTools();
-  await assertPortsAvailable();
-  await ensureLocalDirectory(checkoutRealpath, localDirectory, controlPath);
-  let viteBin;
-  let swaBin;
-  try {
-    await run(tools.pnpmPath, ["build"], { cwd: checkoutRealpath, env: process.env, maxBuffer: 20 * 1024 * 1024 });
-    await run(tools.pnpmPath, ["api:build"], { cwd: checkoutRealpath, env: process.env, maxBuffer: 20 * 1024 * 1024 });
-    await run(tools.pnpmPath, ["artifact:verify"], { cwd: checkoutRealpath, env: process.env, maxBuffer: 20 * 1024 * 1024 });
-    const vitePackage = createRequire(join(checkoutRealpath, "web", "package.json")).resolve("vite/package.json");
-    viteBin = join(dirname(vitePackage), "bin/vite.js");
-    swaBin = await resolvePackageBin("@azure/static-web-apps-cli", "dist/cli/bin.js", checkoutRealpath);
-  } catch (error) {
-    await removeKnownLocalArtifacts(localDirectory);
-    throw error;
-  }
+  await ensureLocalDirectory(checkoutRealpath, localDirectory);
   const nonce = randomUUID();
-  const launched = [];
+  const lease = await acquireStartupLease({ checkoutPath: checkoutRealpath, controlPath, nonce });
   const services = [];
+  const baseEnvironment = sanitizedBaseEnvironment();
   let interrupted = false;
-  const addService = async ({ name, executable, args, cwd, env, port }) => {
-    const { child, logPath } = await spawnLogged({ name, executable, args, cwd, env, localDirectory });
-    launched.push(child);
-    const listener = await waitForListener(child, port);
-    child.identity = await inspectProcess(child.pid);
-    if (child.identity === null) throw new Error(`${name} launcher identity changed before readiness.`);
-    const launcher = listener.pid === child.pid ? undefined : child.identity;
-    services.push({
-      name,
-      pid: listener.pid,
-      startTime: listener.startTime,
-      cwd: listener.cwd,
-      executable: listener.executable,
-      command: listener.command,
-      port,
-      logPath,
-      nonce,
-      ...(launcher === undefined ? {} : { launcher })
-    });
-    await testHooks?.afterService?.(name);
-    if (interrupted) throw new Error("Local startup was interrupted.");
+  let record = {
+    version: CONTROL_VERSION,
+    state: "starting",
+    checkoutRealpath,
+    nonce,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    coordinator: lease.record.owner,
+    services
   };
-  const cleanup = async () => {
-    await terminateLaunched(launched);
-    await removeKnownLocalArtifacts(localDirectory);
+  const persist = async (state = "starting") => {
+    record = { ...record, state, updatedAt: new Date().toISOString(), services: [...services] };
+    await writeOwnedControlRecord(controlPath, record, lease);
   };
+  const cleanup = async () => stopControlledStack({ checkoutPath: checkoutRealpath, controlPath, ownerNonce: nonce });
   const onSignal = () => { interrupted = true; };
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
   try {
+    await persist();
+    await clearOwnedStaleLogs(localDirectory);
+    await assertPortsAvailable();
+    await testHooks?.afterLease?.();
+    if (interrupted) throw new Error("Local startup was interrupted.");
+
+    await run(tools.pnpmPath, ["build"], { cwd: checkoutRealpath, env: baseEnvironment, maxBuffer: 20 * 1024 * 1024 });
+    if (interrupted) throw new Error("Local startup was interrupted.");
+    await run(tools.pnpmPath, ["api:build"], { cwd: checkoutRealpath, env: baseEnvironment, maxBuffer: 20 * 1024 * 1024 });
+    if (interrupted) throw new Error("Local startup was interrupted.");
+    await run(tools.pnpmPath, ["artifact:verify"], { cwd: checkoutRealpath, env: baseEnvironment, maxBuffer: 20 * 1024 * 1024 });
+    if (interrupted) throw new Error("Local startup was interrupted.");
+    const vitePackage = createRequire(join(checkoutRealpath, "web", "package.json")).resolve("vite/package.json");
+    const viteBin = join(dirname(vitePackage), "bin/vite.js");
+    const swaBin = await resolvePackageBin("@azure/static-web-apps-cli", "dist/cli/bin.js", checkoutRealpath);
+
+    const addService = async ({ name, executable, args, cwd, env, port }) => {
+      const { child, identity, logPath } = await spawnLogged({ name, executable, args, cwd, env, localDirectory });
+      const index = services.length;
+      let launcherIdentity = identity;
+      services.push({ name, status: "spawned", launcher: identity, port, logPath, nonce });
+      await persist();
+      const listener = await waitForListener(child, port, async (observed) => {
+        if (sameIdentity(launcherIdentity, observed)) return;
+        if (!sameProcessInstance(launcherIdentity, observed)) throw new Error(`${name} launcher process instance changed before readiness.`);
+        launcherIdentity = observed;
+        services[index] = { name, status: "spawned", launcher: launcherIdentity, port, logPath, nonce };
+        await persist();
+      });
+      const finalLauncher = await inspectProcess(child.pid);
+      if (finalLauncher === null || !sameIdentity(launcherIdentity, finalLauncher)) throw new Error(`${name} launcher identity changed before readiness.`);
+      services[index] = {
+        name,
+        status: "ready",
+        pid: listener.pid,
+        pgid: listener.pgid,
+        startTime: listener.startTime,
+        cwd: listener.cwd,
+        executable: listener.executable,
+        command: listener.command,
+        port,
+        logPath,
+        nonce,
+        ...(listener.pid === child.pid ? {} : { launcher: launcherIdentity })
+      };
+      await persist();
+      await testHooks?.afterService?.(name);
+      if (interrupted) throw new Error("Local startup was interrupted.");
+    };
+
     await addService({
       name: "vite", executable: process.execPath, args: [viteBin, "--host", "127.0.0.1", "--port", "5173", "--strictPort"],
-      cwd: join(checkoutRealpath, "web"), env: process.env, port: 5173
+      cwd: join(checkoutRealpath, "web"), env: baseEnvironment, port: 5173
     });
     await addService({
       name: "functions", executable: "/usr/bin/sandbox-exec",
       args: ["-p", FUNCTIONS_HOST_LOCAL_SANDBOX_PROFILE, tools.funcHostPath, "start", "--port", "7071", "--cors", "http://127.0.0.1:4280"],
       cwd: join(checkoutRealpath, "api"),
       env: {
-        ...process.env,
+        ...baseEnvironment,
         NODE_ENV: "development",
         AZURE_FUNCTIONS_ENVIRONMENT: "Development",
         FUNCTIONS_WORKER_RUNTIME: "node",
@@ -269,26 +282,22 @@ export const startLocalStack = async ({ checkout = checkoutPath, testHooks } = {
     await addService({
       name: "swa", executable: process.execPath,
       args: [swaBin, "start", "http://127.0.0.1:5173", "--api-devserver-url", "http://127.0.0.1:7071", "--swa-config-location", join(checkoutRealpath, "web", "public"), "--host", "127.0.0.1", "--port", "4280"],
-      cwd: checkoutRealpath, env: process.env, port: 4280
+      cwd: checkoutRealpath, env: baseEnvironment, port: 4280
     });
-    if (interrupted) throw new Error("Local startup was interrupted.");
-    const record = {
-      version: CONTROL_VERSION,
-      checkoutRealpath,
-      nonce,
-      createdAt: new Date().toISOString(),
-      services
-    };
-    await writeControlRecord(controlPath, record);
+    await persist("ready");
     for (const service of services) {
       const observed = await inspectProcess(service.pid);
-      if (observed === null || observed.startTime !== service.startTime || observed.command !== service.command || !observed.listeningPorts.includes(service.port)) {
+      if (observed === null || !sameIdentity(service, observed) || !observed.listeningPorts.includes(service.port)) {
         throw new Error(`${service.name} identity changed while recording startup.`);
       }
     }
+    await releaseOwnedStartupLease(lease);
     return { url: "http://127.0.0.1:4280", localDirectory, tools, services };
   } catch (error) {
-    await cleanup();
+    try { await cleanup(); }
+    catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "Local startup failed and owned cleanup could not be proven.", { cause: cleanupError });
+    }
     throw error;
   } finally {
     process.removeListener("SIGINT", onSignal);

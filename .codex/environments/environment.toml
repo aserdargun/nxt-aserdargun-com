@@ -14,7 +14,7 @@ icon = "run"
 command = "pnpm dev:codex"
 
 [[actions]]
-name = "Validate without server"
+name = "Validate bounded lifecycle (leaves stack stopped)"
 icon = "tool"
 command = "pnpm validate:codex"
 

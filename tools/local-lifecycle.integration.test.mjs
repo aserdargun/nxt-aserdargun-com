@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { access, chmod, mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import {
   CONTROL_VERSION,
@@ -18,6 +20,10 @@ import {
   startLocalStack
 } from "../scripts/local-dev.mjs";
 
+const run = promisify(execFile);
+const checkout = process.cwd();
+const lifecycleModuleUrl = pathToFileURL(join(checkout, "scripts", "local-dev.mjs")).href;
+
 const waitFor = async (predicate, timeoutMs = 3_000) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -26,6 +32,95 @@ const waitFor = async (predicate, timeoutMs = 3_000) => {
   }
   throw new Error("Timed out waiting for fixture state.");
 };
+
+const pathExists = async (path) => access(path).then(() => true, () => false);
+
+const terminateRunner = async (child) => {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (!child.kill("SIGKILL")) return;
+  await new Promise((resolvePromise) => child.once("exit", resolvePromise));
+};
+
+const forceCleanupCheckoutStack = async () => {
+  await stopControlledStack({ checkoutPath: checkout, termTimeoutMs: 500, killTimeoutMs: 500 }).catch(() => {});
+  const groupIds = new Set();
+  for (const port of [4280, 5173, 7071]) {
+    let stdout = "";
+    try {
+      stdout = (await run("/usr/sbin/lsof", ["-nP", "-t", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" })).stdout;
+    } catch (error) {
+      if (error?.code !== 1) throw error;
+    }
+    for (const value of stdout.trim().split(/\s+/u).filter(Boolean)) {
+      const pid = Number(value);
+      const observed = await inspectProcess(pid);
+      if (observed === null) continue;
+      if (observed.cwd !== checkout && !observed.cwd.startsWith(`${checkout}${sep}`)) {
+        throw new Error(`Refusing test cleanup of foreign listener PID ${pid}.`);
+      }
+      const { stdout: pgidText } = await run("/bin/ps", ["-p", String(pid), "-o", "pgid="], { encoding: "utf8" });
+      groupIds.add(Number(pgidText.trim()));
+    }
+  }
+  if (groupIds.size > 0) {
+    const { stdout } = await run("/bin/ps", ["-axo", "pid=,pgid="], { encoding: "utf8" });
+    const identities = [];
+    for (const line of stdout.split("\n")) {
+      const match = /^\s*([0-9]+)\s+([0-9]+)\s*$/u.exec(line);
+      if (match === null || !groupIds.has(Number(match[2]))) continue;
+      const observed = await inspectProcess(Number(match[1]));
+      if (observed === null) continue;
+      if (observed.cwd !== checkout && !observed.cwd.startsWith(`${checkout}${sep}`)) {
+        throw new Error(`Refusing test cleanup of foreign group member PID ${observed.pid}.`);
+      }
+      identities.push(observed);
+    }
+    for (const identity of identities.toReversed()) {
+      const observed = await inspectProcess(identity.pid);
+      if (observed !== null && observed.startTime === identity.startTime && observed.cwd === identity.cwd &&
+        observed.executable === identity.executable && observed.command === identity.command) process.kill(identity.pid, "SIGKILL");
+    }
+  }
+  await waitFor(async () => assertPortsAvailable([4280, 5173, 7071]).then(() => true, () => false), 5_000).catch(() => {});
+  if (await assertPortsAvailable([4280, 5173, 7071]).then(() => true, () => false)) {
+    await rm(join(checkout, ".nxt-local"), { recursive: true, force: true });
+  }
+};
+
+const createLauncherHarness = async (t) => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-launcher-")));
+  const script = join(directory, "launcher.mjs");
+  await writeFile(script, [
+    'import { access, writeFile } from "node:fs/promises";',
+    `import { startLocalStack } from ${JSON.stringify(lifecycleModuleUrl)};`,
+    'const [id, directory, mode, target = ""] = process.argv.slice(2);',
+    'const marker = `${directory}/${mode}-${target || id}-${id}.marker`;',
+    'const result = `${directory}/result-${id}.json`;',
+    'const waitForRelease = async () => {',
+    '  const deadline = Date.now() + 30_000;',
+    '  while (Date.now() < deadline) {',
+    '    try { await access(`${directory}/release-${id}`); return; } catch {}',
+    '    await new Promise((resolve) => setTimeout(resolve, 25));',
+    '  }',
+    '  throw new Error("launcher barrier timeout");',
+    '};',
+    'try {',
+    '  const stack = await startLocalStack({ testHooks: {',
+    '    afterLease: async () => { if (mode === "lease") { await writeFile(marker, "leased"); await waitForRelease(); } },',
+    '    afterService: async (name) => { if (mode === "crash" && name === target) { await writeFile(marker, name); await new Promise(() => {}); } }',
+    '  } });',
+    '  await writeFile(result, JSON.stringify({ ok: true, services: stack.services.map(({ name, pid }) => ({ name, pid })) }));',
+    '} catch (error) {',
+    '  await writeFile(result, JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error), details: error instanceof AggregateError ? error.errors.map((item) => item instanceof Error ? item.message : String(item)) : [] }));',
+    '  process.exitCode = 1;',
+    '}'
+  ].join("\n"));
+  t.after(async () => rm(directory, { recursive: true, force: true }));
+  return { directory, script };
+};
+
+const spawnLauncher = ({ script, directory, id, mode, target = "", env = process.env }) =>
+  spawn(process.execPath, [script, id, directory, mode, target], { cwd: checkout, env, stdio: "ignore" });
 
 const fixture = async (t) => {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-lifecycle-")));
@@ -37,10 +132,17 @@ const fixture = async (t) => {
     'const server = createServer(() => {});',
     'server.listen(Number(process.argv[2]), "127.0.0.1");',
     'if (process.argv[3] === "ignore") process.on("SIGTERM", () => {});',
-    'else process.on("SIGTERM", () => server.close(() => process.exit(0)));',
+    'else if (process.argv[3] !== "late-fork") process.on("SIGTERM", () => server.close(() => process.exit(0)));',
     'if (process.argv[3] === "tree") {',
     '  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd: process.cwd(), stdio: "ignore" });',
     '  writeFileSync(process.argv[4], String(child.pid));',
+    '}',
+    'if (process.argv[3] === "late-fork") {',
+    '  process.once("SIGTERM", () => {',
+    '    const child = spawn(process.execPath, ["-e", "process.on(\\"SIGTERM\\", () => {}); setInterval(() => {}, 1000)"], { cwd: process.cwd(), stdio: "ignore" });',
+    '    writeFileSync(process.argv[4], String(child.pid));',
+    '    server.close(() => process.exit(0));',
+    '  });',
     '}'
   ].join("\n"));
   t.after(async () => rm(directory, { recursive: true, force: true }));
@@ -58,7 +160,7 @@ const reservePort = async () => {
 };
 
 const startChild = async (script, port, cwd, mode, extra) => {
-  const child = spawn(process.execPath, [script, String(port), ...(mode === undefined ? [] : [mode]), ...(extra === undefined ? [] : [extra])], { cwd, stdio: "ignore" });
+  const child = spawn(process.execPath, [script, String(port), ...(mode === undefined ? [] : [mode]), ...(extra === undefined ? [] : [extra])], { cwd, detached: true, stdio: "ignore" });
   await waitFor(async () => {
     const observed = await inspectProcess(child.pid);
     return observed?.listeningPorts.includes(port) === true;
@@ -69,6 +171,9 @@ const startChild = async (script, port, cwd, mode, extra) => {
 const makeRecord = async ({ checkoutPath, controlPath, child, port, nonce = crypto.randomUUID() }) => {
   const observed = await inspectProcess(child.pid);
   assert(observed);
+  const { stdout: pgidText } = await run("/bin/ps", ["-p", String(child.pid), "-o", "pgid="], { encoding: "utf8" });
+  const pgid = Number(pgidText.trim());
+  assert(Number.isSafeInteger(pgid) && pgid > 0);
   const record = {
     version: CONTROL_VERSION,
     checkoutRealpath: await realpath(checkoutPath),
@@ -81,6 +186,7 @@ const makeRecord = async ({ checkoutPath, controlPath, child, port, nonce = cryp
       cwd: observed.cwd,
       executable: observed.executable,
       command: observed.command,
+      pgid,
       port,
       logPath: join(checkoutPath, ".nxt-local", "fixture.log"),
       nonce
@@ -89,6 +195,16 @@ const makeRecord = async ({ checkoutPath, controlPath, child, port, nonce = cryp
   await writeControlRecord(controlPath, record);
   return record;
 };
+
+test("process inspection includes the process-group identity", async (t) => {
+  const { directory, childScript } = await fixture(t);
+  const port = await reservePort();
+  const child = await startChild(childScript, port, directory);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  const observed = await inspectProcess(child.pid);
+  assert(observed);
+  assert(Number.isSafeInteger(observed.pgid) && observed.pgid > 0);
+});
 
 test("controlled stop validates identity, closes the listener, and is idempotent", async (t) => {
   const { directory, childScript } = await fixture(t);
@@ -142,6 +258,8 @@ for (const [label, mutate] of [
   ["PID start time", (record) => ({ ...record, services: record.services.map((service) => ({ ...service, startTime: "stale" })) })],
   ["cwd", (record) => ({ ...record, services: record.services.map((service) => ({ ...service, cwd: "/tmp" })) })],
   ["command", (record) => ({ ...record, services: record.services.map((service) => ({ ...service, command: "foreign-command" })) })],
+  ["executable", (record) => ({ ...record, services: record.services.map((service) => ({ ...service, executable: "/tmp/foreign-executable" })) })],
+  ["process group", (record) => ({ ...record, services: record.services.map((service) => ({ ...service, pgid: service.pgid + 1 })) })],
   ["nonce", (record) => ({ ...record, services: record.services.map((service) => ({ ...service, nonce: crypto.randomUUID() })) })]
 ]) {
   test(`controlled stop refuses a mismatched ${label} without signaling`, async (t) => {
@@ -168,6 +286,50 @@ test("controlled stop refuses corrupt records without affecting a harmless proce
   await writeFile(controlPath, "{not-json", { mode: 0o600 });
   await assert.rejects(stopControlledStack({ checkoutPath: directory, controlPath }), /refus/i);
   assert.equal((await inspectProcess(child.pid))?.listeningPorts.includes(port), true);
+});
+
+test("controlled stop refuses descendant-enumeration errors and retains ownership state", async (t) => {
+  const { directory, childScript } = await fixture(t);
+  const controlPath = join(directory, ".nxt-local", "control.json");
+  await mkdir(join(directory, ".nxt-local"), { recursive: true });
+  const port = await reservePort();
+  const child = await startChild(childScript, port, directory);
+  t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });
+  await makeRecord({ checkoutPath: directory, controlPath, child, port });
+
+  await assert.rejects(
+    stopControlledStack({
+      checkoutPath: directory,
+      controlPath,
+      enumerateChildPids: async () => { throw new Error("injected descendant enumeration failure"); }
+    }),
+    /injected descendant enumeration failure/u
+  );
+  assert.equal((await inspectProcess(child.pid))?.listeningPorts.includes(port), true);
+  assert.match(await readFile(controlPath, "utf8"), /fixture/u);
+});
+
+test("controlled stop repeatedly discovers and terminates a late fork", async (t) => {
+  const { directory, childScript } = await fixture(t);
+  const controlPath = join(directory, ".nxt-local", "control.json");
+  const childPidPath = join(directory, "late-descendant.pid");
+  await mkdir(join(directory, ".nxt-local"), { recursive: true });
+  const port = await reservePort();
+  const child = await startChild(childScript, port, directory, "late-fork", childPidPath);
+  let descendantPid;
+  t.after(async () => {
+    if (child.exitCode === null) child.kill("SIGKILL");
+    if (Number.isSafeInteger(descendantPid) && await inspectProcess(descendantPid) !== null) process.kill(descendantPid, "SIGKILL");
+  });
+  await makeRecord({ checkoutPath: directory, controlPath, child, port });
+
+  assert.deepEqual(
+    await stopControlledStack({ checkoutPath: directory, controlPath, termTimeoutMs: 1_000, killTimeoutMs: 1_000 }),
+    { status: "stopped" }
+  );
+  await waitFor(async () => readFile(childPidPath, "utf8").then(() => true, () => false));
+  descendantPid = Number(await readFile(childPidPath, "utf8"));
+  assert.equal(await inspectProcess(descendantPid), null);
 });
 
 test("the Functions sandbox profile admits only peers macOS classifies as host-local", () => {
@@ -201,6 +363,121 @@ test("Run refuses Drive configuration and an existing corrupt control record", a
   await writeFile(join(directory, ".nxt-local", "control.json"), "{corrupt", { mode: 0o600 });
   await assert.rejects(startLocalStack({ checkout: directory }), /existing local control/u);
   assert.equal(await readFile(join(directory, ".nxt-local", "control.json"), "utf8"), "{corrupt");
+});
+
+test("simultaneous launchers have exactly one lease owner and the loser cannot erase its stack", { timeout: 120_000 }, async (t) => {
+  const { directory, script } = await createLauncherHarness(t);
+  const runners = [
+    spawnLauncher({ script, directory, id: "a", mode: "lease" }),
+    spawnLauncher({ script, directory, id: "b", mode: "lease" })
+  ];
+  t.after(async () => {
+    await Promise.all(runners.map(terminateRunner));
+    await forceCleanupCheckoutStack();
+  });
+
+  await waitFor(async () => {
+    const entries = await readdir(directory);
+    return entries.filter((name) => name.startsWith("lease-") && name.endsWith(".marker")).length === 1 &&
+      entries.filter((name) => name.startsWith("result-") && name.endsWith(".json")).length === 1;
+  }, 15_000);
+  const entries = await readdir(directory);
+  const leaseMarker = entries.find((name) => name.startsWith("lease-") && name.endsWith(".marker"));
+  assert(leaseMarker);
+  const winnerId = leaseMarker.endsWith("-a.marker") ? "a" : "b";
+  const loserId = winnerId === "a" ? "b" : "a";
+  const loser = JSON.parse(await readFile(join(directory, `result-${loserId}.json`), "utf8"));
+  assert.equal(loser.ok, false);
+  assert.match(loser.message, /lease|control|startup/u);
+  assert.equal(await pathExists(join(checkout, ".nxt-local", "startup.lock")), true);
+  const starting = JSON.parse(await readFile(join(checkout, ".nxt-local", "control.json"), "utf8"));
+  assert.equal(starting.state, "starting");
+  assert.equal(starting.services.length, 0);
+
+  await writeFile(join(directory, `release-${winnerId}`), "release");
+  await waitFor(() => pathExists(join(directory, `result-${winnerId}.json`)), 90_000);
+  const winner = JSON.parse(await readFile(join(directory, `result-${winnerId}.json`), "utf8"));
+  assert.equal(winner.ok, true, [winner.message, ...(winner.details ?? [])].filter(Boolean).join(" | ") || "winning launcher failed");
+  assert.deepEqual(winner.services.map(({ name }) => name), ["vite", "functions", "swa"]);
+  const ready = JSON.parse(await readFile(join(checkout, ".nxt-local", "control.json"), "utf8"));
+  assert.equal(ready.state, "ready");
+  for (const name of ["vite", "functions", "swa"]) assert.equal(await pathExists(join(checkout, ".nxt-local", `${name}.log`)), true);
+  assert.deepEqual(await stopControlledStack({ checkoutPath: checkout }), { status: "stopped" });
+  await assert.doesNotReject(assertPortsAvailable([4280, 5173, 7071]));
+});
+
+for (const [serviceName, expectedCount] of [["vite", 1], ["functions", 2]]) {
+  test(`Stop recovers a launcher SIGKILL after ${serviceName} is durably recorded`, { timeout: 120_000 }, async (t) => {
+    const { directory, script } = await createLauncherHarness(t);
+    const runner = spawnLauncher({ script, directory, id: serviceName, mode: "crash", target: serviceName });
+    t.after(async () => {
+      await terminateRunner(runner);
+      await forceCleanupCheckoutStack();
+    });
+
+    await waitFor(() => pathExists(join(directory, `crash-${serviceName}-${serviceName}.marker`)), 90_000);
+    const provisional = JSON.parse(await readFile(join(checkout, ".nxt-local", "control.json"), "utf8"));
+    assert.equal(provisional.state, "starting");
+    assert.equal(provisional.services.length, expectedCount);
+    assert.equal(provisional.services.every(({ status }) => status === "ready"), true);
+    await terminateRunner(runner);
+
+    assert.deepEqual(await stopControlledStack({ checkoutPath: checkout }), { status: "stopped" });
+    await assert.doesNotReject(assertPortsAvailable([4280, 5173, 7071]));
+    assert.equal(await pathExists(join(checkout, ".nxt-local")), false);
+  });
+}
+
+test("caller-exported local auth bypass is removed from Vite and SWA and child-scoped to Functions", { timeout: 120_000 }, async (t) => {
+  const { directory, script } = await createLauncherHarness(t);
+  const marker = `caller-${crypto.randomUUID()}`;
+  const wrapper = join(directory, "pnpm");
+  const buildEnvironmentLog = join(directory, "build-environment.log");
+  const { stdout: realPnpm } = await run("/usr/bin/which", ["pnpm"], { encoding: "utf8" });
+  await writeFile(wrapper, [
+    "#!/usr/bin/env node",
+    'const { spawnSync } = require("node:child_process");',
+    'const { appendFileSync } = require("node:fs");',
+    'appendFileSync(process.env.NXT_TEST_BUILD_ENV_LOG, `${process.env.NXT_LOCAL_AUTH_BYPASS === undefined ? "absent" : "present"}\\n`);',
+    'const result = spawnSync(process.env.NXT_TEST_REAL_PNPM, process.argv.slice(2), { env: process.env, stdio: "inherit" });',
+    'process.exit(result.status ?? 1);'
+  ].join("\n"));
+  await chmod(wrapper, 0o700);
+  const runner = spawnLauncher({
+    script,
+    directory,
+    id: "env",
+    mode: "normal",
+    env: {
+      ...process.env,
+      PATH: `${directory}:${process.env.PATH}`,
+      NXT_LOCAL_AUTH_BYPASS: marker,
+      NXT_TEST_BUILD_ENV_LOG: buildEnvironmentLog,
+      NXT_TEST_REAL_PNPM: realPnpm.trim()
+    }
+  });
+  t.after(async () => {
+    await terminateRunner(runner);
+    await forceCleanupCheckoutStack();
+  });
+
+  await waitFor(() => pathExists(join(directory, "result-env.json")), 90_000);
+  const result = JSON.parse(await readFile(join(directory, "result-env.json"), "utf8"));
+  assert.equal(result.ok, true, [result.message, ...(result.details ?? [])].filter(Boolean).join(" | ") || "environment-scope launcher failed");
+  const buildEnvironmentStates = (await readFile(buildEnvironmentLog, "utf8")).trim().split("\n");
+  assert.equal(buildEnvironmentStates.length >= 3, true);
+  assert.equal(buildEnvironmentStates.every((state) => state === "absent"), true);
+  const record = JSON.parse(await readFile(join(checkout, ".nxt-local", "control.json"), "utf8"));
+  for (const service of record.services) {
+    const { stdout } = await run("/bin/ps", ["eww", "-p", String(service.pid), "-o", "command="], { encoding: "utf8" });
+    if (service.name === "functions") {
+      assert.equal(/NXT_LOCAL_AUTH_BYPASS=1(?:\s|$)/u.test(stdout), true, "Functions must receive the child-only bypass.");
+      assert.equal(stdout.includes(marker), false, "Functions must not inherit the caller bypass value.");
+    } else {
+      assert.equal(stdout.includes("NXT_LOCAL_AUTH_BYPASS="), false, `${service.name} must not inherit the auth bypass.`);
+    }
+  }
+  assert.deepEqual(await stopControlledStack({ checkoutPath: checkout }), { status: "stopped" });
 });
 
 test("partial startup rolls back and the real stack supports crash-safe Stop", { timeout: 120_000 }, async (t) => {

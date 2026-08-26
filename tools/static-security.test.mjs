@@ -44,5 +44,7 @@ test("toolchain and Codex actions pin the secure local lifecycle", async () => {
   const environment = await readFile(".codex/environments/environment.toml", "utf8");
   assert.match(environment, /pnpm install --frozen-lockfile && node scripts\/local-dev\.mjs --check/u);
   for (const command of ["pnpm dev:codex", "pnpm validate:codex", "pnpm stop:codex"]) assert.match(environment, new RegExp(command, "u"));
+  assert.match(environment, /name = "Validate bounded lifecycle \(leaves stack stopped\)"/u);
+  assert.doesNotMatch(environment, /Validate without server/u);
   assert.match(environment, /same-machine interface aliases as localhost/u);
 });
