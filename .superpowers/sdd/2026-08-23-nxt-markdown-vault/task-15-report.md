@@ -4,7 +4,7 @@
 
 DONE
 
-Task 15 is implemented in commit `cde52276e8f3a30bd408561384d4729103ad1daf` (`test: cover nxt owner and public journeys`). The report and progress-ledger entry are committed separately.
+Task 15 was initially implemented in commit `cde52276e8f3a30bd408561384d4729103ad1daf` (`test: cover nxt owner and public journeys`). Review fix round 1 is implemented in commit `8ab05f4` (`fix: harden browser acceptance harness`). The updated report and progress-ledger entry are committed separately.
 
 The suite drives the real Vite → Azure Functions Core Tools → SWA CLI stack with Chromium. It uses SWA CLI's local GitHub-provider emulator, an exact checkout-owned filesystem fixture, production handlers, and real browser requests; no application API is mocked in the page.
 
@@ -138,3 +138,66 @@ The only skip is the existing opt-in live Google Drive integration. `web/tsconfi
 ## Final boundaries
 
 All work remained inside the approved worktree. No root checkout, Git remote, workflow, push, deployment, Azure/Google resource, Drive data, DNS, custom domain, or secret was changed. Generated `web/dist`, `api-dist`, Playwright traces/screenshots, and `.nxt-local` state remain ignored and uncommitted. Ports `4280`, `5173`, and `7071` are closed, `.nxt-local` is absent, no checkout-owned service/test process remains, `git diff --check` passes, and the implementation commit contains no ignored browser artifacts.
+
+## Review fix round 1 closure
+
+Commit `8ab05f4` closes all four review findings without relaxing the approved Task 14 sandbox or adding a production test endpoint:
+
+- The E2E runner now owns an `AbortController` for each active child. SIGINT/SIGTERM aborts the active command immediately, preserves captured stdout/stderr, reports failure, then enters the same bounded Stop/teardown path. A leading pnpm `--` is stripped before Playwright filters are forwarded.
+- Local filesystem mode is bound to a launcher-generated random nonce, exact canonical regular `control.json`, exact ready Functions service identity, and an atomically linked regular `functions.attestation.json`. The attestation must agree byte-for-byte with PID, PGID, full start time, cwd, executable, command, port, and log path in control. The sandboxed worker must have `process.ppid` exactly equal to the live attested Functions PID; self, stale, missing, corrupt, wrong-nonce, symlink, foreign, and non-descendant invocation fail closed. The launcher writes the attestation outside the existing host-local sandbox after observing the final listener owner and before declaring the full stack ready. A Core Tools topology change therefore refuses local mode. Stop validates and removes only the canonical owned attestation. Production still defaults to Google.
+- Every Playwright test now starts from the same deterministic IDs under the exact canonical fixture root. Reset waits for the `LocalDriveAdapter` mutation lock to become quiescent, atomically quarantines the old exact root, seeds the replacement, and safely removes the quarantine. A controlled late-write regression proves reset never replaces storage while a request mutation remains in flight. One worker remains enforced.
+- Publication creates and archives its own note and passes alone through `pnpm e2e -- e2e/publication.spec.ts`. Owner acceptance now proves title search, tag-filter results, wiki-link navigation, persisted archive, and move-based archive recovery. The shipped UI has no restore-from-Trash action, so the test does not invent one. Conflict uses a Playwright request barrier only to serialize an external locked fixture write before continuing the unchanged real SWA/Functions PUT; it does not mock an API response. Axe covers conflict, publish, and revoke dialogs. Keyboard-only tree movement and command-palette selection/Escape focus restoration are asserted. Reduced motion requires computed animation and transition durations of exactly `0.01ms`. Mobile audits every visible interactive control at `>=44x44`, with one explicit inline rendered wiki-link exception class.
+- Caller local/runtime/auth keys, including `NXT_LOCAL_CONTROL_NONCE`, are deleted from runner/build/Vite/SWA base environments. Only the Functions child receives exact launcher values.
+- Dialog-only Gruvbox contrast corrections remain scoped to publication fact labels and the revoke danger action; no global palette or layout redesign was made.
+
+### Fix-round RED and focused GREEN
+
+The focused regressions were added before the relevant production fixes. Representative RED evidence included the runner waiting on its controlled long child, missing runtime ownership/attestation admission, filtered publication state dependence, the fixture late-write test failing with `Missing expected rejection`, and the first full suite exposing the active mutation-lock reset race. The first expanded E2E run was `4 passed, 8 failed`; after the primary corrections it was `10 passed, 2 failed`, which isolated the quiescence and dynamic-index test issues before the final green.
+
+Final focused evidence under Node `22.23.1`:
+
+```text
+node --test tools/e2e-runner.integration.test.mjs: 2/2 passed
+node --test tools/local-fixtures.test.mjs: 4/4 passed
+API local ownership + runtime composition: 8/8 passed
+static security contract: 3/3 passed
+real Task 14 lifecycle env/stack evidence: included in 44/44 final focused run
+pnpm e2e -- e2e/publication.spec.ts: 1/1 passed independently
+pnpm e2e -- e2e/owner-workspace.spec.ts: 1/1 passed independently
+```
+
+The real lifecycle acceptance observed exactly one Functions Node worker whose PPID equaled the attested Core Tools listener PID, then received HTTP 200 from the local vault route. The direct self-PID topology is explicitly rejected. The interrupt fixture completed in less than one second, retained its stdout/stderr, returned nonzero, and recorded that Stop ran.
+
+### Final browser and repository validation after the fixes
+
+The final browser command used Node `22.23.1`, pnpm `11.22.0`, Playwright `1.62.1`, Chromium `151.0.7922.34`, one worker, and every live Google/Drive key explicitly unset:
+
+```text
+pnpm e2e
+desktop Chromium: 9 passed
+mobile Chromium: 2 passed
+reduced-motion Chromium: 1 passed
+total: 12/12 passed in 35.0 seconds
+Stop: PASS; ports 4280/5173/7071 closed; .nxt-local absent
+```
+
+The final post-change repository gate was:
+
+```text
+env -u <all live Google/Drive keys> PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm validate:codex
+lint/typecheck: PASS
+API artifact + web build + artifact verifier: PASS (13 web files, 3 API files)
+contracts: 14 passed
+domain: 29 passed
+web: 170 passed
+API: 404 passed, 1 skipped
+repository test total: 617 passed, 1 skipped
+project contract: 2/2 passed
+static/artifact/fixture/runner/lifecycle: 44/44 passed in 168.127 seconds
+git diff --check: PASS
+exit 0
+```
+
+The sole skip remains the existing opt-in live Google Drive integration. `web/tsconfig.tsbuildinfo` was restored after the gate. The final screenshots at the three absolute paths listed above were re-inspected at original resolution: the settled command dialog is legible with visible focus, the `390x844` workspace has no horizontal overflow and reachable actions, and the public page contains no owner chrome. Its large white responsive panel is still the intentional deterministic `1x1` white PNG fixture, not a missing asset. Screenshots remain ignored and uncommitted.
+
+No browser mock response, live Drive/Google/GitHub OAuth, Azure control plane, DNS, remote, workflow, deployment, push, or external mutable state was accessed or changed. The SWA CLI global-header omission remains an emulator evidence gap; static configuration and artifact checks remain strict. The emulator-auth page's own Microsoft CDN references remain the previously disclosed CLI behavior.
