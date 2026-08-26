@@ -4,6 +4,7 @@ import { redo, undo } from "@codemirror/commands";
 import { syntaxTree } from "@codemirror/language";
 import { QueryClient } from "@tanstack/react-query";
 import { EditorView } from "@uiw/react-codemirror";
+import { attachmentIsReferenced, attachmentReferenceProjection, projectionReferencesAttachment } from "@nxt/domain";
 import {
   act,
   cleanup,
@@ -16,7 +17,9 @@ import {
 import userEvent from "@testing-library/user-event";
 import { RouterProvider, createMemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useState } from "react";
 import { ApiClientError, ApiContractError } from "../api/client";
+import type { AttachmentClient } from "../api/attachments";
 import { notesClient, type NotesClient } from "../api/notes";
 import type { CompleteVault, VaultClient } from "../api/vault";
 import { OwnerShell } from "../app/owner-shell";
@@ -1329,6 +1332,162 @@ describe("CodeMirror production configuration", () => {
 });
 
 describe("owner-shell integration", () => {
+  it("reports zero referenced attachments when persisted assets are absent from the saved source", async () => {
+    const user = userEvent.setup();
+    const notes = notesHarness(response("# Drive"));
+    const publicationApi = { getStatus: vi.fn().mockResolvedValue(null), publish: vi.fn(), revoke: vi.fn() };
+
+    render(
+      <OwnerShell
+        noteId={NOTE_ID}
+        vault={OWNER_VAULT}
+        notes={notes.client}
+        draftStore={new MemoryDraftStore()}
+        publicationApi={publicationApi}
+      />
+    );
+
+    const publish = screen.getByRole("button", { name: "Publish" });
+    await waitFor(() => expect(publish).toBeEnabled());
+    await user.click(publish);
+
+    expect(screen.getByRole("dialog", { name: "Publish note" })).toHaveTextContent(
+      "0 referenced attachments"
+    );
+  });
+
+  it("counts each selected-note attachment once across duplicate canonical and opaque references", async () => {
+    const user = userEvent.setup();
+    const secondAssetId = `v1.${"e".repeat(16)}.asset_second.${"f".repeat(22)}`;
+    const thirdAssetId = `v1.${"g".repeat(16)}.asset_third.${"h".repeat(22)}`;
+    const attachments = [
+      OWNER_VAULT.entries[0]!.attachments[0]!,
+      { assetId: secondAssetId, name: "second.pdf", mimeType: "application/pdf", size: 84, disposition: "download" as const },
+      { assetId: thirdAssetId, name: "unreferenced.txt", mimeType: "text/plain", size: 21, disposition: "download" as const }
+    ];
+    const vault: CompleteVault = {
+      ...OWNER_VAULT,
+      entries: [{ ...OWNER_VAULT.entries[0]!, attachments }, OWNER_VAULT.entries[1]!]
+    };
+    const notes = notesHarness(response(
+      `# Drive\n\n![diagram](../_assets/${NOTE_ID}/diagram.png)\n\n![duplicate](<../_assets/${NOTE_ID}/diagram.png>)\n\n[opaque](/api/private/attachments/${secondAssetId})`
+    ));
+    const publicationApi = { getStatus: vi.fn().mockResolvedValue(null), publish: vi.fn(), revoke: vi.fn() };
+
+    render(
+      <OwnerShell
+        noteId={NOTE_ID}
+        vault={vault}
+        notes={notes.client}
+        draftStore={new MemoryDraftStore()}
+        publicationApi={publicationApi}
+      />
+    );
+
+    const publish = screen.getByRole("button", { name: "Publish" });
+    await waitFor(() => expect(publish).toBeEnabled());
+    await user.click(publish);
+
+    expect(screen.getByRole("dialog", { name: "Publish note" })).toHaveTextContent(
+      "2 referenced attachments"
+    );
+  });
+
+  it("keeps publish disabled until the current note has authoritative saved state", async () => {
+    const pending = deferred<NoteResponse>();
+    const notes = notesHarness();
+    notes.getNote.mockReturnValueOnce(pending.promise);
+    const publicationApi = { getStatus: vi.fn().mockResolvedValue(null), publish: vi.fn(), revoke: vi.fn() };
+
+    render(
+      <OwnerShell
+        noteId={NOTE_ID}
+        vault={OWNER_VAULT}
+        notes={notes.client}
+        draftStore={new MemoryDraftStore()}
+        publicationApi={publicationApi}
+      />
+    );
+
+    const publish = screen.getByRole("button", { name: "Publish" });
+    expect(publish).toBeDisabled();
+    expect(publish).toHaveAttribute("title", "Select a saved note first.");
+
+    pending.resolve(BASE_RESPONSE);
+    await act(async () => { await pending.promise; });
+    await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved"));
+    expect(publish).toBeEnabled();
+  });
+
+  it("inserts the persisted server name as a portable nested reference used by preview and fences", async () => {
+    const user = userEvent.setup();
+    const name = "Café [draft] #1? report).png";
+    const assetId = `v1.${"c".repeat(16)}.asset_weird.${"d".repeat(22)}`;
+    const asset = {
+      assetId,
+      name,
+      mimeType: "image/png",
+      size: 4,
+      disposition: "inline" as const
+    };
+    const nestedResponse = response("# Drive", { path: "Notes/Inbox/Plan.md" });
+    const nestedEntry = { ...OWNER_VAULT.entries[0]!, path: nestedResponse.path, attachments: [] };
+    const initialVault = { ...OWNER_VAULT, entries: [nestedEntry, OWNER_VAULT.entries[1]!] };
+    const refreshedVault = {
+      ...initialVault,
+      entries: [{ ...nestedEntry, attachments: [asset] }, OWNER_VAULT.entries[1]!]
+    };
+    const notes = notesHarness(nestedResponse);
+    const store = new MemoryDraftStore();
+    const upload = vi.fn<AttachmentClient["upload"]>().mockResolvedValue({ asset });
+    const attachmentApi: AttachmentClient = { upload, trash: vi.fn() };
+    const publicationApi = { getStatus: vi.fn().mockResolvedValue(null), publish: vi.fn(), revoke: vi.fn() };
+    const onRefreshVault = vi.fn(() => Promise.resolve());
+
+    const Harness = (): React.JSX.Element => {
+      const [vault, setVault] = useState(initialVault);
+      return (
+        <OwnerShell
+          noteId={NOTE_ID}
+          vault={vault}
+          notes={notes.client}
+          draftStore={store}
+          attachmentApi={attachmentApi}
+          publicationApi={publicationApi}
+          onRefreshVault={() => {
+            void onRefreshVault();
+            setVault(refreshedVault);
+            return Promise.resolve();
+          }}
+        />
+      );
+    };
+
+    render(<Harness />);
+    const view = await getEditorView();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add attachment" })).toBeEnabled());
+    const file = new File([Uint8Array.of(1, 2, 3, 4)], "client name.png", { type: "image/png" });
+    Object.defineProperty(file, "arrayBuffer", {
+      configurable: true,
+      value: vi.fn(() => Promise.resolve(Uint8Array.of(1, 2, 3, 4).buffer))
+    });
+    await user.upload(screen.getByLabelText("Add attachment"), file);
+
+    const markdown = `![Café \\[draft\\] #1? report).png](<../../_assets/${NOTE_ID}/Caf%C3%A9%20%5Bdraft%5D%20%231%3F%20report%29.png>)`;
+    await waitFor(() => expect(view.state.doc.toString()).toContain(markdown));
+    expect(onRefreshVault).toHaveBeenCalledOnce();
+    expect(upload).toHaveBeenCalledOnce();
+    const preview = screen.getByRole("region", { name: "Preview" });
+    expect(await within(preview).findByRole("img", { name })).toHaveAttribute(
+      "src",
+      `/api/private/attachments/${assetId}`
+    );
+    const projection = attachmentReferenceProjection(view.state.doc.toString(), nestedResponse.path);
+    expect(projection).toEqual([`_assets/${NOTE_ID}/${name}`]);
+    expect(attachmentIsReferenced({ source: view.state.doc.toString(), notePath: nestedResponse.path, noteId: NOTE_ID, name, opaqueId: assetId })).toBe(true);
+    expect(projectionReferencesAttachment(projection, { noteId: NOTE_ID, name, opaqueId: assetId })).toBe(true);
+  });
+
   it("mounts the real editor with actual title, path, preview, and save state", async () => {
     const store = new MemoryDraftStore();
     const notes = notesHarness();

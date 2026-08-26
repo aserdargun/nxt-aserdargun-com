@@ -71,9 +71,12 @@ export const AttachmentPicker = ({
     if (inputRef.current !== null) inputRef.current.value = "";
   }, [noteId]);
 
-  useEffect(() => () => {
-    mountedRef.current = false;
-    operationRef.current += 1;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      operationRef.current += 1;
+    };
   }, []);
 
   const handleFile = useCallback(async (file: File): Promise<void> => {

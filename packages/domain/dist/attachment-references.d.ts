@@ -1,3 +1,9 @@
+export declare const createPortableAttachmentMarkdown: (input: {
+    notePath: string;
+    noteId: string;
+    name: string;
+    inlineImage: boolean;
+}) => string;
 /**
  * Derives the deletion fence from the exact same remark parser/plugins used
  * for rendering. The small wiki pass is the existing Obsidian dialect used by

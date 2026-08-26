@@ -18,6 +18,7 @@ const MarkdownPreview = lazy(async () => {
 });
 
 export interface EditorWorkspaceState {
+  readonly noteId: string;
   readonly title: string;
   readonly path: string;
   readonly status: SaveStatus;
@@ -100,13 +101,14 @@ export const EditorWorkspace = ({
 
   useEffect(() => {
     onStateChange?.({
+      noteId,
       title: state.title,
       path: state.path,
       status: state.status,
       version: state.version,
       source: state.source
     });
-  }, [onStateChange, state.path, state.source, state.status, state.title, state.version]);
+  }, [noteId, onStateChange, state.path, state.source, state.status, state.title, state.version]);
 
   useEffect(() => {
     if (

@@ -18,6 +18,29 @@ const resolveRelativePosixPath = (notePath, segments) => {
     }
     return resolved.join("/");
 };
+const markdownPathSegment = (value) => encodeURIComponent(value)
+    .replace(/[!'()*]/gu, (character) => `%${character.codePointAt(0).toString(16).toUpperCase()}`);
+const markdownLabel = (value) => [...value]
+    .map((character) => character === "\\" || character === "[" || character === "]" ? `\\${character}` : character)
+    .join("");
+const noteDirectoryDepth = (notePath) => {
+    const resolved = [];
+    for (const segment of notePath.split("/").slice(0, -1)) {
+        if (segment.length === 0 || segment === ".")
+            continue;
+        if (segment === "..")
+            resolved.pop();
+        else
+            resolved.push(segment);
+    }
+    return resolved.length;
+};
+export const createPortableAttachmentMarkdown = (input) => {
+    const name = input.name.normalize("NFC");
+    const relativeRoot = "../".repeat(noteDirectoryDepth(input.notePath));
+    const destination = `${relativeRoot}_assets/${input.noteId}/${markdownPathSegment(name)}`;
+    return `${input.inlineImage ? "!" : ""}[${markdownLabel(name)}](<${destination}>)`;
+};
 /**
  * Derives the deletion fence from the exact same remark parser/plugins used
  * for rendering. The small wiki pass is the existing Obsidian dialect used by

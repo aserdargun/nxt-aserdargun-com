@@ -16,7 +16,10 @@ import {
   Upload
 } from "lucide-react";
 import {
+  attachmentReferenceProjection,
+  createPortableAttachmentMarkdown,
   parseNote,
+  projectionReferencesAttachment,
   resolveWikiTarget,
   serializeNote,
   type WikiTargetResolution
@@ -530,6 +533,7 @@ export const OwnerShell = ({
   const [operationBusy, setOperationBusy] = useState(false);
   const [operationError, setOperationError] = useState<string | null>(null);
   const [editorState, setEditorState] = useState<EditorWorkspaceState>({
+    noteId: noteId ?? "",
     title: noteId === undefined ? ACTIVE_NOTE.title : "",
     path: noteId === undefined ? ACTIVE_NOTE.path : "",
     status: noteId === undefined ? "Saved" : "Saving",
@@ -641,12 +645,25 @@ export const OwnerShell = ({
   }, [noteId, publicationApi]);
 
   const currentPublication = publicationState.noteId === noteId ? publicationState.status : null;
-  const publishDisabledReason = selectedEntry === undefined || editorState.version === null
+  const hasAuthoritativeEditorState = noteId !== undefined && selectedEntry !== undefined &&
+    editorState.noteId === noteId && editorState.source !== null && editorState.path.length > 0 &&
+    editorState.version !== null;
+  const editorIsSaved = hasAuthoritativeEditorState && editorState.status === "Saved";
+  const referencedAttachmentCount = useMemo(() => {
+    if (!editorIsSaved || selectedEntry === undefined || editorState.source === null) return 0;
+    const projection = attachmentReferenceProjection(editorState.source, editorState.path);
+    return selectedEntry.attachments.filter((attachment) => projectionReferencesAttachment(projection, {
+      noteId: selectedEntry.id,
+      name: attachment.name,
+      opaqueId: attachment.assetId
+    })).length;
+  }, [editorIsSaved, editorState.path, editorState.source, selectedEntry]);
+  const publishDisabledReason = !hasAuthoritativeEditorState
     ? "Select a saved note first."
     : editorState.status !== "Saved"
       ? "Save the current note before publishing."
       : null;
-  const attachmentDisabledReason = selectedEntry === undefined || editorState.source === null
+  const attachmentDisabledReason = !hasAuthoritativeEditorState
     ? "Select a saved note first."
     : editorState.status !== "Saved"
       ? "Save the current note before adding an attachment."
@@ -660,15 +677,16 @@ export const OwnerShell = ({
         : null;
 
   const attachmentMarkdown = useCallback((attachment: UploadedAttachment): string => {
-    if (noteId === undefined) throw new Error("A note is required.");
-    const label = [...attachment.name]
-      .map((character) => character === "\\" || character === "[" || character === "]" ? `\\${character}` : character)
-      .join("");
-    const reference = `_assets/${noteId}/${encodeURIComponent(attachment.name)}`;
+    if (!editorIsSaved || noteId === undefined) throw new Error("A saved note path is required.");
     const inlineImage = attachment.disposition === "inline" &&
       ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(attachment.mimeType);
-    return inlineImage ? `![${label}](${reference})` : `[${label}](${reference})`;
-  }, [noteId]);
+    return createPortableAttachmentMarkdown({
+      notePath: editorState.path,
+      noteId,
+      name: attachment.name,
+      inlineImage
+    });
+  }, [editorIsSaved, editorState.path, noteId]);
 
   const completeAttachmentUpload = useCallback(async (attachment: UploadedAttachment): Promise<void> => {
     if (noteId === undefined) return;
@@ -921,6 +939,7 @@ export const OwnerShell = ({
 
   useEffect(() => {
     setEditorState({
+      noteId: noteId ?? "",
       title: noteId === undefined ? ACTIVE_NOTE.title : "",
       path: noteId === undefined ? ACTIVE_NOTE.path : "",
       status: noteId === undefined ? "Saved" : "Saving",
@@ -1068,13 +1087,13 @@ export const OwnerShell = ({
           actions={paletteActions}
         />
       </Suspense>
-      {noteId === undefined || editorState.version === null ? null : (
+      {!editorIsSaved || noteId === undefined || editorState.version === null ? null : (
         <PublishDialog
           open={publishOpen}
           onOpenChange={setPublishOpen}
           noteId={noteId}
           sourceVersion={editorState.version}
-          attachmentCount={selectedEntry?.attachments.length ?? 0}
+          attachmentCount={referencedAttachmentCount}
           client={publicationApi}
           onPublished={async (status) => {
             setPublicationState({ noteId, loading: false, status, error: false });

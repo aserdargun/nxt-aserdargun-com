@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const NOTE_ID = "018f47d2-6a34-7b2a-9f21-8a7034963aef";
@@ -42,6 +43,31 @@ afterEach(() => {
 });
 
 describe("attachment picker", () => {
+  it("uploads exactly once and clears busy state under the app StrictMode boundary", async () => {
+    const { AttachmentPicker } = await import("../editor/attachment-picker");
+    const user = userEvent.setup();
+    const upload = vi.fn().mockResolvedValue(uploaded);
+    const onUploaded = vi.fn().mockResolvedValue(undefined);
+    const selected = testFile();
+
+    render(
+      <StrictMode>
+        <AttachmentPicker
+          noteId={NOTE_ID}
+          client={{ upload, trash: vi.fn() }}
+          onUploaded={onUploaded}
+        />
+      </StrictMode>
+    );
+
+    await user.upload(screen.getByLabelText("Add attachment"), selected.file);
+
+    await waitFor(() => expect(onUploaded).toHaveBeenCalledOnce());
+    expect(upload).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "Add attachment" })).toBeEnabled();
+    expect(screen.queryByRole("status", { name: "Uploading attachment" })).not.toBeInTheDocument();
+  });
+
   it("rejects more than exactly 20 MiB before reading, encoding, or requesting", async () => {
     const { AttachmentPicker } = await import("../editor/attachment-picker");
     const user = userEvent.setup();
