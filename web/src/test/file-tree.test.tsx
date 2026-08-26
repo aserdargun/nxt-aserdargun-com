@@ -267,12 +267,14 @@ describe("accessible file tree", () => {
     expect(within(dialog).getByRole("alert")).toHaveTextContent("confirmation is stale");
 
     const refreshedToken = `c1.${"d".repeat(120)}.${"e".repeat(43)}`;
+    const refreshedTreeVersion = "b".repeat(64);
     const refreshedTree: readonly ExplorerNode[] = [{
       ...notesFixture,
       children: [{
         ...plansFixture,
         deleteConfirmation: {
           ...plansFixture.deleteConfirmation!,
+          treeVersion: refreshedTreeVersion,
           expiresAt: "2026-08-25T12:10:00.000Z",
           confirmationToken: refreshedToken
         }
@@ -295,7 +297,7 @@ describe("accessible file tree", () => {
     expect(onTrashFolder).toHaveBeenLastCalledWith(
       expect.objectContaining({ id: "plans" }),
       {
-        expectedTreeVersion: "a".repeat(64),
+        expectedTreeVersion: refreshedTreeVersion,
         confirmationToken: refreshedToken
       }
     );
