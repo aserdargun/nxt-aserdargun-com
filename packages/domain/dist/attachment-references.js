@@ -20,9 +20,7 @@ const resolveRelativePosixPath = (notePath, segments) => {
 };
 const markdownPathSegment = (value) => encodeURIComponent(value)
     .replace(/[!'()*]/gu, (character) => `%${character.codePointAt(0).toString(16).toUpperCase()}`);
-const markdownLabel = (value) => [...value]
-    .map((character) => character === "\\" || character === "[" || character === "]" ? `\\${character}` : character)
-    .join("");
+const markdownLabel = (value) => value.replace(/[!-/:-@[-`{-~]/gu, "\\$&");
 const noteDirectoryDepth = (notePath) => {
     const resolved = [];
     for (const segment of notePath.split("/").slice(0, -1)) {

@@ -4,7 +4,7 @@ import { redo, undo } from "@codemirror/commands";
 import { syntaxTree } from "@codemirror/language";
 import { QueryClient } from "@tanstack/react-query";
 import { EditorView } from "@uiw/react-codemirror";
-import { attachmentIsReferenced, attachmentReferenceProjection, projectionReferencesAttachment } from "@nxt/domain";
+import { attachmentIsReferenced, attachmentReferenceProjection, createPortableAttachmentMarkdown, projectionReferencesAttachment } from "@nxt/domain";
 import {
   act,
   cleanup,
@@ -1236,6 +1236,40 @@ describe("conflict recovery outcomes", () => {
 });
 
 describe("safe Markdown preview", () => {
+  it.each([
+    { name: "<done>.png", inlineImage: true },
+    { name: "mail <user@example.com>.pdf", inlineImage: false },
+    { name: `punct !"#$%&'()*+,-.:;<=>?@[]^_\`{|}~.txt`, inlineImage: false },
+    { name: "Café [世界] <δοκιμή> #?.pdf", inlineImage: false }
+  ])("renders the exact portable attachment label without nested Markdown for $name", async ({ name, inlineImage }) => {
+    const markdown = createPortableAttachmentMarkdown({
+      notePath: "Notes/Inbox/Plan.md",
+      noteId: NOTE_ID,
+      name,
+      inlineImage
+    });
+    const expected = name.normalize("NFC");
+    const { container } = render(
+      <MarkdownPreview
+        source={markdown}
+        notePath="Notes/Inbox/Plan.md"
+        resolveAttachment={() => ATTACHMENT_ID}
+      />
+    );
+
+    const renderedAttachment = inlineImage
+      ? await screen.findByRole("img", { name: expected })
+      : await screen.findByRole("link", { name: expected });
+    expect(renderedAttachment).toHaveAttribute(
+      inlineImage ? "src" : "href",
+      `/api/private/attachments/${ATTACHMENT_ID}`
+    );
+    expect(renderedAttachment.textContent).toBe(inlineImage ? "" : expected);
+    expect(container.querySelectorAll("a")).toHaveLength(inlineImage ? 0 : 1);
+    expect(container.querySelectorAll("[href], [src]")).toHaveLength(1);
+    expect(container.querySelector("[href^='mailto:'], script, iframe, object, svg, done")).toBeNull();
+  });
+
   it("sanitizes active content and resolves only canonical application attachments", async () => {
     const resolver = vi.fn((reference: string) =>
       reference === `_assets/${NOTE_ID}/diagram.png` ? ATTACHMENT_ID : "https://attacker.example/raw"
@@ -1473,7 +1507,7 @@ describe("owner-shell integration", () => {
     });
     await user.upload(screen.getByLabelText("Add attachment"), file);
 
-    const markdown = `![Café \\[draft\\] #1? report).png](<../../_assets/${NOTE_ID}/Caf%C3%A9%20%5Bdraft%5D%20%231%3F%20report%29.png>)`;
+    const markdown = `![Café \\[draft\\] \\#1\\? report\\)\\.png](<../../_assets/${NOTE_ID}/Caf%C3%A9%20%5Bdraft%5D%20%231%3F%20report%29.png>)`;
     await waitFor(() => expect(view.state.doc.toString()).toContain(markdown));
     expect(onRefreshVault).toHaveBeenCalledOnce();
     expect(upload).toHaveBeenCalledOnce();
