@@ -323,3 +323,18 @@ The regression test also proves that an unrelated same-confirmation rerender ret
 - `web/tsconfig.tsbuildinfo` remained byte-identical to HEAD.
 - Ports 5173 and 5174 remained closed; no local server was started.
 - Live Drive remained unset; no push, deploy, Drive, GitHub, Azure, DNS, secret, or other external mutation occurred.
+
+## Review fix round 3/5 — 2026-08-26
+
+DONE. The single test-only Minor is resolved in implementation commit `92a465be51b3fad32100e08dbdc28cd6e6bb10d2` (`test: bind refreshed folder tree version`).
+
+The refreshed-confirmation regression fixture now changes `treeVersion` from the original `a…` value to a distinct `b…` value and asserts that the second Trash attempt submits that exact refreshed version together with the refreshed confirmation token. All prior assertions remain: the stale error survives an unrelated rerender, clears only when fresh confirmation identity arrives, and Trash is then enabled.
+
+```text
+file-tree focused: 10/10 passed
+editor-workspace smoke: 45/45 passed
+pnpm lint: PASS
+git diff --check: PASS
+```
+
+This round changed test coverage only, so no additional IAB run was needed. No local server was started; ports 5173 and 5174 remained closed. `web/tsconfig.tsbuildinfo` remained unchanged. Live Drive stayed unset and no external mutation occurred.
