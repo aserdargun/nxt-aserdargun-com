@@ -214,3 +214,58 @@ git diff --check: PASS
 ```
 
 `web/tsconfig.tsbuildinfo` was restored to the tracked baseline. `pnpm stop:codex` reported the stack already stopped; `lsof` returned no listeners on `4280`, `5173`, or `7071`; `.nxt-local` was absent; and the checkout process probe found no lifecycle/E2E Node process. Only fake Azure runners and disposable local files were used. No live Azure, Google, Drive, GitHub, DNS, remote, workflow, deployment, push, or root-checkout operation ran, and custom-domain work remains unstarted.
+
+## Review fix round 3: retained payload inode and single-shot path cleanup
+
+Implementation commit `eea5f02` (`fix: bind azure cleanup to retained payload`) closes the pathname replacement and destructive-retry findings from fix round 2.
+
+The payload is now opened `O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW`, and its exact device/inode-bound handle remains open across the REST mutation. Cleanup first fstats that handle, truncates the exact inode to zero, syncs, re-fstats size and identity, and then closes it. Only afterward does cleanup repair the retained exact directory handle, revalidate the canonical payload pathname, and make at most one unlink plus one revalidated empty-directory removal attempt. No destructive pathname operation is retried and no recursive or foreign cleanup exists. Primary Azure mutation/preparation failures and generic cleanup-incomplete composition remain redaction-safe.
+
+The POSIX boundary is explicit: `unlink`, `rmdir`, and `unlinkat` are name-based and cannot atomically require an expected inode. The implementation guarantees quiescent normal-return cleanup and deterministic replacements completed before cleanup. It does not claim protection from an actively hostile same-UID process racing the final identity check and syscall; that same UID can already read or replace `.env.local`. A crash can also precede retained-inode truncation. Both cases remain local secret incidents.
+
+### RED → GREEN evidence
+
+The two exact regressions were introduced before production edits:
+
+```sh
+node --test tools/azure-release.test.mjs
+```
+
+```text
+RED: 8 passed, 2 failed
+same-path replacement: renamed original payload remained 684 bytes instead of zero
+first-unlink failure fixture: injected operation was ignored and old cleanup returned complete:true
+```
+
+Final focused results:
+
+```text
+Azure release: 10/10 passed in 144.2 ms
+deployment + Azure + backup + project: 19/19 passed in 276.8 ms
+focused ESLint: PASS
+pnpm deployment:verify: PASS
+git diff --check: PASS
+```
+
+The same-path regression renames the original payload inode, creates a foreign file at the original path, changes the directory to mode `0500`, and returns a fake Azure code `9`. Cleanup preserves the foreign file, leaves the renamed original file at exactly zero bytes, and surfaces the primary Azure mutation failure plus generic cleanup-incomplete state without secret/path output. The controlled first-unlink-failure regression performs the replacement inside the first injected unlink attempt and proves the destructive call count remains exactly one, the foreign replacement survives, and the retained original inode is zero bytes.
+
+### Fresh full validation and cleanup
+
+Node `22.23.1`, pnpm `11.22.0`, live Google/Drive/Azure/GitHub/local-bypass variables unset:
+
+```text
+pnpm validate:ci: exit 0
+workspace: 617 passed, 1 opt-in live Drive skip
+project: 2/2
+portable focused: 30/30
+artifacts: 13 web, 3 API
+
+pnpm validate:codex: exit 0
+workspace: 617 passed, 1 opt-in live Drive skip
+project: 2/2
+full focused/lifecycle: 63/63 in 168.4 seconds
+artifacts: 13 web, 3 API
+git diff --check: PASS
+```
+
+`web/tsconfig.tsbuildinfo` was restored. Checkout-owned Stop reported already stopped; ports `4280`, `5173`, and `7071` had no listeners; `.nxt-local` was absent; and the lifecycle/E2E Node-process probe returned empty. Only fake runners and disposable filesystem fixtures were used. No live Azure, Google, Drive, GitHub, DNS, remote, workflow, deployment, push, or root-checkout operation ran, and custom-domain work remains unstarted.
