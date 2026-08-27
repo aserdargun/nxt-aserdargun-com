@@ -189,6 +189,43 @@ describe("VaultService notes", () => {
     expect((await raw.readText(ids.index.id)).text).toContain(noteId);
   });
 
+  it("accepts a newer Drive version when the created note readback is byte-identical", async () => {
+    let createdVersion: string | undefined;
+    const { service, indexStore, ids } = await setup((storage) => ({
+      ...storage,
+      get: storage.get.bind(storage),
+      listChildren: storage.listChildren.bind(storage),
+      readText: async (fileId) => {
+        const readback = await storage.readText(fileId);
+        if (readback.file.mimeType !== "text/markdown") return readback;
+        return {
+          ...readback,
+          file: { ...readback.file, version: (BigInt(readback.file.version) + 1n).toString() }
+        };
+      },
+      createText: async (input) => {
+        const created = await storage.createText(input);
+        if (created.mimeType === "text/markdown") createdVersion = created.version;
+        return created;
+      },
+      updateText: storage.updateText.bind(storage),
+      move: storage.move.bind(storage),
+      trash: storage.trash.bind(storage),
+      createFolder: storage.createFolder.bind(storage),
+      createBytes: storage.createBytes.bind(storage),
+      readBytes: storage.readBytes.bind(storage),
+      listRevisions: storage.listRevisions.bind(storage)
+    }));
+
+    const result = await service.createNote({ title: "Test", body: "", folderId: ids.plans.id });
+
+    expect(createdVersion).toBeDefined();
+    expect(result.version).toBe((BigInt(createdVersion as string) + 1n).toString());
+    expect((await indexStore.read()).value.entries).toEqual([
+      expect.objectContaining({ id: noteId, driveVersion: result.version, path: "Notes/Plans/Test.md" })
+    ]);
+  });
+
   it("returns conflict and retains both sources when Drive changed before save", async () => {
     const { service, raw, ids } = await setup();
     const created = await service.createNote({ title: "Quick note", body: "# Today", folderId: ids.inbox.id });
