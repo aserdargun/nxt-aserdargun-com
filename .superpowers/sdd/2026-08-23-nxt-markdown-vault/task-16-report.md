@@ -99,3 +99,66 @@ The fresh macOS command ran the real checkout-owned Task 14 Functions/SWA/Vite l
 - Built artifacts remain ignored; no `.env.local`, secret, backup, or runtime state was staged.
 - No root checkout, live `.env.local`, Drive/Google, GitHub, Azure, DNS, IHS, workflow, deployment, push, remote, or external service was accessed or mutated. Fake injected runners/adapters and disposable exact local repositories/filesystems were used only.
 - No GitHub/Azure/Drive resource was created. The custom-domain/DNS/certificate stage was not started.
+
+## Review fix round 1 closure
+
+Implementation commit `440c832` (`fix: secure azure release settings`) closes the process-argument secret exposure, manual-dispatch ref gap, and environment-file identity race.
+
+### Official interface evidence and security ruling
+
+Installed official Azure CLI `2.89.1` help and source were inspected locally without an Azure request:
+
+- `az staticwebapp appsettings set --help` exposes only `--setting-names KEY=value`; the installed command implementation parses those argv pairs and therefore cannot meet process-argument secrecy.
+- `az rest --help` officially supports `--body @{file}`.
+- The installed official `azure-mgmt-web` `2025-05-01` request builder defines `PUT /subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Web/staticSites/{name}/config/appsettings?api-version=2025-05-01` with a `StringDictionary` JSON body.
+
+The earlier `staticwebapp appsettings set --setting-names` implementation is superseded for security. NXT now creates a mode-`0700` temporary directory, writes the closed `{properties:{...}}` body through an exclusive no-follow mode-`0600` file, passes only `@<canonical-path>` to official `az rest`, and unlinks the exact file/removes the exact directory after both success and failure. Fake-runner assertions prove neither sentinel secret appears in any argv, log, child diagnostic, nor thrown error.
+
+The account check no longer trusts an invented subscription display name. It requires an enabled UUID subscription, UUID tenant, well-formed signed-in user, and exact SWA resource ID; that subscription ID is the one embedded in the exact ARM REST URL. Exact Free/West Europe/Succeeded/generated-host/zero-custom-hostname checks remain.
+
+### RED → GREEN
+
+Focused RED preceded production edits:
+
+```sh
+node --test tools/deployment-contract.test.mjs tools/azure-release.test.mjs
+```
+
+```text
+1 passed, 6 failed
+```
+
+The failures were exact: the old display-name check rejected an otherwise valid account, settings still traveled in argv with no protected payload lifecycle, symlink-parent/regular-rename swaps were admitted, account/resource UUID binding was absent, the deploy job had no exact main-ref condition, and a tampered dispatch gate reached the later dirty check instead of failing source verification.
+
+Focused GREEN:
+
+```text
+deployment + Azure: 7/7 passed in 148.5 ms
+deployment + Azure + backup + project: 13/13 passed in 207.3 ms
+portable focused contracts: 24/24 passed in 1.18 seconds
+```
+
+The environment reader now requires a canonical path, performs `O_NOFOLLOW` open, fstats the opened handle, and compares regular-file/mode/size/device/inode identity with the pre-open lstat. Tests cover a symlinked parent, a symlink swap, and an atomic regular-file rename whose sentinel never reaches an error.
+
+The deployment job now has the exact `github.ref == 'refs/heads/main'` condition. Source and temporary exact-release repository tests reject any altered gate, so a non-main `workflow_dispatch` cannot deploy.
+
+### Fresh full validation
+
+Node `22.23.1`, pnpm `11.22.0`, live Google/Drive/Azure/GitHub/local-bypass keys unset:
+
+```text
+pnpm validate:ci: exit 0
+workspace: 617 passed, 1 opt-in live Drive skip
+project: 2/2
+portable focused: 24/24
+artifacts: 13 web, 3 API
+
+pnpm validate:codex: exit 0
+workspace: 617 passed, 1 opt-in live Drive skip
+project: 2/2
+full focused/lifecycle: 57/57 in 172.1 seconds
+artifacts: 13 web, 3 API
+git diff --check: PASS
+```
+
+`web/tsconfig.tsbuildinfo` was restored. Checkout-owned Stop reported already stopped; ports `4280`, `5173`, and `7071` were closed and `.nxt-local` absent. No live Azure/Google/GitHub/DNS/remote/deployment/push operation ran, and custom-domain work remains unstarted.
