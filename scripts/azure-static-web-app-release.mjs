@@ -111,19 +111,39 @@ const inspectPath = async (path) => {
   try { return { metadata: await lstat(path) }; }
   catch (error) { return error?.code === "ENOENT" ? { absent: true } : { failed: true }; }
 };
-const attemptTwice = async (operation) => {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try { await operation(); return true; }
-    catch { /* Retry only the same exact-owned operation once. */ }
-  }
-  return false;
-};
 const cleanupIncomplete = (primary) => new Error(`${primary.message} Secure settings payload cleanup incomplete.`, {
   cause: new Error("Secure settings payload cleanup incomplete.")
 });
 
-const cleanupSecureSettingsPayload = async (ownership) => {
+const clearRetainedPayload = async (ownership) => {
+  if (ownership.payloadIdentity === undefined) {
+    if (ownership.payloadHandle === undefined) return true;
+    await ownership.payloadHandle.close().catch(() => undefined);
+    ownership.payloadHandle = undefined;
+    return false;
+  }
+  if (ownership.payloadHandle === undefined) return false;
   let complete = true;
+  try {
+    const openedPayload = await ownership.payloadHandle.stat();
+    if (!exactStatIdentity(openedPayload, ownership.payloadIdentity, "file")) complete = false;
+    else {
+      await ownership.payloadHandle.truncate(0);
+      await ownership.payloadHandle.sync();
+      const clearedPayload = await ownership.payloadHandle.stat();
+      if (!exactStatIdentity(clearedPayload, ownership.payloadIdentity, "file") || clearedPayload.size !== 0) complete = false;
+    }
+  } catch {
+    complete = false;
+  } finally {
+    await ownership.payloadHandle.close().catch(() => { complete = false; });
+    ownership.payloadHandle = undefined;
+  }
+  return complete;
+};
+
+const cleanupSecureSettingsPayload = async (ownership) => {
+  let complete = await clearRetainedPayload(ownership);
   try {
     if (ownership.directoryPath === undefined) return { complete: true };
     const directoryProbe = await inspectPath(ownership.directoryPath);
@@ -137,7 +157,7 @@ const cleanupSecureSettingsPayload = async (ownership) => {
       }
       const openedDirectory = await ownership.directoryHandle.stat();
       if (!exactStatIdentity(openedDirectory, ownership.directoryIdentity, "directory")) complete = false;
-      else if ((openedDirectory.mode & 0o777) !== 0o700 && !await attemptTwice(() => ownership.directoryHandle.chmod(0o700))) complete = false;
+      else if ((openedDirectory.mode & 0o777) !== 0o700) await ownership.directoryHandle.chmod(0o700);
     } catch {
       complete = false;
     }
@@ -148,16 +168,20 @@ const cleanupSecureSettingsPayload = async (ownership) => {
           (payloadProbe.metadata !== undefined && (!exactStatIdentity(payloadProbe.metadata, ownership.payloadIdentity, "file") ||
             await realpath(ownership.payloadPath).catch(() => undefined) !== ownership.payloadPath))) {
         complete = false;
-      } else if (payloadProbe.metadata !== undefined && !await attemptTwice(() => unlink(ownership.payloadPath))) {
-        complete = false;
+      } else if (payloadProbe.metadata !== undefined) {
+        try { await ownership.unlinkPath(ownership.payloadPath); }
+        catch { complete = false; }
       }
     }
 
     const finalDirectoryProbe = await inspectPath(ownership.directoryPath);
     if (finalDirectoryProbe.failed === true) complete = false;
     else if (finalDirectoryProbe.metadata !== undefined) {
-      if (!exactStatIdentity(finalDirectoryProbe.metadata, ownership.directoryIdentity, "directory") ||
-          !await attemptTwice(() => rmdir(ownership.directoryPath))) complete = false;
+      if (!exactStatIdentity(finalDirectoryProbe.metadata, ownership.directoryIdentity, "directory")) complete = false;
+      else {
+        try { await rmdir(ownership.directoryPath); }
+        catch { complete = false; }
+      }
     }
     const directoryAfterCleanup = await inspectPath(ownership.directoryPath);
     if (directoryAfterCleanup.absent !== true) complete = false;
@@ -170,8 +194,16 @@ const cleanupSecureSettingsPayload = async (ownership) => {
   }
 };
 
-export const createSecureSettingsPayload = async ({ values, temporaryParent = tmpdir() }) => {
-  const ownership = { directoryPath: undefined, directoryIdentity: undefined, directoryHandle: undefined, payloadPath: undefined, payloadIdentity: undefined };
+export const createSecureSettingsPayload = async ({ values, temporaryParent = tmpdir(), unlinkPath = unlink }) => {
+  const ownership = {
+    directoryPath: undefined,
+    directoryIdentity: undefined,
+    directoryHandle: undefined,
+    payloadPath: undefined,
+    payloadIdentity: undefined,
+    payloadHandle: undefined,
+    unlinkPath
+  };
   try {
     const parent = await realpath(resolve(temporaryParent));
     ownership.directoryPath = await mkdtemp(join(parent, "nxt-azure-settings-"));
@@ -184,18 +216,14 @@ export const createSecureSettingsPayload = async ({ values, temporaryParent = tm
     ownership.payloadPath = join(ownership.directoryPath, "appsettings.json");
     const properties = Object.fromEntries([...settingKeys].sort().map((key) => [key, values[key]]));
     const bytes = Buffer.from(`${JSON.stringify({ properties })}\n`, "utf8");
-    const handle = await open(ownership.payloadPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    try {
-      const createdMetadata = await handle.stat();
-      if (!createdMetadata.isFile() || createdMetadata.isSymbolicLink() || (createdMetadata.mode & 0o777) !== 0o600) throw refuse("secure settings payload file is invalid");
-      ownership.payloadIdentity = captureIdentity(createdMetadata);
-      await handle.writeFile(bytes);
-      await handle.sync();
-      const metadata = await handle.stat();
-      if (!exactStatIdentity(metadata, ownership.payloadIdentity, "file") || (metadata.mode & 0o777) !== 0o600 || metadata.size !== bytes.byteLength) throw refuse("secure settings payload file is invalid");
-    } finally {
-      await handle.close().catch(() => undefined);
-    }
+    ownership.payloadHandle = await open(ownership.payloadPath, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    const createdMetadata = await ownership.payloadHandle.stat();
+    if (!createdMetadata.isFile() || createdMetadata.isSymbolicLink() || (createdMetadata.mode & 0o777) !== 0o600) throw refuse("secure settings payload file is invalid");
+    ownership.payloadIdentity = captureIdentity(createdMetadata);
+    await ownership.payloadHandle.writeFile(bytes);
+    await ownership.payloadHandle.sync();
+    const metadata = await ownership.payloadHandle.stat();
+    if (!exactStatIdentity(metadata, ownership.payloadIdentity, "file") || (metadata.mode & 0o777) !== 0o600 || metadata.size !== bytes.byteLength) throw refuse("secure settings payload file is invalid");
     if (await realpath(ownership.payloadPath) !== ownership.payloadPath) throw refuse("secure settings payload path is invalid");
     return {
       path: ownership.payloadPath,

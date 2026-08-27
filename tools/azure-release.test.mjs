@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, writeFileSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -155,6 +155,80 @@ test("Azure cleanup repairs exact-owned mode 000 directory and preserves the mut
   });
   await assert.rejects(lstat(payloadPath), { code: "ENOENT" });
   assert.deepEqual(await readdir(temporaryParent), []);
+});
+
+test("Azure cleanup zeroes the retained secret inode and never unlinks a same-path foreign replacement", async (context) => {
+  const { applyAzureSettings } = await loadRelease();
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-azure-cleanup-replaced-")));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const envFile = join(directory, ".env.local");
+  await writeFile(envFile, source(), { mode: 0o600 });
+  const temporaryParent = join(directory, "temporary");
+  await mkdir(temporaryParent, { mode: 0o700 });
+  let payloadPath;
+  let renamedPayloadPath;
+  const foreignContents = "harmless same-path foreign fixture\n";
+  const calls = [];
+  const baseRunner = successRunner(calls);
+
+  await assert.rejects(applyAzureSettings({
+    envFile,
+    identity: { repository: "nxt-aserdargun-com" },
+    temporaryParent,
+    runAz: async (file, args) => {
+      if (args[0] !== "rest") return baseRunner(file, args);
+      calls.push(args);
+      payloadPath = args[args.indexOf("--body") + 1].slice(1);
+      renamedPayloadPath = join(dirname(payloadPath), "renamed-payload.bin");
+      await rename(payloadPath, renamedPayloadPath);
+      await writeFile(payloadPath, foreignContents, { mode: 0o600 });
+      await chmod(dirname(payloadPath), 0o500);
+      return { code: 9, stdout: `mutation ${secretOne}`, stderr: `failed ${secretTwo}` };
+    },
+    log: () => undefined
+  }), (error) => {
+    assert.match(String(error?.message), /Azure settings mutation failed/u);
+    assert.match(String(error?.message), /cleanup incomplete/u);
+    assert.doesNotMatch(String(error?.stack), new RegExp(`${secretOne}|${secretTwo}|${payloadPath}|${renamedPayloadPath}`, "u"));
+    return true;
+  });
+
+  assert.equal(await readFile(payloadPath, "utf8"), foreignContents);
+  assert.equal((await lstat(renamedPayloadPath)).size, 0);
+  assert.equal(await readFile(renamedPayloadPath, "utf8"), "");
+});
+
+test("Azure cleanup makes no second destructive unlink after a failed attempt and foreign replacement", async (context) => {
+  const { createSecureSettingsPayload } = await loadRelease();
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-azure-cleanup-no-retry-")));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const temporaryParent = join(directory, "temporary");
+  await mkdir(temporaryParent, { mode: 0o700 });
+  let unlinkCalls = 0;
+  let renamedPayloadPath;
+  const foreignContents = "harmless retry-window foreign fixture\n";
+  const payload = await createSecureSettingsPayload({
+    values: settings,
+    temporaryParent,
+    unlinkPath: async (path) => {
+      unlinkCalls += 1;
+      if (unlinkCalls === 1) {
+        renamedPayloadPath = join(dirname(path), "renamed-after-unlink-failure.bin");
+        await rename(path, renamedPayloadPath);
+        await writeFile(path, foreignContents, { mode: 0o600 });
+        const error = new Error("controlled unlink failure");
+        error.code = "EACCES";
+        throw error;
+      }
+      await unlink(path);
+    }
+  });
+
+  assert.deepEqual(await payload.cleanup(), { complete: false });
+  assert.equal(unlinkCalls, 1);
+  assert.equal(await readFile(payload.path, "utf8"), foreignContents);
+  assert.equal((await lstat(renamedPayloadPath)).size, 0);
+  assert.equal(await readFile(renamedPayloadPath, "utf8"), "");
 });
 
 test("Azure apply fails closed when successful mutation cleanup cannot remove a foreign entry", async (context) => {
