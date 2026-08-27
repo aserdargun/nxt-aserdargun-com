@@ -733,7 +733,8 @@ describe("editor load and durable drafts", () => {
       expectedVersion: "7",
       source: NEWER_SOURCE
     });
-    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
+    vi.useRealTimers();
+    await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved"));
   });
 
   it("persists every editor change immediately and waits exactly 1000ms before PUT", async () => {
@@ -804,15 +805,14 @@ describe("editor load and durable drafts", () => {
     await flushMicrotasks();
     expect(screen.getByLabelText("Save status")).toHaveTextContent("Saving");
     expect(store.drafts.get(NOTE_ID)?.source).toBe(NEWER_SOURCE);
-    expect(notes.updateNote).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+    await waitFor(() => expect(notes.updateNote).toHaveBeenCalledTimes(2));
     expect(notes.updateNote).toHaveBeenLastCalledWith(NOTE_ID, {
       expectedVersion: "8",
       source: NEWER_SOURCE
     });
 
     second.resolve(NEWER_RESPONSE);
-    await flushMicrotasks();
-    vi.useRealTimers();
     await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved"));
     expect(store.drafts.has(NOTE_ID)).toBe(false);
   });
@@ -846,15 +846,14 @@ describe("editor load and durable drafts", () => {
     await flushMicrotasks();
     expect(screen.getByLabelText("Save status")).toHaveTextContent("Saving");
     expect(store.drafts.get(NOTE_ID)?.source).toBe(NEWER_SOURCE);
-    expect(notes.updateNote).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+    await waitFor(() => expect(notes.updateNote).toHaveBeenCalledTimes(2));
     expect(notes.updateNote).toHaveBeenLastCalledWith(NOTE_ID, {
       expectedVersion: "7",
       source: NEWER_SOURCE
     });
 
     second.resolve(NEWER_RESPONSE);
-    await flushMicrotasks();
-    vi.useRealTimers();
     await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved"));
   });
 
