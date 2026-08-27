@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { access, chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { inspectProcess } from "../scripts/stop-local-core.mjs";
+
 const checkout = process.cwd();
 const runnerPath = join(checkout, "scripts", "run-e2e.mjs");
 const exists = (path) => access(path).then(() => true, () => false);
 
-const waitFor = async (predicate, timeoutMs = 2_000) => {
+const waitFor = async (predicate, timeoutMs = 5_000) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
@@ -25,20 +28,38 @@ const collect = (stream) => {
   return () => value;
 };
 
-test("SIGTERM aborts the active command immediately, preserves output, fails, and still runs Stop", async (context) => {
+const stopExactFixture = async (pid) => {
+  if (!Number.isSafeInteger(pid) || pid <= 0 || await inspectProcess(pid) === null) return;
+  try { process.kill(pid, "SIGKILL"); }
+  catch (error) { if (error?.code !== "ESRCH") throw error; }
+  await waitFor(async () => await inspectProcess(pid) === null);
+};
+
+test("SIGTERM reaps the exact active command group including a TERM-resistant grandchild without touching a foreign peer", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "nxt-e2e-runner-"));
   const fakePnpm = join(directory, "pnpm");
   const started = join(directory, "started");
+  const grandchildStarted = join(directory, "grandchild-started");
+  const foreignStarted = join(directory, "foreign-started");
   const stopped = join(directory, "stopped");
   await writeFile(fakePnpm, [
     "#!/usr/bin/env node",
+    'const { spawn } = require("node:child_process");',
     'const { writeFileSync } = require("node:fs");',
     'const command = process.argv[2];',
-    'if (command === "dev:codex") {',
+    'if (command === "--grandchild") {',
+    '  writeFileSync(process.env.NXT_TEST_GRANDCHILD_STARTED, String(process.pid));',
+    '  process.on("SIGTERM", () => {});',
+    '  setInterval(() => {}, 1_000);',
+    '} else if (command === "--foreign") {',
+    '  writeFileSync(process.env.NXT_TEST_FOREIGN_STARTED, String(process.pid));',
+    '  process.on("SIGTERM", () => {});',
+    '  setInterval(() => {}, 1_000);',
+    '} else if (command === "exec") {',
     '  writeFileSync(process.env.NXT_TEST_STARTED, String(process.pid));',
+    '  spawn(process.execPath, [process.argv[1], "--grandchild"], { cwd: process.cwd(), env: process.env, stdio: "ignore" });',
     '  process.stdout.write("fake-long-child-stdout\\n");',
     '  process.stderr.write("fake-long-child-stderr\\n");',
-    '  process.on("SIGTERM", () => process.exit(143));',
     '  setInterval(() => {}, 1_000);',
     '} else if (command === "stop:codex") {',
     '  writeFileSync(process.env.NXT_TEST_STOPPED, "stopped");',
@@ -46,38 +67,64 @@ test("SIGTERM aborts the active command immediately, preserves output, fails, an
   ].join("\n"), { mode: 0o700 });
   await chmod(fakePnpm, 0o700);
 
+  const fixtureEnvironment = {
+    ...process.env,
+    PATH: `${directory}:${process.env.PATH}`,
+    NXT_TEST_STARTED: started,
+    NXT_TEST_GRANDCHILD_STARTED: grandchildStarted,
+    NXT_TEST_FOREIGN_STARTED: foreignStarted,
+    NXT_TEST_STOPPED: stopped
+  };
+  const foreign = spawn(fakePnpm, ["--foreign"], {
+    cwd: checkout,
+    env: fixtureEnvironment,
+    detached: true,
+    stdio: "ignore"
+  });
   const child = spawn(process.execPath, [runnerPath], {
     cwd: checkout,
-    env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, NXT_TEST_STARTED: started, NXT_TEST_STOPPED: stopped },
+    env: fixtureEnvironment,
     stdio: ["ignore", "pipe", "pipe"]
   });
   const stdout = collect(child.stdout);
   const stderr = collect(child.stderr);
   let fakePid;
+  let grandchildPid;
+  let foreignPid;
   context.after(async () => {
-    if (fakePid !== undefined) {
-      try { process.kill(fakePid, "SIGTERM"); } catch (error) { if (error?.code !== "ESRCH") throw error; }
+    await stopExactFixture(grandchildPid);
+    await stopExactFixture(fakePid);
+    if (await inspectProcess(foreignPid) !== null) {
+      const closed = once(foreign, "close");
+      foreign.kill("SIGKILL");
+      await closed;
     }
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     await rm(directory, { recursive: true, force: true });
   });
 
-  await waitFor(() => exists(started));
+  await waitFor(async () => await exists(started) && await exists(grandchildStarted) && await exists(foreignStarted));
   fakePid = Number(await readFile(started, "utf8"));
+  grandchildPid = Number(await readFile(grandchildStarted, "utf8"));
+  foreignPid = Number(await readFile(foreignStarted, "utf8"));
+  const [directIdentity, grandchildIdentity, foreignIdentity] = await Promise.all([
+    inspectProcess(fakePid), inspectProcess(grandchildPid), inspectProcess(foreignPid)
+  ]);
+  assert.equal(grandchildIdentity?.pgid, directIdentity?.pgid, "grandchild fixture did not join the active command group");
+  assert.notEqual(foreignIdentity?.pgid, directIdentity?.pgid, "foreign fixture did not own a distinct process group");
   const exit = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
   const startedAt = Date.now();
   child.kill("SIGTERM");
-  let result = await Promise.race([exit, new Promise((resolve) => setTimeout(() => resolve("timeout"), 1_000))]);
-  if (result === "timeout") {
-    process.kill(fakePid, "SIGTERM");
-    result = await exit;
-  }
-  assert.notEqual(result, "timeout", "runner did not abort its active command within one second");
-  assert.ok(Date.now() - startedAt < 1_000, "runner interruption was not immediate");
+  const result = await Promise.race([exit, new Promise((resolve) => setTimeout(() => resolve("timeout"), 5_000))]);
+  assert.notEqual(result, "timeout", "runner did not complete bounded identity-verified interruption cleanup");
+  assert.ok(Date.now() - startedAt < 5_000, "runner interruption cleanup was not bounded");
   assert.notEqual(result.code, 0);
   assert.equal(await exists(stopped), true, "Stop was not invoked after interruption");
   assert.match(stdout(), /fake-long-child-stdout/u);
   assert.match(stderr(), /fake-long-child-stderr/u);
+  assert.equal(await inspectProcess(fakePid), null, `direct active command survived runner teardown\n${stderr()}`);
+  assert.equal(await inspectProcess(grandchildPid), null, `TERM-resistant active-command grandchild survived runner teardown\n${stderr()}`);
+  assert.notEqual(await inspectProcess(foreignPid), null, "foreign same-name process in another group was signaled");
 });
 
 test("forwards a selective Playwright path without pnpm's leading separator", async (context) => {
@@ -101,7 +148,6 @@ test("forwards a selective Playwright path without pnpm's leading separator", as
   assert.deepEqual(result, { code: 0, signal: null });
   const invoked = (await readFile(calls, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(invoked, [
-    ["dev:codex", "--", "--e2e"],
     ["exec", "playwright", "test", "e2e/publication.spec.ts"],
     ["stop:codex"]
   ]);

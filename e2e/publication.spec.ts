@@ -36,27 +36,33 @@ test("persisted raster publishes as an unlisted snapshot and revoke makes it gen
 
   const browser = page.context().browser();
   expect(browser).not.toBeNull();
-  const publicContext = await browser!.newContext({ viewport: { width: 1440, height: 1000 } });
+  const publicContext = await browser!.newContext({
+    baseURL: "http://127.0.0.1:4280",
+    viewport: { width: 1440, height: 1000 }
+  });
   const publicPage = await publicContext.newPage();
   const privateRequests: string[] = [];
-  publicPage.on("request", (request) => { if (request.url().includes("/api/private/") || request.url().includes("/.auth/me")) privateRequests.push(request.url()); });
-  await publicPage.goto(publicPath as string, { waitUntil: "domcontentloaded" });
-  await expect(publicPage.getByRole("heading", { level: 1, name: "Publication proof" })).toBeVisible();
-  const publicImage = publicPage.locator(".rendered-markdown").getByAltText("browser-proof.png");
-  await expect(publicImage).toBeVisible();
-  expect(privateRequests).toEqual([]);
-  await expect(publicPage.getByTestId("owner-shell")).toHaveCount(0);
-  expect(await publicPage.locator('meta[name="robots"]').getAttribute("content")).toBe("noindex,nofollow");
-  const imageResponse = await publicPage.request.get(await publicImage.getAttribute("src") as string);
-  expect(imageResponse.status()).toBe(200);
-  expect(imageResponse.headers()["content-type"]).toBe("image/png");
-  await expectNoSeriousViolations(publicPage);
-  await publicPage.screenshot({
-    path: "test-results/playwright/task15-public-note.png",
-    fullPage: true,
-    animations: "disabled"
-  });
-  await publicContext.close();
+  try {
+    publicPage.on("request", (request) => { if (request.url().includes("/api/private/") || request.url().includes("/.auth/me")) privateRequests.push(request.url()); });
+    await publicPage.goto(publicPath as string, { waitUntil: "domcontentloaded" });
+    await expect(publicPage.getByRole("heading", { level: 1, name: "Publication proof" })).toBeVisible();
+    const publicImage = publicPage.locator(".rendered-markdown").getByAltText("browser-proof.png");
+    await expect(publicImage).toBeVisible();
+    expect(privateRequests).toEqual([]);
+    await expect(publicPage.getByTestId("owner-shell")).toHaveCount(0);
+    expect(await publicPage.locator('meta[name="robots"]').getAttribute("content")).toBe("noindex,nofollow");
+    const imageResponse = await publicPage.request.get(await publicImage.getAttribute("src") as string);
+    expect(imageResponse.status()).toBe(200);
+    expect(imageResponse.headers()["content-type"]).toBe("image/png");
+    await expectNoSeriousViolations(publicPage);
+    await publicPage.screenshot({
+      path: "test-results/playwright/task15-public-note.png",
+      fullPage: true,
+      animations: "disabled"
+    });
+  } finally {
+    await publicContext.close();
+  }
 
   await page.getByRole("button", { name: "Revoke" }).click();
   const revokeDialog = page.getByRole("dialog", { name: "Revoke publication" });
@@ -64,17 +70,20 @@ test("persisted raster publishes as an unlisted snapshot and revoke makes it gen
   await expectNoSeriousViolations(page, ".revoke-dialog");
   await revokeDialog.getByRole("button", { name: "Confirm revoke" }).click();
   await expect(publicLink).toHaveCount(0);
-  const anonymousVerifier = await browser!.newContext();
+  const anonymousVerifier = await browser!.newContext({ baseURL: "http://127.0.0.1:4280" });
   const revoked = await anonymousVerifier.request.get(publicPath as string);
   expect(revoked.status()).toBe(200);
   const publicId = (publicPath as string).split("/").at(-1) as string;
-  let revokedApi = await anonymousVerifier.request.get(`/api/public/notes/${publicId}`);
-  await expect.poll(async () => {
-    revokedApi = await anonymousVerifier.request.get(`/api/public/notes/${publicId}`, {
-      headers: { "cache-control": "no-cache", pragma: "no-cache" }
-    });
-    return revokedApi.status();
-  }, { timeout: 10_000, intervals: [250, 500, 1_000] }).toBe(404);
-  expect(await revokedApi.json()).toMatchObject({ error: { code: "NOT_FOUND" } });
-  await anonymousVerifier.close();
+  try {
+    let revokedApi = await anonymousVerifier.request.get(`/api/public/notes/${publicId}`);
+    await expect.poll(async () => {
+      revokedApi = await anonymousVerifier.request.get(`/api/public/notes/${publicId}`, {
+        headers: { "cache-control": "no-cache", pragma: "no-cache" }
+      });
+      return revokedApi.status();
+    }, { timeout: 10_000, intervals: [250, 500, 1_000] }).toBe(404);
+    expect(await revokedApi.json()).toMatchObject({ error: { code: "NOT_FOUND" } });
+  } finally {
+    await anonymousVerifier.close();
+  }
 });

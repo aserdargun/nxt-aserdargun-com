@@ -50,7 +50,8 @@ const observeListeners = async (pid) => {
 
 export const inspectProcess = async (pid) => {
   if (!positiveInteger(pid)) return null;
-  const [startTime, executable, command, pgidText, cwd, listeningPorts] = await Promise.all([
+  const [state, startTime, executable, command, pgidText, cwd, listeningPorts] = await Promise.all([
+    runObserved("/bin/ps", ["-p", String(pid), "-o", "state="], { emptyOnExitOne: true }),
     runObserved("/bin/ps", ["-p", String(pid), "-o", "lstart="], { emptyOnExitOne: true }),
     runObserved("/bin/ps", ["-p", String(pid), "-o", "comm="], { emptyOnExitOne: true }),
     runObserved("/bin/ps", ["-p", String(pid), "-o", "command="], { emptyOnExitOne: true }),
@@ -59,7 +60,7 @@ export const inspectProcess = async (pid) => {
     observeListeners(pid)
   ]);
   const pgid = Number(pgidText);
-  if (startTime.length === 0 || executable.length === 0 || command.length === 0 || cwd.length === 0 || !positiveInteger(pgid)) return null;
+  if (state.startsWith("Z") || startTime.length === 0 || executable.length === 0 || command.length === 0 || cwd.length === 0 || !positiveInteger(pgid)) return null;
   return { pid, pgid, startTime, cwd, executable, command, listeningPorts };
 };
 
@@ -318,7 +319,7 @@ const listenerIsClosed = async (port) => new Promise((resolvePromise) => {
   socket.once("error", () => done(true));
 });
 
-const defaultEnumerateChildPids = async (pid) => {
+export const defaultEnumerateChildPids = async (pid) => {
   try {
     const { stdout } = await run("/usr/bin/pgrep", ["-P", String(pid)], { encoding: "utf8", maxBuffer: 1024 * 1024 });
     return stdout.trim().split(/\s+/u).filter(Boolean).map(Number).filter(positiveInteger);
@@ -328,7 +329,7 @@ const defaultEnumerateChildPids = async (pid) => {
   }
 };
 
-const defaultEnumerateGroupPids = async (pgid) => {
+export const defaultEnumerateGroupPids = async (pgid) => {
   const { stdout } = await run("/bin/ps", ["-axo", "pid=,pgid="], { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
   return stdout.split("\n").flatMap((line) => {
     const match = /^\s*([0-9]+)\s+([0-9]+)\s*$/u.exec(line);

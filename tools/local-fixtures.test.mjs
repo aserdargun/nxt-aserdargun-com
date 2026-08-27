@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { watch } from "node:fs";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -54,24 +55,29 @@ test("refuses traversal, symlink, pre-existing, and live Drive fixture roots", a
   }), /Refusing live Drive environment key GOOGLE_REFRESH_TOKEN/u);
 });
 
-test("resets the exact existing root to byte-independent deterministic IDs", async (context) => {
+test("refuses in-place reset so a live fixture generation is never renamed", async (context) => {
   const checkout = await makeCheckout();
   context.after(() => rm(checkout, { recursive: true, force: true }));
   const fixtureRoot = join(checkout, ".nxt-local", "fixtures", "playwright");
   const first = await seedLocalFixtures({ checkoutPath: checkout, fixtureRoot, environment: {} });
-  await mutateLocalFixtureNote({
+  const changed = await mutateLocalFixtureNote({
     checkoutPath: checkout, fixtureRoot, noteId: first.noteId,
     title: "Changed", body: "# Changed\n"
   });
 
-  const reset = await resetLocalFixtures({ checkoutPath: checkout, fixtureRoot, environment: {} });
-  assert.deepEqual(reset.ids, first.ids);
-  assert.equal(reset.noteId, first.noteId);
-  assert.equal((await readFile(join(fixtureRoot, ".fixture.json"), "utf8")).includes("Changed"), false);
+  await assert.rejects(
+    resetLocalFixtures({ checkoutPath: checkout, fixtureRoot, environment: {} }),
+    /Refusing in-place local fixture reset/u
+  );
+  const changedAgain = await mutateLocalFixtureNote({
+    checkoutPath: checkout, fixtureRoot, noteId: first.noteId,
+    title: "Changed again", body: "# Changed again\n"
+  });
+  assert.equal(changedAgain.previousVersion, changed.version);
   assert.deepEqual(await readdir(join(checkout, ".nxt-local", "fixtures")), ["playwright"]);
 });
 
-test("waits for an in-flight fixture mutation before replacing the exact root", async (context) => {
+test("refuses reset while an in-flight fixture mutation finishes in its original generation", async (context) => {
   const checkout = await makeCheckout();
   context.after(() => rm(checkout, { recursive: true, force: true }));
   const fixtureRoot = join(checkout, ".nxt-local", "fixtures", "playwright");
@@ -87,6 +93,31 @@ test("waits for an in-flight fixture mutation before replacing the exact root", 
         .then(resolve, reject);
     }, 25);
   });
-  await Promise.all([mutation, resetLocalFixtures({ checkoutPath: checkout, fixtureRoot, environment: {} })]);
-  await assert.rejects(access(lateWrite));
+  await assert.rejects(
+    resetLocalFixtures({ checkoutPath: checkout, fixtureRoot, environment: {} }),
+    /Refusing in-place local fixture reset/u
+  );
+  await mutation;
+  assert.equal(await readFile(lateWrite, "utf8"), "must stay with the replaced root\n");
+});
+
+test("eliminates the check-to-rename window before a path-reopening late writer can cross generations", async (context) => {
+  const checkout = await makeCheckout();
+  context.after(() => rm(checkout, { recursive: true, force: true }));
+  const fixtures = join(checkout, ".nxt-local", "fixtures");
+  const fixtureRoot = join(fixtures, "playwright");
+  await seedLocalFixtures({ checkoutPath: checkout, fixtureRoot, environment: {} });
+
+  let observedReplacement = false;
+  const watcher = watch(fixtures, (event, filename) => {
+    if (event === "rename" && filename === "playwright") observedReplacement = true;
+  });
+  context.after(() => watcher.close());
+
+  await assert.rejects(
+    resetLocalFixtures({ checkoutPath: checkout, fixtureRoot, environment: {} }),
+    /Refusing in-place local fixture reset/u
+  );
+  watcher.close();
+  assert.equal(observedReplacement, false, "the fixture root entered a forbidden replacement generation");
 });

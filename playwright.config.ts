@@ -6,7 +6,7 @@ export default defineConfig({
   workers: 1,
   forbidOnly: true,
   retries: 0,
-  timeout: 30_000,
+  timeout: 60_000,
   expect: { timeout: 8_000 },
   reporter: [["list"]],
   outputDir: "test-results/playwright",

@@ -39,6 +39,7 @@ test("toolchain and Codex actions pin the secure local lifecycle", async () => {
   assert.match(pkg.scripts["validate:codex"], /local-lifecycle\.integration\.test\.mjs/u);
   assert.match(pkg.scripts["validate:codex"], /local-fixtures\.test\.mjs/u);
   assert.match(pkg.scripts["validate:codex"], /e2e-runner\.integration\.test\.mjs/u);
+  assert.match(pkg.scripts["validate:codex"], /e2e-stack\.integration\.test\.mjs/u);
   assert.doesNotMatch(pkg.scripts["validate:codex"], /(?:^|\s)pnpm e2e(?:\s|$)/u);
 
   const workspace = await readFile("pnpm-workspace.yaml", "utf8");

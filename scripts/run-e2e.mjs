@@ -3,18 +3,12 @@ import { lstat } from "node:fs/promises";
 import { promisify } from "node:util";
 
 import { assertPortsAvailable } from "./local-dev.mjs";
+import { createE2eEnvironment } from "./e2e-environment.mjs";
+import { runOwnedCommand } from "./owned-command.mjs";
 
 const run = promisify(execFile);
 const checkout = new URL("..", import.meta.url).pathname.replace(/\/$/u, "");
-const driveKeys = [
-  "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN", "NXT_VAULT_DRIVE_FOLDER_ID", "NXT_PRIVATE_DRIVE_FOLDER_ID",
-  "NXT_NOTES_DRIVE_FOLDER_ID", "NXT_INBOX_DRIVE_FOLDER_ID", "NXT_PLANS_DRIVE_FOLDER_ID", "NXT_ARCHIVE_DRIVE_FOLDER_ID",
-  "NXT_ASSETS_DRIVE_FOLDER_ID", "NXT_PUBLISHED_DRIVE_FOLDER_ID", "NXT_VAULT_INDEX_DRIVE_FILE_ID",
-  "NXT_PREFERENCES_DRIVE_FILE_ID", "NXT_PUBLICATION_MANIFEST_DRIVE_FILE_ID", "NXT_LOCAL_STORAGE_MODE",
-  "NXT_LOCAL_FIXTURE_ROOT", "NXT_LOCAL_CHECKOUT_ROOT", "NXT_LOCAL_CONTROL_NONCE", "NXT_LOCAL_AUTH_BYPASS"
-];
-const environment = { ...process.env };
-for (const key of driveKeys) delete environment[key];
+const environment = createE2eEnvironment();
 
 const assertTeardown = async () => {
   await assertPortsAvailable([4280, 5173, 7071]);
@@ -41,7 +35,7 @@ const runActive = async (file, args, options) => {
   activeController = controller;
   if (interrupted) controller.abort();
   try {
-    return await run(file, args, { ...options, signal: controller.signal });
+    return await runOwnedCommand(file, args, { ...options, signal: controller.signal });
   } finally {
     if (activeController === controller) activeController = undefined;
   }
@@ -49,8 +43,6 @@ const runActive = async (file, args, options) => {
 
 let testError;
 try {
-  await runActive("pnpm", ["dev:codex", "--", "--e2e"], { cwd: checkout, env: environment, maxBuffer: 32 * 1024 * 1024 });
-  if (interrupted) throw new Error("E2E run was interrupted before Chromium started.");
   const forwarded = process.argv.slice(2);
   if (forwarded[0] === "--") forwarded.shift();
   const args = ["exec", "playwright", "test", ...forwarded];

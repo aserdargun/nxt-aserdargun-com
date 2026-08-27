@@ -25,13 +25,14 @@ test("login, owner workspace, and command dialog have no serious axe violations"
   await expect(page.getByRole("button", { name: "Notes actions" })).toBeAttached();
   const inbox = tree.getByRole("treeitem", { name: "Inbox" });
   const welcome = tree.getByRole("treeitem", { name: "Welcome to NXT" });
+  await expect(page.getByLabel("Save status")).toHaveText("Saved");
+  await expectNoSeriousViolations(page);
   await welcome.focus();
   await expect(welcome).toBeFocused();
-  await page.keyboard.press("ArrowUp");
+  await welcome.press("ArrowUp");
   await expect(inbox).toBeFocused();
-  await page.keyboard.press("ArrowDown");
+  await inbox.press("ArrowDown");
   await expect(welcome).toBeFocused();
-  await expectNoSeriousViolations(page);
   const editor = page.getByLabel("Markdown editor");
   await editor.focus();
   await page.keyboard.press("Meta+K");
