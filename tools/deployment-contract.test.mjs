@@ -38,6 +38,7 @@ test("PR and deployment workflows pin permissions, platforms, gates, and prebuil
   assert.equal(ci.jobs.macos_acceptance["runs-on"], "macos-latest");
   assert.deepEqual(ci.jobs.macos_acceptance.env, {
     NODE_OPTIONS: "--max-old-space-size=4096",
+    NXT_VITEST_TEST_TIMEOUT_MS: "15000",
     NXT_VITEST_MAX_WORKERS: "1"
   });
   assert.match(ci.jobs.macos_acceptance.steps.map((step) => step.run ?? "").join("\n"), /azure-functions-core-tools@4\.13\.0/u);
@@ -52,6 +53,7 @@ test("PR and deployment workflows pin permissions, platforms, gates, and prebuil
   assert.deepEqual(deploy.jobs.deploy.needs, ["portable", "macos_acceptance"]);
   assert.deepEqual(deploy.jobs.macos_acceptance.env, {
     NODE_OPTIONS: "--max-old-space-size=4096",
+    NXT_VITEST_TEST_TIMEOUT_MS: "15000",
     NXT_VITEST_MAX_WORKERS: "1"
   });
   assert.equal(deploy.jobs.deploy.if, "github.ref == 'refs/heads/main'");
