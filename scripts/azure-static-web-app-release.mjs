@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { chmod, lstat, mkdtemp, open, realpath, rmdir, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
@@ -10,6 +11,8 @@ import { verifyReleaseIdentity } from "./verify-deployment-contract.mjs";
 const exec = promisify(execFile);
 const MAX_ENV_BYTES = 64 * 1024;
 const MAX_VALUE_BYTES = 4 * 1024;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const API_VERSION = "2025-05-01";
 const settingKeys = Object.freeze([
   "NXT_ALLOWED_GITHUB_USER",
   "GOOGLE_CLIENT_ID",
@@ -42,11 +45,25 @@ export const readReleaseEnvironment = async (envFile, { openFile = open } = {}) 
   if (!metadata.isFile() || metadata.isSymbolicLink()) throw refuse("environment file must be a regular non-symlink");
   if ((metadata.mode & 0o777) !== 0o600) throw refuse("environment file must use mode 0600");
   if (metadata.size <= 0 || metadata.size > MAX_ENV_BYTES) throw refuse("environment file size is invalid");
-  await realpath(path);
-  const handle = await openFile(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const canonical = await realpath(path).catch(() => { throw refuse("environment file is unavailable"); });
+  if (canonical !== path) throw refuse("environment file path must be canonical");
+  let handle;
+  try { handle = await openFile(path, constants.O_RDONLY | constants.O_NOFOLLOW); }
+  catch { throw refuse("environment file changed or could not be opened"); }
   let source;
-  try { source = await handle.readFile("utf8"); }
-  finally { await handle.close(); }
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.isSymbolicLink() || (opened.mode & 0o777) !== 0o600 || opened.size <= 0 || opened.size > MAX_ENV_BYTES ||
+        opened.dev !== metadata.dev || opened.ino !== metadata.ino || opened.size !== metadata.size) {
+      throw refuse("environment file changed between validation and open");
+    }
+    source = await handle.readFile("utf8");
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Refusing Azure release:")) throw error;
+    throw refuse("environment file changed or could not be read");
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
   const values = {};
   for (const raw of source.split("\n")) {
     if (raw === "" || raw.startsWith("#")) continue;
@@ -85,15 +102,57 @@ const parseJson = (source, label) => {
   catch { throw new Error(`${label} returned invalid JSON.`); }
 };
 const exactIdentity = (identity) => identity?.repository === "nxt-aserdargun-com";
+const safePrincipal = (value) => typeof value === "string" && value.length > 0 && value.length <= 320 && !containsControls(value);
 
-export const applyAzureSettings = async ({ envFile, identity, runAz = defaultAzureRunner, log = console.log }) => {
+const createSecureSettingsPayload = async ({ values, temporaryParent = tmpdir() }) => {
+  let directory;
+  let payloadPath;
+  try {
+    const parent = await realpath(resolve(temporaryParent));
+    directory = await mkdtemp(join(parent, "nxt-azure-settings-"));
+    await chmod(directory, 0o700);
+    const directoryMetadata = await lstat(directory);
+    if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink() || (directoryMetadata.mode & 0o777) !== 0o700) throw refuse("secure settings payload directory is invalid");
+    payloadPath = join(directory, "appsettings.json");
+    const properties = Object.fromEntries([...settingKeys].sort().map((key) => [key, values[key]]));
+    const bytes = Buffer.from(`${JSON.stringify({ properties })}\n`, "utf8");
+    const handle = await open(payloadPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+      const metadata = await handle.stat();
+      if (!metadata.isFile() || (metadata.mode & 0o777) !== 0o600 || metadata.size !== bytes.byteLength) throw refuse("secure settings payload file is invalid");
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+    if (await realpath(payloadPath) !== payloadPath) throw refuse("secure settings payload path is invalid");
+    return {
+      path: payloadPath,
+      async cleanup() {
+        try { await unlink(payloadPath); }
+        catch (error) { if (error?.code !== "ENOENT") throw refuse("secure settings payload cleanup failed"); }
+        try { await rmdir(directory); }
+        catch { throw refuse("secure settings payload cleanup failed"); }
+      }
+    };
+  } catch (error) {
+    if (payloadPath !== undefined) await unlink(payloadPath).catch(() => undefined);
+    if (directory !== undefined) await rmdir(directory).catch(() => undefined);
+    if (error instanceof Error && error.message.startsWith("Refusing Azure release:")) throw error;
+    throw refuse("secure settings payload could not be prepared");
+  }
+};
+
+export const applyAzureSettings = async ({ envFile, identity, runAz = defaultAzureRunner, log = console.log, temporaryParent = tmpdir() }) => {
   if (!exactIdentity(identity)) throw refuse("release identity was not verified");
   const values = await readReleaseEnvironment(envFile);
   const account = parseJson(await runChecked(runAz, ["account", "show", "--only-show-errors", "--output", "json"], "Azure account verification"), "Azure account verification");
-  if (account?.name !== "aserdargun subscription" || account?.state !== "Enabled") throw refuse("exact enabled Azure subscription is required");
+  if (!UUID.test(safeString(account?.id)) || account?.state !== "Enabled" || !UUID.test(safeString(account?.tenantId)) ||
+      account?.user?.type !== "user" || !safePrincipal(account?.user?.name)) throw refuse("valid enabled Azure subscription identity is required");
+  const expectedResourceId = `/subscriptions/${account.id}/resourceGroups/rg-nxt-aserdargun-com/providers/Microsoft.Web/staticSites/swa-nxt-aserdargun-com`;
   const targetArgs = ["--name", "swa-nxt-aserdargun-com", "--resource-group", "rg-nxt-aserdargun-com", "--only-show-errors", "--output", "json"];
   const app = parseJson(await runChecked(runAz, ["staticwebapp", "show", ...targetArgs], "Azure Static Web App verification"), "Azure Static Web App verification");
-  if (app?.name !== "swa-nxt-aserdargun-com" || app?.resourceGroup !== "rg-nxt-aserdargun-com" || app?.provisioningState !== "Succeeded" ||
+  if (safeString(app?.id).toLowerCase() !== expectedResourceId.toLowerCase() || app?.name !== "swa-nxt-aserdargun-com" || app?.resourceGroup !== "rg-nxt-aserdargun-com" || app?.provisioningState !== "Succeeded" ||
       app?.sku?.name !== "Free" || safeString(app?.location).replace(/\s+/gu, "").toLowerCase() !== "westeurope" ||
       typeof app?.defaultHostname !== "string" || !app.defaultHostname.endsWith(".azurestaticapps.net")) {
     throw refuse("exact Ready Free Static Web App is required");
@@ -101,14 +160,20 @@ export const applyAzureSettings = async ({ envFile, identity, runAz = defaultAzu
   const hostnames = parseJson(await runChecked(runAz, ["staticwebapp", "hostname", "list", ...targetArgs.slice(0, 4), "--only-show-errors", "--output", "json"], "Azure hostname verification"), "Azure hostname verification");
   if (!Array.isArray(hostnames) || hostnames.length !== 0) throw refuse("custom hostnames must be empty");
   const sortedKeys = [...settingKeys].sort();
-  const settingArguments = sortedKeys.map((key) => `${key}=${values[key]}`);
-  await runChecked(runAz, [
-    "staticwebapp", "appsettings", "set",
-    "--name", "swa-nxt-aserdargun-com",
-    "--resource-group", "rg-nxt-aserdargun-com",
-    "--only-show-errors", "--output", "none",
-    "--setting-names", ...settingArguments
-  ], "Azure settings mutation");
+  const payload = await createSecureSettingsPayload({ values, temporaryParent });
+  let mutationFailure;
+  try {
+    await runChecked(runAz, [
+      "rest", "--method", "put",
+      "--url", `${expectedResourceId}/config/appsettings?api-version=${API_VERSION}`,
+      "--body", `@${payload.path}`,
+      "--only-show-errors", "--output", "none"
+    ], "Azure settings mutation");
+  } catch (error) {
+    mutationFailure = error;
+  }
+  await payload.cleanup();
+  if (mutationFailure !== undefined) throw mutationFailure;
   log(`Azure settings applied: ${sortedKeys.join(", ")}.`);
   return { keyCount: sortedKeys.length, keys: sortedKeys };
 };

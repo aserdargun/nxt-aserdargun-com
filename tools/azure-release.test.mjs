@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 const secretOne = "never-print-client-secret";
 const secretTwo = "never-print-refresh-token";
+const subscriptionId = "11111111-2222-4333-8444-555555555555";
+const tenantId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const resourceId = `/subscriptions/${subscriptionId}/resourceGroups/rg-nxt-aserdargun-com/providers/Microsoft.Web/staticSites/swa-nxt-aserdargun-com`;
+const validAccount = { id: subscriptionId, name: "display-name-is-not-identity", state: "Enabled", tenantId, user: { name: "operator@example.invalid", type: "user" } };
+const validApp = { id: resourceId, name: "swa-nxt-aserdargun-com", resourceGroup: "rg-nxt-aserdargun-com", provisioningState: "Succeeded", sku: { name: "Free" }, location: "West Europe", defaultHostname: "calm-field.azurestaticapps.net" };
 const settings = {
   NXT_ALLOWED_GITHUB_USER: "aserdargun",
   GOOGLE_CLIENT_ID: "desktop-client-id",
@@ -26,56 +31,86 @@ const settings = {
 const source = (input = settings) => `${Object.entries(input).map(([key, value]) => `${key}=${value}`).join("\n")}\n`;
 const loadRelease = () => import("../scripts/azure-static-web-app-release.mjs");
 
-const successRunner = (calls) => async (file, args) => {
+const successRunner = (calls, { account = validAccount, app = validApp, onRest } = {}) => async (file, args) => {
   assert.equal(file, "az");
   calls.push(args);
   const key = args.join(" ");
-  if (key === "account show --only-show-errors --output json") return { code: 0, stdout: JSON.stringify({ name: "aserdargun subscription", state: "Enabled", user: { name: "aserdargun" } }), stderr: "" };
-  if (key.startsWith("staticwebapp show ")) return { code: 0, stdout: JSON.stringify({ name: "swa-nxt-aserdargun-com", resourceGroup: "rg-nxt-aserdargun-com", provisioningState: "Succeeded", sku: { name: "Free" }, location: "West Europe", defaultHostname: "calm-field.azurestaticapps.net" }), stderr: "" };
+  if (key === "account show --only-show-errors --output json") return { code: 0, stdout: JSON.stringify(account), stderr: "" };
+  if (key.startsWith("staticwebapp show ")) return { code: 0, stdout: JSON.stringify(app), stderr: "" };
   if (key.startsWith("staticwebapp hostname list ")) return { code: 0, stdout: "[]", stderr: "" };
-  if (key.startsWith("staticwebapp appsettings set ")) return { code: 0, stdout: "", stderr: "" };
+  if (args[0] === "rest") {
+    await onRest?.(args);
+    return { code: 0, stdout: "", stderr: "" };
+  }
   return { code: 2, stdout: "", stderr: "unexpected fake command" };
 };
 
 test("manual Azure apply validates exact target and exposes only sorted key names", async (context) => {
   const { applyAzureSettings } = await loadRelease();
-  const directory = await mkdtemp(join(tmpdir(), "nxt-azure-release-"));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-azure-release-")));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const envFile = join(directory, ".env.local");
   await writeFile(envFile, source(), { mode: 0o600 });
+  const temporaryParent = join(directory, "temporary");
+  await mkdir(temporaryParent, { mode: 0o700 });
   const calls = [];
+  let payloadPath;
+  let payload;
   let output = "";
   const result = await applyAzureSettings({
     envFile,
     identity: { repository: "nxt-aserdargun-com" },
-    runAz: successRunner(calls),
+    temporaryParent,
+    runAz: successRunner(calls, {
+      onRest: async (args) => {
+        const bodyArgument = args[args.indexOf("--body") + 1];
+        assert.match(bodyArgument, /^@\//u);
+        payloadPath = bodyArgument.slice(1);
+        assert.equal(await realpath(payloadPath), payloadPath);
+        assert.equal((await lstat(payloadPath)).mode & 0o777, 0o600);
+        assert.equal((await lstat(dirname(payloadPath))).mode & 0o777, 0o700);
+        payload = JSON.parse(await readFile(payloadPath, "utf8"));
+      }
+    }),
     log: (line) => { output += `${line}\n`; }
   });
   assert.equal(result.keyCount, 15);
   assert.deepEqual(result.keys, Object.keys(settings).sort());
   assert.doesNotMatch(output, new RegExp(`${secretOne}|${secretTwo}`, "u"));
   assert.match(output, /Azure settings applied: GOOGLE_CLIENT_ID,/u);
-  const mutation = calls.find((args) => args[0] === "staticwebapp" && args[1] === "appsettings" && args[2] === "set");
-  assert.deepEqual(mutation.slice(0, 9), ["staticwebapp", "appsettings", "set", "--name", "swa-nxt-aserdargun-com", "--resource-group", "rg-nxt-aserdargun-com", "--only-show-errors", "--output"]);
-  assert.equal(mutation[9], "none");
-  assert.equal(mutation[10], "--setting-names");
+  assert.doesNotMatch(JSON.stringify(calls), new RegExp(`${secretOne}|${secretTwo}`, "u"));
+  const mutation = calls.find((args) => args[0] === "rest");
+  assert.deepEqual(mutation.slice(0, 7), ["rest", "--method", "put", "--url", `${resourceId}/config/appsettings?api-version=2025-05-01`, "--body", `@${payloadPath}`]);
+  assert.deepEqual(mutation.slice(7), ["--only-show-errors", "--output", "none"]);
+  assert.deepEqual(payload, { properties: settings });
+  await assert.rejects(lstat(payloadPath), { code: "ENOENT" });
+  assert.deepEqual(await readdir(temporaryParent), []);
 });
 
 test("Azure apply redacts sentinel values from child diagnostics and thrown errors", async (context) => {
   const { applyAzureSettings } = await loadRelease();
-  const directory = await mkdtemp(join(tmpdir(), "nxt-azure-redaction-"));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-azure-redaction-")));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const envFile = join(directory, ".env.local");
   await writeFile(envFile, source(), { mode: 0o600 });
+  const temporaryParent = join(directory, "temporary");
+  await mkdir(temporaryParent, { mode: 0o700 });
   const calls = [];
   const runner = successRunner(calls);
+  let payloadPath;
   await assert.rejects(
     applyAzureSettings({
       envFile,
       identity: { repository: "nxt-aserdargun-com" },
-      runAz: async (file, args) => args[0] === "staticwebapp" && args[1] === "appsettings"
-        ? { code: 1, stdout: `bad ${secretOne}`, stderr: `worse ${secretTwo}` }
-        : runner(file, args),
+      temporaryParent,
+      runAz: async (file, args) => {
+        if (args[0] === "rest") {
+          calls.push(args);
+          payloadPath = args[args.indexOf("--body") + 1].slice(1);
+          return { code: 1, stdout: `bad ${secretOne}`, stderr: `worse ${secretTwo}` };
+        }
+        return runner(file, args);
+      },
       log: () => undefined
     }),
     (error) => {
@@ -84,11 +119,14 @@ test("Azure apply redacts sentinel values from child diagnostics and thrown erro
       return true;
     }
   );
+  assert.doesNotMatch(JSON.stringify(calls), new RegExp(`${secretOne}|${secretTwo}`, "u"));
+  await assert.rejects(lstat(payloadPath), { code: "ENOENT" });
+  assert.deepEqual(await readdir(temporaryParent), []);
 });
 
 test("Azure env admission refuses symlinks, wrong modes, unknown/local keys, duplicates, controls, and missing values", async (context) => {
   const { readReleaseEnvironment } = await loadRelease();
-  const directory = await mkdtemp(join(tmpdir(), "nxt-azure-env-"));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-azure-env-")));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const envFile = join(directory, ".env.local");
   await writeFile(envFile, source(), { mode: 0o600 });
@@ -99,6 +137,13 @@ test("Azure env admission refuses symlinks, wrong modes, unknown/local keys, dup
   const link = join(directory, "linked.env");
   await symlink(envFile, link);
   await assert.rejects(readReleaseEnvironment(link), /regular non-symlink/u);
+  const canonicalParent = join(directory, "canonical-parent");
+  await mkdir(canonicalParent);
+  const canonicalEnv = join(canonicalParent, ".env.local");
+  await writeFile(canonicalEnv, source(), { mode: 0o600 });
+  const linkedParent = join(directory, "linked-parent");
+  await symlink(canonicalParent, linkedParent);
+  await assert.rejects(readReleaseEnvironment(join(linkedParent, ".env.local")), /canonical/u);
   const replacement = join(directory, "replacement.env");
   await writeFile(replacement, source(), { mode: 0o600 });
   await assert.rejects(readReleaseEnvironment(envFile, {
@@ -107,7 +152,22 @@ test("Azure env admission refuses symlinks, wrong modes, unknown/local keys, dup
       await symlink(replacement, path);
       return open(path, flags);
     }
-  }), /symbolic link|symlink|ELOOP/u);
+  }), /changed|opened|symbolic link|symlink|ELOOP/u);
+  await rm(envFile);
+  await writeFile(envFile, source(), { mode: 0o600 });
+  const regularReplacement = join(directory, "regular-replacement.env");
+  const regularSwapSecret = "regular-rename-swap-secret";
+  await writeFile(regularReplacement, source({ ...settings, GOOGLE_CLIENT_SECRET: regularSwapSecret }), { mode: 0o600 });
+  await assert.rejects(readReleaseEnvironment(envFile, {
+    openFile: async (path, flags) => {
+      await rename(regularReplacement, path);
+      return open(path, flags);
+    }
+  }), (error) => {
+    assert.match(String(error?.message), /changed/u);
+    assert.doesNotMatch(String(error?.stack), new RegExp(regularSwapSecret, "u"));
+    return true;
+  });
   await rm(envFile);
   await writeFile(envFile, source(), { mode: 0o600 });
   for (const badSource of [
@@ -120,4 +180,35 @@ test("Azure env admission refuses symlinks, wrong modes, unknown/local keys, dup
     await writeFile(envFile, badSource, { mode: 0o600 });
     await assert.rejects(readReleaseEnvironment(envFile));
   }
+});
+
+test("Azure apply binds the REST target to a valid account and exact resource identity", async (context) => {
+  const { applyAzureSettings } = await loadRelease();
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-azure-identity-")));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const envFile = join(directory, ".env.local");
+  await writeFile(envFile, source(), { mode: 0o600 });
+  for (const account of [
+    { ...validAccount, id: undefined, name: "aserdargun subscription" },
+    { ...validAccount, id: "not-a-uuid", name: "aserdargun subscription" },
+    { ...validAccount, tenantId: "not-a-uuid", name: "aserdargun subscription" },
+    { ...validAccount, user: { name: "operator@example.invalid", type: "servicePrincipal" }, name: "aserdargun subscription" }
+  ]) {
+    const calls = [];
+    await assert.rejects(applyAzureSettings({
+      envFile,
+      identity: { repository: "nxt-aserdargun-com" },
+      runAz: successRunner(calls, { account }),
+      log: () => undefined
+    }), /subscription identity/u);
+    assert.equal(calls.some((args) => args[0] === "rest"), false);
+  }
+  const calls = [];
+  await assert.rejects(applyAzureSettings({
+    envFile,
+    identity: { repository: "nxt-aserdargun-com" },
+    runAz: successRunner(calls, { app: { ...validApp, id: `${resourceId}-foreign` } }),
+    log: () => undefined
+  }), /exact Ready Free Static Web App/u);
+  assert.equal(calls.some((args) => args[0] === "rest"), false);
 });

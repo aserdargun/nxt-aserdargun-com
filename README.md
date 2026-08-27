@@ -142,7 +142,7 @@ PR validation lives in `.github/workflows/ci.yml`. Production deployment lives o
 .github/workflows/deploy-swa-nxt-aserdargun-com.yml
 ```
 
-Both workflows use immutable action SHAs. Portable validation runs on Ubuntu. A separate macOS job installs exact Core Tools `4.13.0`, installs Chromium, and runs the real sandboxed lifecycle/browser gate. Deployment is main-only, serialized, waits for both jobs, repeats portable artifact validation, and uploads only verified prebuilt `web/dist` plus `api-dist` with both Azure builds skipped.
+Both workflows use immutable action SHAs. Portable validation runs on Ubuntu. A separate macOS job installs exact Core Tools `4.13.0`, installs Chromium, and runs the real sandboxed lifecycle/browser gate. Deployment is main-only, serialized, waits for both jobs, repeats portable artifact validation, and uploads only verified prebuilt `web/dist` plus `api-dist` with both Azure builds skipped. The deploy job independently requires `github.ref == 'refs/heads/main'`, so a manual `workflow_dispatch` from another ref can validate but cannot deploy.
 
 Pure source verification is safe in this intentionally named worktree:
 
@@ -162,7 +162,9 @@ Installing production app settings is a manual action-time operation only. The e
 node scripts/azure-static-web-app-release.mjs apply --env-file .env.local
 ```
 
-The command first repeats release identity, authenticated subscription, exact Free resource, Ready/Succeeded provisioning, West Europe, generated hostname, and zero-custom-hostname checks. It sends settings with `--only-show-errors --output none` and prints only sorted key names. There is no basename bypass, `--force`, OIDC, or automatic workflow settings mutation.
+The command first repeats release identity; binds a valid enabled subscription UUID, tenant, and signed-in user to the exact Free resource ID; and checks Ready/Succeeded provisioning, West Europe, generated hostname, and zero custom hostnames. The environment file is opened with no-follow semantics and the opened device/inode/mode/size must still match the canonical path inspection.
+
+Azure CLI's `staticwebapp appsettings set` interface accepts settings only as `KEY=value` command arguments, so NXT intentionally does not use it. The release tool writes `{ "properties": { ... } }` to a short-lived mode-`0600` file inside a mode-`0700` temporary directory, invokes the official `az rest` `PUT .../config/appsettings?api-version=2025-05-01 --body @<file>` interface, and removes the exact file and directory in both success and failure paths. Secret values therefore do not enter the process argument list, logs, or surfaced child errors. Only sorted key names are printed. There is no basename bypass, `--force`, OIDC, or automatic workflow settings mutation.
 
 Live Task 17/18 operations require a fresh display of exact Google/GitHub/Azure targets and explicit action-time authorization. Local plan approval is not permission to authorize Drive, create a public repository, push, create Azure resources, install secrets/settings, dispatch a workflow, or deploy.
 

@@ -44,6 +44,7 @@ test("PR and deployment workflows pin permissions, platforms, gates, and prebuil
   assert.deepEqual(deploy.permissions, { contents: "read" });
   assert.deepEqual(deploy.concurrency, { group: "swa-nxt-aserdargun-com-production", "cancel-in-progress": false });
   assert.deepEqual(deploy.jobs.deploy.needs, ["portable", "macos_acceptance"]);
+  assert.equal(deploy.jobs.deploy.if, "github.ref == 'refs/heads/main'");
   const upload = deploy.jobs.deploy.steps.find((step) => step.name === "Deploy prebuilt artifacts");
   assert.deepEqual(upload.with, {
     azure_static_web_apps_api_token: "${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_SWA_NXT_ASERDARGUN_COM }}",
@@ -89,6 +90,10 @@ test("release identity accepts only a clean exact main checkout and exact origin
   await writeFile(join(exact, ".github", "workflows", "ci.yml"), ciSource.replace("pull_request:", "push:"));
   await assert.rejects(verifyReleaseIdentity({ checkoutPath: exact }), /PR trigger mismatch/u);
   await writeFile(join(exact, ".github", "workflows", "ci.yml"), ciSource);
+
+  await writeFile(join(exact, ".github", "workflows", "deploy-swa-nxt-aserdargun-com.yml"), deploySource.replace("    if: github.ref == 'refs/heads/main'\n", "    if: github.ref != 'refs/heads/main'\n"));
+  await assert.rejects(verifyReleaseIdentity({ checkoutPath: exact }), /main-ref gate/u);
+  await writeFile(join(exact, ".github", "workflows", "deploy-swa-nxt-aserdargun-com.yml"), deploySource);
 
   await writeFile(join(exact, "untracked.txt"), "dirty\n");
   await assert.rejects(verifyReleaseIdentity({ checkoutPath: exact }), /clean exact release checkout/u);

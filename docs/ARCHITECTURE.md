@@ -65,11 +65,11 @@ CI is split deliberately:
 
 1. Ubuntu portable job: locked install, lint, typecheck, deterministic builds, artifact verification, unit/project/static/deployment/release/backup tests.
 2. macOS acceptance job: exact official Core Tools `4.13.0`, Chromium, Task 14 sandbox lifecycle, and Task 15 real browser journeys.
-3. Main deployment job: waits for both jobs, repeats portable artifact validation, and uploads the two prebuilt artifacts with the Azure build disabled.
+3. Main deployment job: waits for both jobs, repeats portable artifact validation, independently checks the exact main ref even for manual dispatch, and uploads the two prebuilt artifacts with the Azure build disabled.
 
 `.github/workflows/deploy-swa-nxt-aserdargun-com.yml` is the only authoritative Azure workflow. It targets the secret name and concurrency group derived from `nxt-aserdargun-com`.
 
-Source verification intentionally works in the implementation worktree. Release verification additionally requires the clean exact repository checkout, exact `main`, exact origin, and exact workflow/resource/secret mapping. Azure settings installation is separate from deployment and action-time only.
+Source verification intentionally works in the implementation worktree. Release verification additionally requires the clean exact repository checkout, exact `main`, exact origin, and exact workflow/resource/secret mapping. Azure settings installation is separate from deployment and action-time only. It binds the exact ARM resource ID to the validated subscription UUID and sends the closed settings dictionary through an official `az rest --body @file` mode-`0600` temporary payload rather than exposing values in process arguments.
 
 ## Backup format
 
