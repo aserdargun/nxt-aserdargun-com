@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readdirSync, writeFileSync } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -122,6 +123,137 @@ test("Azure apply redacts sentinel values from child diagnostics and thrown erro
   assert.doesNotMatch(JSON.stringify(calls), new RegExp(`${secretOne}|${secretTwo}`, "u"));
   await assert.rejects(lstat(payloadPath), { code: "ENOENT" });
   assert.deepEqual(await readdir(temporaryParent), []);
+});
+
+test("Azure cleanup repairs exact-owned mode 000 directory and preserves the mutation failure", async (context) => {
+  const { applyAzureSettings } = await loadRelease();
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-azure-cleanup-mode-")));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const envFile = join(directory, ".env.local");
+  await writeFile(envFile, source(), { mode: 0o600 });
+  const temporaryParent = join(directory, "temporary");
+  await mkdir(temporaryParent, { mode: 0o700 });
+  let payloadPath;
+  const calls = [];
+  const baseRunner = successRunner(calls);
+  await assert.rejects(applyAzureSettings({
+    envFile,
+    identity: { repository: "nxt-aserdargun-com" },
+    temporaryParent,
+    runAz: async (file, args) => {
+      if (args[0] !== "rest") return baseRunner(file, args);
+      calls.push(args);
+      payloadPath = args[args.indexOf("--body") + 1].slice(1);
+      await chmod(dirname(payloadPath), 0o000);
+      return { code: 9, stdout: `mutation ${secretOne}`, stderr: `failed ${secretTwo}` };
+    },
+    log: () => undefined
+  }), (error) => {
+    assert.match(String(error?.message), /Azure settings mutation failed/u);
+    assert.doesNotMatch(String(error?.stack), new RegExp(`${secretOne}|${secretTwo}|${payloadPath}`, "u"));
+    return true;
+  });
+  await assert.rejects(lstat(payloadPath), { code: "ENOENT" });
+  assert.deepEqual(await readdir(temporaryParent), []);
+});
+
+test("Azure apply fails closed when successful mutation cleanup cannot remove a foreign entry", async (context) => {
+  const { applyAzureSettings } = await loadRelease();
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-azure-cleanup-success-")));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const envFile = join(directory, ".env.local");
+  await writeFile(envFile, source(), { mode: 0o600 });
+  const temporaryParent = join(directory, "temporary");
+  await mkdir(temporaryParent, { mode: 0o700 });
+  let payloadPath;
+  let foreignPath;
+  await assert.rejects(applyAzureSettings({
+    envFile,
+    identity: { repository: "nxt-aserdargun-com" },
+    temporaryParent,
+    runAz: successRunner([], {
+      onRest: async (args) => {
+        payloadPath = args[args.indexOf("--body") + 1].slice(1);
+        foreignPath = join(dirname(payloadPath), "foreign.keep");
+        await writeFile(foreignPath, "harmless foreign fixture\n", { mode: 0o600 });
+      }
+    }),
+    log: () => undefined
+  }), (error) => {
+    assert.match(String(error?.message), /Azure settings mutation completed/u);
+    assert.match(String(error?.message), /cleanup incomplete/u);
+    assert.match(String(error?.cause?.message), /cleanup incomplete/u);
+    assert.doesNotMatch(String(error?.stack), new RegExp(`${secretOne}|${secretTwo}|${payloadPath}|${foreignPath}`, "u"));
+    return true;
+  });
+  assert.equal((await lstat(foreignPath)).isFile(), true);
+  await assert.rejects(lstat(payloadPath), { code: "ENOENT" });
+});
+
+test("Azure cleanup preserves foreign entries and composes a generic cleanup state with the mutation failure", async (context) => {
+  const { applyAzureSettings } = await loadRelease();
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-azure-cleanup-foreign-")));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const envFile = join(directory, ".env.local");
+  await writeFile(envFile, source(), { mode: 0o600 });
+  const temporaryParent = join(directory, "temporary");
+  await mkdir(temporaryParent, { mode: 0o700 });
+  let payloadPath;
+  let foreignPath;
+  const calls = [];
+  const baseRunner = successRunner(calls);
+  await assert.rejects(applyAzureSettings({
+    envFile,
+    identity: { repository: "nxt-aserdargun-com" },
+    temporaryParent,
+    runAz: async (file, args) => {
+      if (args[0] !== "rest") return baseRunner(file, args);
+      calls.push(args);
+      payloadPath = args[args.indexOf("--body") + 1].slice(1);
+      foreignPath = join(dirname(payloadPath), "foreign.keep");
+      await writeFile(foreignPath, "harmless foreign fixture\n", { mode: 0o600 });
+      return { code: 9, stdout: `mutation ${secretOne}`, stderr: `failed ${secretTwo}` };
+    },
+    log: () => undefined
+  }), (error) => {
+    assert.match(String(error?.message), /Azure settings mutation failed/u);
+    assert.match(String(error?.message), /cleanup incomplete/u);
+    assert.match(String(error?.cause?.message), /cleanup incomplete/u);
+    assert.doesNotMatch(String(error?.stack), new RegExp(`${secretOne}|${secretTwo}|${payloadPath}|${foreignPath}`, "u"));
+    return true;
+  });
+  assert.equal((await lstat(foreignPath)).isFile(), true);
+  await assert.rejects(lstat(payloadPath), { code: "ENOENT" });
+});
+
+test("Azure preparation failure composes generic cleanup state without deleting a foreign entry", async (context) => {
+  const { createSecureSettingsPayload } = await loadRelease();
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-azure-prepare-cleanup-")));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const temporaryParent = join(directory, "temporary");
+  await mkdir(temporaryParent, { mode: 0o700 });
+  let foreignPath;
+  const preparationSecret = "preparation-error-secret";
+  const values = new Proxy(settings, {
+    get(target, property, receiver) {
+      if (property === "GOOGLE_CLIENT_ID") {
+        const [payloadDirectory] = readdirSync(temporaryParent);
+        foreignPath = join(temporaryParent, payloadDirectory, "foreign.keep");
+        writeFileSync(foreignPath, "harmless foreign fixture\n", { mode: 0o600 });
+        throw new Error(preparationSecret);
+      }
+      return Reflect.get(target, property, receiver);
+    }
+  });
+
+  await assert.rejects(createSecureSettingsPayload({ values, temporaryParent }), (error) => {
+    assert.match(String(error?.message), /payload could not be prepared/u);
+    assert.match(String(error?.message), /cleanup incomplete/u);
+    assert.match(String(error?.cause?.message), /cleanup incomplete/u);
+    assert.doesNotMatch(String(error?.stack), new RegExp(`${preparationSecret}|${foreignPath}`, "u"));
+    return true;
+  });
+  assert.equal((await lstat(foreignPath)).isFile(), true);
 });
 
 test("Azure env admission refuses symlinks, wrong modes, unknown/local keys, duplicates, controls, and missing values", async (context) => {

@@ -103,43 +103,109 @@ const parseJson = (source, label) => {
 };
 const exactIdentity = (identity) => identity?.repository === "nxt-aserdargun-com";
 const safePrincipal = (value) => typeof value === "string" && value.length > 0 && value.length <= 320 && !containsControls(value);
+const exactStatIdentity = (metadata, identity, type) => identity !== undefined &&
+  metadata.dev === identity.dev && metadata.ino === identity.ino && !metadata.isSymbolicLink() &&
+  (type === "directory" ? metadata.isDirectory() : metadata.isFile());
+const captureIdentity = (metadata) => ({ dev: metadata.dev, ino: metadata.ino });
+const inspectPath = async (path) => {
+  try { return { metadata: await lstat(path) }; }
+  catch (error) { return error?.code === "ENOENT" ? { absent: true } : { failed: true }; }
+};
+const attemptTwice = async (operation) => {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try { await operation(); return true; }
+    catch { /* Retry only the same exact-owned operation once. */ }
+  }
+  return false;
+};
+const cleanupIncomplete = (primary) => new Error(`${primary.message} Secure settings payload cleanup incomplete.`, {
+  cause: new Error("Secure settings payload cleanup incomplete.")
+});
 
-const createSecureSettingsPayload = async ({ values, temporaryParent = tmpdir() }) => {
-  let directory;
-  let payloadPath;
+const cleanupSecureSettingsPayload = async (ownership) => {
+  let complete = true;
+  try {
+    if (ownership.directoryPath === undefined) return { complete: true };
+    const directoryProbe = await inspectPath(ownership.directoryPath);
+    if (directoryProbe.absent === true) return { complete: ownership.payloadPath === undefined };
+    if (directoryProbe.failed === true || !exactStatIdentity(directoryProbe.metadata, ownership.directoryIdentity, "directory")) return { complete: false };
+    if (await realpath(ownership.directoryPath).catch(() => undefined) !== ownership.directoryPath) return { complete: false };
+
+    try {
+      if (ownership.directoryHandle === undefined) {
+        ownership.directoryHandle = await open(ownership.directoryPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      }
+      const openedDirectory = await ownership.directoryHandle.stat();
+      if (!exactStatIdentity(openedDirectory, ownership.directoryIdentity, "directory")) complete = false;
+      else if ((openedDirectory.mode & 0o777) !== 0o700 && !await attemptTwice(() => ownership.directoryHandle.chmod(0o700))) complete = false;
+    } catch {
+      complete = false;
+    }
+
+    if (ownership.payloadPath !== undefined) {
+      const payloadProbe = await inspectPath(ownership.payloadPath);
+      if (payloadProbe.failed === true ||
+          (payloadProbe.metadata !== undefined && (!exactStatIdentity(payloadProbe.metadata, ownership.payloadIdentity, "file") ||
+            await realpath(ownership.payloadPath).catch(() => undefined) !== ownership.payloadPath))) {
+        complete = false;
+      } else if (payloadProbe.metadata !== undefined && !await attemptTwice(() => unlink(ownership.payloadPath))) {
+        complete = false;
+      }
+    }
+
+    const finalDirectoryProbe = await inspectPath(ownership.directoryPath);
+    if (finalDirectoryProbe.failed === true) complete = false;
+    else if (finalDirectoryProbe.metadata !== undefined) {
+      if (!exactStatIdentity(finalDirectoryProbe.metadata, ownership.directoryIdentity, "directory") ||
+          !await attemptTwice(() => rmdir(ownership.directoryPath))) complete = false;
+    }
+    const directoryAfterCleanup = await inspectPath(ownership.directoryPath);
+    if (directoryAfterCleanup.absent !== true) complete = false;
+    return { complete };
+  } finally {
+    if (ownership.directoryHandle !== undefined) {
+      await ownership.directoryHandle.close().catch(() => undefined);
+      ownership.directoryHandle = undefined;
+    }
+  }
+};
+
+export const createSecureSettingsPayload = async ({ values, temporaryParent = tmpdir() }) => {
+  const ownership = { directoryPath: undefined, directoryIdentity: undefined, directoryHandle: undefined, payloadPath: undefined, payloadIdentity: undefined };
   try {
     const parent = await realpath(resolve(temporaryParent));
-    directory = await mkdtemp(join(parent, "nxt-azure-settings-"));
-    await chmod(directory, 0o700);
-    const directoryMetadata = await lstat(directory);
+    ownership.directoryPath = await mkdtemp(join(parent, "nxt-azure-settings-"));
+    await chmod(ownership.directoryPath, 0o700);
+    const directoryMetadata = await lstat(ownership.directoryPath);
     if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink() || (directoryMetadata.mode & 0o777) !== 0o700) throw refuse("secure settings payload directory is invalid");
-    payloadPath = join(directory, "appsettings.json");
+    ownership.directoryIdentity = captureIdentity(directoryMetadata);
+    ownership.directoryHandle = await open(ownership.directoryPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    if (!exactStatIdentity(await ownership.directoryHandle.stat(), ownership.directoryIdentity, "directory")) throw refuse("secure settings payload directory changed");
+    ownership.payloadPath = join(ownership.directoryPath, "appsettings.json");
     const properties = Object.fromEntries([...settingKeys].sort().map((key) => [key, values[key]]));
     const bytes = Buffer.from(`${JSON.stringify({ properties })}\n`, "utf8");
-    const handle = await open(payloadPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    const handle = await open(ownership.payloadPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     try {
+      const createdMetadata = await handle.stat();
+      if (!createdMetadata.isFile() || createdMetadata.isSymbolicLink() || (createdMetadata.mode & 0o777) !== 0o600) throw refuse("secure settings payload file is invalid");
+      ownership.payloadIdentity = captureIdentity(createdMetadata);
       await handle.writeFile(bytes);
       await handle.sync();
       const metadata = await handle.stat();
-      if (!metadata.isFile() || (metadata.mode & 0o777) !== 0o600 || metadata.size !== bytes.byteLength) throw refuse("secure settings payload file is invalid");
+      if (!exactStatIdentity(metadata, ownership.payloadIdentity, "file") || (metadata.mode & 0o777) !== 0o600 || metadata.size !== bytes.byteLength) throw refuse("secure settings payload file is invalid");
     } finally {
       await handle.close().catch(() => undefined);
     }
-    if (await realpath(payloadPath) !== payloadPath) throw refuse("secure settings payload path is invalid");
+    if (await realpath(ownership.payloadPath) !== ownership.payloadPath) throw refuse("secure settings payload path is invalid");
     return {
-      path: payloadPath,
-      async cleanup() {
-        try { await unlink(payloadPath); }
-        catch (error) { if (error?.code !== "ENOENT") throw refuse("secure settings payload cleanup failed"); }
-        try { await rmdir(directory); }
-        catch { throw refuse("secure settings payload cleanup failed"); }
-      }
+      path: ownership.payloadPath,
+      cleanup: () => cleanupSecureSettingsPayload(ownership)
     };
   } catch (error) {
-    if (payloadPath !== undefined) await unlink(payloadPath).catch(() => undefined);
-    if (directory !== undefined) await rmdir(directory).catch(() => undefined);
-    if (error instanceof Error && error.message.startsWith("Refusing Azure release:")) throw error;
-    throw refuse("secure settings payload could not be prepared");
+    const primary = error instanceof Error && error.message.startsWith("Refusing Azure release:") ? error : refuse("secure settings payload could not be prepared");
+    const cleanup = await cleanupSecureSettingsPayload(ownership);
+    if (!cleanup.complete) throw cleanupIncomplete(primary);
+    throw primary;
   }
 };
 
@@ -172,8 +238,10 @@ export const applyAzureSettings = async ({ envFile, identity, runAz = defaultAzu
   } catch (error) {
     mutationFailure = error;
   }
-  await payload.cleanup();
+  const cleanup = await payload.cleanup();
+  if (mutationFailure !== undefined && !cleanup.complete) throw cleanupIncomplete(mutationFailure);
   if (mutationFailure !== undefined) throw mutationFailure;
+  if (!cleanup.complete) throw cleanupIncomplete(new Error("Azure settings mutation completed."));
   log(`Azure settings applied: ${sortedKeys.join(", ")}.`);
   return { keyCount: sortedKeys.length, keys: sortedKeys };
 };
