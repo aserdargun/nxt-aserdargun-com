@@ -14,6 +14,15 @@ const REVISION_FIELDS = "nextPageToken,revisions(id,modifiedTime)";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const SHORTCUT_MIME_TYPE = "application/vnd.google-apps.shortcut";
 
+const createAdapter = (
+  client: GoogleDriveClient,
+  options: ConstructorParameters<typeof GoogleDriveAdapter>[1] = {}
+): GoogleDriveAdapter =>
+  new GoogleDriveAdapter(client, {
+    sleep: async () => undefined,
+    ...options
+  });
+
 describe("GoogleDriveAdapter", () => {
   it("escapes query literals, uses exact fields, and forwards pagination", async () => {
     const calls: unknown[] = [];
@@ -30,7 +39,7 @@ describe("GoogleDriveAdapter", () => {
         };
       }
     });
-    const adapter = new GoogleDriveAdapter(client);
+    const adapter = createAdapter(client);
     const page = await adapter.listChildren({
       parentId: "parent'\\) or name != 'safe",
       pageToken: "supplied-page",
@@ -78,7 +87,7 @@ describe("GoogleDriveAdapter", () => {
         }
       }
     ];
-    const adapter = new GoogleDriveAdapter(
+    const adapter = createAdapter(
       createClient({
         revisionsList: async (input) => {
           calls.push(input);
@@ -104,7 +113,7 @@ describe("GoogleDriveAdapter", () => {
 
   it("stops before a text update when the observed version conflicts", async () => {
     let updateCalls = 0;
-    const adapter = new GoogleDriveAdapter(
+    const adapter = createAdapter(
       createClient({
         get: async () => ({ data: driveFile({ version: "7" }) }),
         getVersion: async () => ({
@@ -147,7 +156,7 @@ describe("GoogleDriveAdapter", () => {
         return { data: { id: "file-id" } };
       }
     });
-    const adapter = new GoogleDriveAdapter(client);
+    const adapter = createAdapter(client);
     const updated = await adapter.updateText({
       fileId: "file-id",
       expectedVersion: "1",
@@ -166,7 +175,7 @@ describe("GoogleDriveAdapter", () => {
     expect(updated.version).toBe("2");
 
     let failedWriteCalls = 0;
-    const failing = new GoogleDriveAdapter(
+    const failing = createAdapter(
       createClient({
         get: async () => ({ data: driveFile({ version: "1" }) }),
         update: async () => {
@@ -190,7 +199,7 @@ describe("GoogleDriveAdapter", () => {
   it("retries only allowlisted idempotent read statuses with a bounded attempt count", async () => {
     let attempts = 0;
     const delays: number[] = [];
-    const adapter = new GoogleDriveAdapter(
+    const adapter = createAdapter(
       createClient({
         get: async () => {
           attempts += 1;
@@ -211,7 +220,7 @@ describe("GoogleDriveAdapter", () => {
     expect(delays).toEqual([50, 100]);
 
     let forbiddenAttempts = 0;
-    const forbidden = new GoogleDriveAdapter(
+    const forbidden = createAdapter(
       createClient({
         get: async () => {
           forbiddenAttempts += 1;
@@ -227,7 +236,7 @@ describe("GoogleDriveAdapter", () => {
 
     for (const status of [408, 501]) {
       let nonAllowlistedAttempts = 0;
-      const nonAllowlisted = new GoogleDriveAdapter(
+      const nonAllowlisted = createAdapter(
         createClient({
           get: async () => {
             nonAllowlistedAttempts += 1;
@@ -243,7 +252,7 @@ describe("GoogleDriveAdapter", () => {
     }
 
     let unavailableAttempts = 0;
-    const unavailable = new GoogleDriveAdapter(
+    const unavailable = createAdapter(
       createClient({
         get: async () => {
           unavailableAttempts += 1;
@@ -263,7 +272,7 @@ describe("GoogleDriveAdapter", () => {
       .spyOn(console, "error")
       .mockImplementation(() => undefined);
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const adapter = new GoogleDriveAdapter(
+    const adapter = createAdapter(
       createClient({
         get: async () => {
           throw statusError(
@@ -315,7 +324,7 @@ describe("GoogleDriveAdapter", () => {
       ]
     ]);
     const bounded = new RootBoundaryStorage(
-      new GoogleDriveAdapter(
+      createAdapter(
         createClient({
           get: async ({ fileId }) => ({ data: graph.get(fileId) })
         })
@@ -344,7 +353,7 @@ describe("GoogleDriveAdapter", () => {
       ["note", driveFile({ id: "note", parents: ["vault"] })]
     ]);
     const bounded = new RootBoundaryStorage(
-      new GoogleDriveAdapter(
+      createAdapter(
         createClient({
           get: async ({ fileId }) => ({ data: graph.get(fileId) })
         }),
@@ -359,7 +368,7 @@ describe("GoogleDriveAdapter", () => {
   it("moves items to Trash only through files.update", async () => {
     const calls: unknown[] = [];
     let metadataReads = 0;
-    const adapter = new GoogleDriveAdapter(
+    const adapter = createAdapter(
       createClient({
         update: async (input) => {
           calls.push(input);
@@ -383,7 +392,7 @@ describe("GoogleDriveAdapter", () => {
 
   it("never trashes the configured boundary root", async () => {
     let updateCalls = 0;
-    const adapter = new GoogleDriveAdapter(
+    const adapter = createAdapter(
       createClient({
         update: async () => {
           updateCalls += 1;
@@ -401,7 +410,7 @@ describe("GoogleDriveAdapter", () => {
 
   it("creates bytes through multipart and rejects checksum mismatch", async () => {
     const createInputs: unknown[] = [];
-    const adapter = new GoogleDriveAdapter(
+    const adapter = createAdapter(
       createClient({
         create: async (input) => {
           createInputs.push(input);
@@ -440,7 +449,7 @@ describe("GoogleDriveAdapter", () => {
   it("returns the settled Drive version after post-write version churn", async () => {
     const versions = ["1", "2", "3", "3"];
     const sleeps: number[] = [];
-    const adapter = new GoogleDriveAdapter(
+    const adapter = createAdapter(
       createClient({
         create: async () => ({ data: { id: "created-id" } }),
         get: async () => ({
@@ -464,11 +473,41 @@ describe("GoogleDriveAdapter", () => {
       mimeType: "text/plain",
       text: "one"
     })).resolves.toMatchObject({ version: "3" });
-    expect(sleeps).toEqual([100, 200, 400]);
+    expect(sleeps).toEqual([250, 750, 1000]);
+  });
+
+  it("does not accept an early version plateau before Drive finishes processing an upload", async () => {
+    const versions = ["1", "1", "1", "3", "3"];
+    const sleeps: number[] = [];
+    const adapter = createAdapter(
+      createClient({
+        create: async () => ({ data: { id: "created-id" } }),
+        get: async () => ({
+          data: driveFile({
+            id: "created-id",
+            name: "note.txt",
+            mimeType: "text/plain",
+            parents: ["parent-id"],
+            version: versions.shift() ?? "3",
+            size: "3",
+            md5Checksum: createHash("md5").update("one").digest("hex")
+          })
+        })
+      }),
+      { sleep: async (milliseconds) => { sleeps.push(milliseconds); } }
+    );
+
+    await expect(adapter.createText({
+      parentId: "parent-id",
+      name: "note.txt",
+      mimeType: "text/plain",
+      text: "one"
+    })).resolves.toMatchObject({ version: "3" });
+    expect(sleeps).toEqual([250, 750, 1000, 2000]);
   });
 
   it("fails create readback when Drive changes the requested parent, name, or MIME", async () => {
-    const adapter = new GoogleDriveAdapter(
+    const adapter = createAdapter(
       createClient({
         create: async () => ({ data: { id: "created-id" } }),
         get: async () => ({
@@ -490,7 +529,7 @@ describe("GoogleDriveAdapter", () => {
   });
 
   it("rejects a create whose readback ID differs from the write response", async () => {
-    const adapter = new GoogleDriveAdapter(
+    const adapter = createAdapter(
       createClient({
         create: async () => ({ data: { id: "created-id" } }),
         get: async () => ({
@@ -527,7 +566,7 @@ describe("GoogleDriveAdapter", () => {
           : testCase.kind === "text"
             ? "text/plain"
             : "application/octet-stream";
-      const adapter = new GoogleDriveAdapter(
+      const adapter = createAdapter(
         createClient({
           create: async () => ({ data: { id: rawId } }),
           get: async () => ({
@@ -583,7 +622,7 @@ describe("GoogleDriveAdapter", () => {
   it("allows a text MIME change and verifies the exact requested readback MIME", async () => {
     const updateInputs: unknown[] = [];
     let metadataReads = 0;
-    const adapter = new GoogleDriveAdapter(
+    const adapter = createAdapter(
       createClient({
         get: async () => ({
           data:
@@ -620,7 +659,7 @@ describe("GoogleDriveAdapter", () => {
 
     let wrongReadbackReads = 0;
     let wrongReadbackWrites = 0;
-    const wrongReadback = new GoogleDriveAdapter(
+    const wrongReadback = createAdapter(
       createClient({
         get: async () => ({
           data:
@@ -662,7 +701,7 @@ describe("GoogleDriveAdapter", () => {
     ];
     for (const mutation of mutations) {
       let metadataReads = 0;
-      const adapter = new GoogleDriveAdapter(
+      const adapter = createAdapter(
         createClient({
           get: async () => ({
             data:
@@ -688,7 +727,7 @@ describe("GoogleDriveAdapter", () => {
       ).rejects.toThrow("upload verification failed");
     }
 
-    const wrongWriteId = new GoogleDriveAdapter(
+    const wrongWriteId = createAdapter(
       createClient({
         get: async () => ({ data: driveFile() }),
         update: async () => ({ data: { id: "different-id" } })
@@ -717,7 +756,7 @@ describe("GoogleDriveAdapter", () => {
     ];
     for (const failure of failures) {
       let metadataReads = 0;
-      const adapter = new GoogleDriveAdapter(
+      const adapter = createAdapter(
         createClient({
           get: async () => ({
             data:
@@ -746,7 +785,7 @@ describe("GoogleDriveAdapter", () => {
 
     let metadataReads = 0;
     const crossParentUpdates: unknown[] = [];
-    const renamed = new GoogleDriveAdapter(
+    const renamed = createAdapter(
       createClient({
         get: async () => ({
           data:
@@ -787,7 +826,7 @@ describe("GoogleDriveAdapter", () => {
   it("renames within one parent without contradictory parent mutations", async () => {
     const updates: unknown[] = [];
     let metadataReads = 0;
-    const adapter = new GoogleDriveAdapter(
+    const adapter = createAdapter(
       createClient({
         get: async () => ({
           data:
@@ -831,7 +870,7 @@ describe("GoogleDriveAdapter", () => {
       calls.push(args);
       return { data: { id: "file-id" } };
     }) as GoogleDriveClient["files"]["update"];
-    const adapter = new GoogleDriveAdapter(createClient({
+    const adapter = createAdapter(createClient({
       get: async () => ({
         data: metadataReads++ === 0
           ? driveFile({ parents: ["from-parent"], version: "7" })
@@ -865,7 +904,7 @@ describe("GoogleDriveAdapter", () => {
   it.each(['"strong-etag"', 'W/"weak-etag"'])("accepts a syntactically valid %s Drive entity-tag", async (etag) => {
     const calls: unknown[][] = [];
     let metadataReads = 0;
-    const adapter = new GoogleDriveAdapter(createClient({
+    const adapter = createAdapter(createClient({
       get: async () => ({
         data: metadataReads++ === 0
           ? driveFile({ parents: ["from-parent"], version: "7" })
@@ -900,7 +939,7 @@ describe("GoogleDriveAdapter", () => {
     ["oversized", { etag: `"${"x".repeat(511)}"` }]
   ])("rejects a %s Drive ETag before moving", async (_label, token) => {
     let writes = 0;
-    const adapter = new GoogleDriveAdapter(createClient({
+    const adapter = createAdapter(createClient({
       get: async () => ({
         data: driveFile({ parents: ["from-parent"], version: "7" })
       }),
@@ -925,7 +964,7 @@ describe("GoogleDriveAdapter", () => {
   it("rejects an omitted move version before metadata admission or writing", async () => {
     let reads = 0;
     let writes = 0;
-    const adapter = new GoogleDriveAdapter(createClient({
+    const adapter = createAdapter(createClient({
       get: async () => {
         reads += 1;
         return { data: driveFile({ parents: ["from-parent"] }) };
@@ -946,7 +985,7 @@ describe("GoogleDriveAdapter", () => {
   });
 
   it("maps a Drive 412 move rejection to the typed storage version conflict", async () => {
-    const adapter = new GoogleDriveAdapter(createClient({
+    const adapter = createAdapter(createClient({
       get: async () => ({
         data: driveFile({ parents: ["from-parent"], version: "7" })
       }),
@@ -966,7 +1005,7 @@ describe("GoogleDriveAdapter", () => {
 
   it("rejects a same-parent move without a rename before writing", async () => {
     let writes = 0;
-    const adapter = new GoogleDriveAdapter(
+    const adapter = createAdapter(
       createClient({
         get: async () => ({ data: driveFile({ parents: ["same-parent"] }) }),
         update: async () => {
@@ -1000,7 +1039,7 @@ describe("GoogleDriveAdapter", () => {
     ];
     for (const failure of failures) {
       let metadataReads = 0;
-      const adapter = new GoogleDriveAdapter(
+      const adapter = createAdapter(
         createClient({
           get: async () => ({
             data:
@@ -1019,7 +1058,7 @@ describe("GoogleDriveAdapter", () => {
     }
 
     let updateCalls = 0;
-    const alreadyTrashed = new GoogleDriveAdapter(
+    const alreadyTrashed = createAdapter(
       createClient({
         get: async () => ({ data: driveFile({ trashed: true }) }),
         update: async () => {
@@ -1033,7 +1072,7 @@ describe("GoogleDriveAdapter", () => {
   });
 
   it("rejects a media read whose bytes do not match Drive checksum metadata", async () => {
-    const adapter = new GoogleDriveAdapter(
+    const adapter = createAdapter(
       createClient({
         get: async (input) =>
           input.alt === "media"
