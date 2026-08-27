@@ -527,7 +527,8 @@ describe("editor load and durable drafts", () => {
     await act(async () => vi.advanceTimersByTimeAsync(1000));
     await flushMicrotasks();
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       `/api/private/notes/${NOTE_ID}`,
@@ -540,8 +541,8 @@ describe("editor load and durable drafts", () => {
       expectedVersion: "7",
       source: NEWER_SOURCE
     });
-    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
-    expect(screen.getByLabelText("Active note path: Notes/Plan.md")).toBeVisible();
+    await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved"));
+    await waitFor(() => expect(screen.getByLabelText("Active note path: Notes/Plan.md")).toBeVisible());
     expect(store.drafts.has(NOTE_ID)).toBe(false);
   });
 
@@ -1531,8 +1532,8 @@ describe("owner-shell integration", () => {
     const paths = screen.getAllByLabelText("Active note path: Notes/Plan.md");
     expect(paths).toHaveLength(2);
     expect(screen.getByText("Plan", { selector: ".mobile-title" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Preview" })).toHaveTextContent("Drive");
-    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
+    await waitFor(() => expect(screen.getByRole("region", { name: "Preview" })).toHaveTextContent("Drive"));
+    await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved"));
   });
 
   it("injects the complete vault tree, canonical attachment, and exact wiki navigation", async () => {

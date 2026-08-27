@@ -29,6 +29,8 @@ test("root contract pins the supported toolchain and lifecycle", async () => {
   ]) {
     assert.equal(typeof pkg.scripts[script], "string", `${script} must exist`);
   }
+  const web = await readJson("web/package.json");
+  assert.equal(web.scripts.test, "vitest run --maxWorkers=1");
 });
 
 test("secret and generated paths are ignored by Git", async () => {
