@@ -162,3 +162,55 @@ git diff --check: PASS
 ```
 
 `web/tsconfig.tsbuildinfo` was restored. Checkout-owned Stop reported already stopped; ports `4280`, `5173`, and `7071` were closed and `.nxt-local` absent. No live Azure/Google/GitHub/DNS/remote/deployment/push operation ran, and custom-domain work remains unstarted.
+
+## Review fix round 2: failure-safe Azure payload cleanup
+
+Implementation commit `27c0fce` (`fix: harden azure settings cleanup`) closes the cleanup-failure interleaving found after fix round 1.
+
+The secure settings payload now retains a no-follow directory handle from exact creation through the fake REST call and cleanup. Cleanup revalidates the canonical path plus exact directory/file device and inode identities, repairs only the retained exact-owned directory handle with `fchmod`, retries each safe exact unlink/rmdir operation once, attempts every safe cleanup step, and never recursively removes or overwrites a foreign entry. A mutation failure remains the primary error when cleanup is also incomplete; only a generic cleanup state and cause are appended. A successful mutation with incomplete cleanup fails closed, and a preparation failure uses the same generic composition. No secret value or protected temporary path is included in argv, logs, diagnostics, or composed errors.
+
+Documentation no longer claims an unconditional cleanup guarantee. Normal return paths perform the verified cleanup above, while SIGKILL, host failure, or hostile same-user filesystem replacement can interrupt it. An interrupted release or generic cleanup-incomplete result is documented as a local secret incident requiring independent exact ownership verification before removal or retry.
+
+### RED → GREEN evidence
+
+The controlled mutation-failure regressions were added before production changes:
+
+```sh
+node --test tools/azure-release.test.mjs
+```
+
+```text
+RED: 4 passed, 2 failed
+both failures exposed the old cleanup exception instead of the primary Azure mutation failure
+the mode-0500 fixture left the protected payload behind
+```
+
+The final focused suite expands the permission regression to mode `000` and covers mutation-failure plus cleanup-failure, successful mutation plus cleanup-failure, and preparation-failure plus cleanup-failure. The foreign fixture survives every refusal and the exact payload is removed whenever its identity remains proven:
+
+```text
+Azure release focused: 8/8 passed in 100.5 ms
+focused ESLint: PASS
+git diff --check: PASS
+pnpm deployment:verify: PASS
+```
+
+### Fresh final validation
+
+Node `22.23.1`, pnpm `11.22.0`, and live Google/Drive/Azure/GitHub/local-bypass variables unset:
+
+```text
+pnpm validate:ci: exit 0
+workspace: 617 passed, 1 opt-in live Drive skip
+project: 2/2
+portable focused: 28/28
+artifacts: 13 web, 3 API
+
+pnpm validate:codex: exit 0
+workspace: 617 passed, 1 opt-in live Drive skip
+project: 2/2
+full focused/lifecycle: 61/61 in 168.7 seconds
+artifacts: 13 web, 3 API
+git diff --check: PASS
+```
+
+`web/tsconfig.tsbuildinfo` was restored to the tracked baseline. `pnpm stop:codex` reported the stack already stopped; `lsof` returned no listeners on `4280`, `5173`, or `7071`; `.nxt-local` was absent; and the checkout process probe found no lifecycle/E2E Node process. Only fake Azure runners and disposable local files were used. No live Azure, Google, Drive, GitHub, DNS, remote, workflow, deployment, push, or root-checkout operation ran, and custom-domain work remains unstarted.
