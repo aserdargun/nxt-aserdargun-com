@@ -54,6 +54,9 @@ export const buildApi = async ({ checkoutPath = moduleCheckout } = {}) => {
     format: "esm",
     packages: "bundle",
     external: ["@azure/functions", "file-type", "googleapis"],
+    banner: {
+      js: 'import { createRequire as __nxtCreateRequire } from "node:module"; const require = __nxtCreateRequire(import.meta.url);'
+    },
     sourcemap: false,
     legalComments: "none",
     charset: "utf8",

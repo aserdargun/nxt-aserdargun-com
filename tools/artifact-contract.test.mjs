@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import { assertSafeApiDistTarget, buildApi } from "../scripts/build-api.mjs";
 import { verifyArtifacts } from "../scripts/verify-artifacts.mjs";
 
 const checkout = process.cwd();
+const run = promisify(execFile);
 
 const hashTree = async (root) => {
   const hash = createHash("sha256");
@@ -47,6 +50,22 @@ test("API build is deterministic and emits the minimal Functions v4 artifact", a
     }
   });
   assert.doesNotMatch(await readFile(join(checkout, "api-dist/index.js"), "utf8"), /sourceMappingURL/u);
+});
+
+test("API artifact starts from an isolated deployment root after runtime dependencies are installed", async (t) => {
+  await buildApi({ checkoutPath: checkout });
+  const temporary = await mkdtemp(join(tmpdir(), "nxt-api-runtime-"));
+  t.after(async () => rm(temporary, { recursive: true, force: true }));
+  await cp(join(checkout, "api-dist"), temporary, { recursive: true });
+  await mkdir(join(temporary, "node_modules", "@azure"), { recursive: true });
+  for (const dependency of ["@azure/functions", "file-type", "googleapis"]) {
+    const source = await realpath(join(checkout, "api", "node_modules", dependency));
+    await symlink(source, join(temporary, "node_modules", dependency));
+  }
+
+  await assert.doesNotReject(
+    run(process.execPath, ["index.js"], { cwd: temporary, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 })
+  );
 });
 
 test("API build target guard refuses symlinks, checkout roots, and foreign paths", async (t) => {

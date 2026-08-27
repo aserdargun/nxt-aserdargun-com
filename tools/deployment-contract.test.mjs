@@ -65,8 +65,7 @@ test("PR and deployment workflows pin permissions, platforms, gates, and prebuil
     app_location: "web/dist",
     api_location: "api-dist",
     output_location: "",
-    skip_app_build: true,
-    skip_api_build: true
+    skip_app_build: true
   });
 
   const allUses = [ci, deploy].flatMap((workflow) => Object.values(workflow.jobs))
@@ -78,6 +77,19 @@ test("PR and deployment workflows pin permissions, platforms, gates, and prebuil
     `Azure/static-web-apps-deploy@${deploySha}`
   ].includes(value)), `unexpected floating action: ${allUses.join(",")}`);
   assert.doesNotMatch(JSON.stringify([ci, deploy]), /id-token|github_id_token/u);
+});
+
+test("deployment leaves Azure API dependency installation enabled for external runtime packages", async () => {
+  const deploy = YAML.parse(await readFile(".github/workflows/deploy-swa-nxt-aserdargun-com.yml", "utf8"));
+  const artifactPackage = JSON.parse(await readFile("api-dist/package.json", "utf8"));
+  assert.ok(Object.keys(artifactPackage.dependencies ?? {}).length > 0, "API artifact must declare its runtime dependencies");
+
+  const upload = deploy.jobs.deploy.steps.find((step) => step.name === "Deploy prebuilt artifacts");
+  assert.notEqual(
+    upload.with.skip_api_build,
+    true,
+    "Azure/Oryx must install the API artifact's external runtime dependencies"
+  );
 });
 
 test("release identity accepts only a clean exact main checkout and exact origin", async (context) => {

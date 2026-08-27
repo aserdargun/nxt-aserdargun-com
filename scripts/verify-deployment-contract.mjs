@@ -67,7 +67,8 @@ export const verifySourceContract = async ({ checkoutPath }) => {
   const upload = deploy.jobs?.deploy?.steps?.find((step) => step.name === "Deploy prebuilt artifacts");
   if (upload?.uses !== deployAction || upload.with?.azure_static_web_apps_api_token !== "${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_SWA_NXT_ASERDARGUN_COM }}" ||
       upload.with?.action !== "upload" || upload.with?.app_location !== "web/dist" || upload.with?.api_location !== "api-dist" ||
-      upload.with?.output_location !== "" || upload.with?.skip_app_build !== true || upload.with?.skip_api_build !== true) {
+      upload.with?.output_location !== "" || upload.with?.skip_app_build !== true ||
+      ![undefined, false].includes(upload.with?.skip_api_build)) {
     throw refuse("prebuilt Azure upload mismatch");
   }
   return { ...expected };
