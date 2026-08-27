@@ -41,6 +41,7 @@ const RECOVERED_NOTE_ID = "038f47d2-6a34-7b2a-9f21-8a7034963aef";
 const FOLDER_ID = "v1.abcdefghijklmnop.folder_1.abcdefghijklmnopqrstuv";
 const ATTACHMENT_ID = "v1.abcdefghijklmnop.asset_1.abcdefghijklmnopqrstuv";
 const INBOX_FOLDER_ID = "v1.abcdefghijklmnop.folder_2.abcdefghijklmnopqrstuv";
+const PLANS_FOLDER_ID = "v1.abcdefghijklmnop.folder_3.abcdefghijklmnopqrstuv";
 const REQUEST_ID = "00000000-0000-4000-8000-000000000001";
 
 const source = (
@@ -1367,6 +1368,75 @@ describe("CodeMirror production configuration", () => {
 });
 
 describe("owner-shell integration", () => {
+  it("turns an empty vault into an editable first note from the visible editor action", async () => {
+    const user = userEvent.setup();
+    const created = response("", {
+      id: RECOVERED_NOTE_ID,
+      title: "First note",
+      version: "1",
+      path: "Notes/Plans/First note.md"
+    });
+    const createdEntry = {
+      ...OWNER_VAULT.entries[0]!,
+      id: RECOVERED_NOTE_ID,
+      title: "First note",
+      path: created.path,
+      driveVersion: created.version,
+      tags: [],
+      searchText: "first note",
+      excerpt: "",
+      outboundNoteIds: [],
+      unresolvedWikiTargets: [],
+      attachments: [],
+      backlinks: []
+    };
+    const emptyVault: CompleteVault = {
+      ...OWNER_VAULT,
+      entries: [],
+      folders: [
+        ...OWNER_VAULT.folders,
+        { id: PLANS_FOLDER_ID, name: "Plans", path: "Notes/Plans", version: "2", protected: true }
+      ],
+      preferences: { ...OWNER_VAULT.preferences, favorites: [], recent: [] }
+    };
+    const populatedVault: CompleteVault = {
+      ...emptyVault,
+      entries: [createdEntry],
+      preferences: { ...emptyVault.preferences, recent: [RECOVERED_NOTE_ID] }
+    };
+    const notes = notesHarness(created);
+    notes.createNote.mockResolvedValueOnce(created);
+
+    const Harness = (): React.JSX.Element => {
+      const [noteId, setNoteId] = useState<string>();
+      const [vault, setVault] = useState(emptyVault);
+      return (
+        <OwnerShell
+          {...(noteId === undefined ? {} : { noteId })}
+          vault={vault}
+          notes={notes.client}
+          draftStore={new MemoryDraftStore()}
+          onRefreshVault={() => {
+            setVault(populatedVault);
+            return Promise.resolve();
+          }}
+          onNavigateNote={setNoteId}
+        />
+      );
+    };
+
+    render(<Harness />);
+    await user.click(screen.getByRole("button", { name: "Create first note" }));
+    const dialog = screen.getByRole("dialog", { name: "New note" });
+    expect(within(dialog).getByRole("combobox", { name: "Folder" })).toHaveValue(PLANS_FOLDER_ID);
+    await user.type(within(dialog).getByRole("textbox", { name: "Title" }), "First note");
+    await user.click(within(dialog).getByRole("button", { name: "Create" }));
+
+    const editor = await screen.findByRole("textbox", { name: "Markdown editor" });
+    expect(editor).toHaveAttribute("contenteditable", "true");
+    expect(EditorView.findFromDOM(editor)?.state.doc.toString()).toBe(created.source);
+  });
+
   it("reports zero referenced attachments when persisted assets are absent from the saved source", async () => {
     const user = userEvent.setup();
     const notes = notesHarness(response("# Drive"));

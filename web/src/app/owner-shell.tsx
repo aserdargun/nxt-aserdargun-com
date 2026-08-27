@@ -442,6 +442,35 @@ const EditorRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Eleme
   </section>
 );
 
+const EmptyEditorRegion = ({
+  hidden,
+  disabledReason,
+  onCreate
+}: {
+  readonly hidden: boolean;
+  readonly disabledReason: string | null;
+  readonly onCreate: () => void;
+}): React.JSX.Element => (
+  <section className="workspace-region editor-region" role="region" aria-label="Editor" hidden={hidden}>
+    <div className="region-toolbar">
+      <span className="region-label">Editor</span>
+    </div>
+    <div className="empty-editor-state">
+      <h1>No notes yet</h1>
+      <p>Create your first Markdown note to start writing.</p>
+      <button
+        className="primary-action touch-target"
+        type="button"
+        disabled={disabledReason !== null}
+        title={disabledReason ?? undefined}
+        onClick={onCreate}
+      >
+        Create first note
+      </button>
+    </div>
+  </section>
+);
+
 const PreviewRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Element => (
   <section className="context-region preview-region" role="region" aria-label="Preview" hidden={hidden}>
     <div className="context-tabs" role="tablist" aria-label="Preview">
@@ -617,6 +646,10 @@ export const OwnerShell = ({
     const matches = vault?.folders.filter((folder) => folder.name === "Inbox") ?? [];
     return matches.length === 1 ? matches[0] : undefined;
   }, [vault]);
+  const plansFolder = useMemo(() => {
+    const matches = vault?.folders.filter((folder) => folder.path === "Notes/Plans") ?? [];
+    return matches.length === 1 ? matches[0] : undefined;
+  }, [vault]);
   const archiveFolder = useMemo(() => {
     const matches = vault?.folders.filter((folder) => folder.name === "Archive") ?? [];
     return matches.length === 1 ? matches[0] : undefined;
@@ -752,26 +785,29 @@ export const OwnerShell = ({
     await refreshVault();
   }, [refreshVault, vaultApi]);
 
+  const newNoteFolder = selectedFolder ?? plansFolder ?? inboxFolder;
+  const openNewNote = useCallback((): void => {
+    if (newNoteFolder === undefined) return;
+    setOperationError(null);
+    setPendingOperation({
+      operation: {
+        kind: "new-note",
+        selectionKind: "note",
+        initialName: "",
+        initialFolderId: newNoteFolder.id
+      },
+      target: null
+    });
+  }, [newNoteFolder]);
+
   const paletteActions = useMemo<readonly CommandPaletteAction[]>(() => {
     const noVault = "Open a complete vault first.";
     const noNote = "Select a note first.";
     return [
       {
         id: "new-note",
-        disabledReason: selectedFolder === undefined ? noVault : null,
-        run: () => {
-          if (selectedFolder === undefined) return;
-          setOperationError(null);
-          setPendingOperation({
-            operation: {
-              kind: "new-note",
-              selectionKind: "note",
-              initialName: "",
-              initialFolderId: selectedFolder.id
-            },
-            target: null
-          });
-        }
+        disabledReason: newNoteFolder === undefined ? noVault : null,
+        run: openNewNote
       },
       {
         id: "quick-note",
@@ -881,12 +917,14 @@ export const OwnerShell = ({
     onNavigateNote,
     onSignOut,
     onToggleTheme,
+    openNewNote,
     openNoteOperation,
     publishDisabledReason,
     refreshVault,
     revokeDisabledReason,
     selectedEntry,
     selectedFolder,
+    newNoteFolder,
     vault,
     vaultApi
   ]);
@@ -1040,7 +1078,15 @@ export const OwnerShell = ({
         />
         {noteId === undefined ? (
           <>
-            <EditorRegion hidden={isHidden("editor")} />
+            {vault !== undefined && vault.entries.length === 0 ? (
+              <EmptyEditorRegion
+                hidden={isHidden("editor")}
+                disabledReason={newNoteFolder === undefined ? "The Plans or Inbox folder is unavailable." : null}
+                onCreate={openNewNote}
+              />
+            ) : (
+              <EditorRegion hidden={isHidden("editor")} />
+            )}
             <div className="context-column">
               <PreviewRegion hidden={isHidden("preview")} />
               <InfoRegion hidden={isHidden("info")} attachments={attachmentCards} publication={publicationPanel} />

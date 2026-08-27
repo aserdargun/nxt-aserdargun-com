@@ -325,6 +325,33 @@ textarea:focus-visible,
   overscroll-behavior: contain;
 }
 
+.empty-editor-state {
+  display: grid;
+  flex: 1;
+  align-content: center;
+  justify-items: start;
+  gap: 10px;
+  padding: 32px;
+  background: var(--bg);
+}
+
+.empty-editor-state h1,
+.empty-editor-state p {
+  margin: 0;
+}
+
+.empty-editor-state h1 {
+  color: var(--yellow);
+  font-size: clamp(1.35rem, 2.2vw, 2rem);
+}
+
+.empty-editor-state p {
+  max-width: 38ch;
+  margin-bottom: 8px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
 .explorer-section {
   padding: 14px 10px 16px;
   border-bottom: 1px solid var(--border);
