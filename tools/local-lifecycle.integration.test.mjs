@@ -17,6 +17,7 @@ import {
 import {
   assertPortsAvailable,
   FUNCTIONS_HOST_LOCAL_SANDBOX_PROFILE,
+  parseCompleteSupervisorRegistration,
   startLocalStack
 } from "../scripts/local-dev.mjs";
 
@@ -34,6 +35,13 @@ const waitFor = async (predicate, timeoutMs = 3_000) => {
 };
 
 const pathExists = async (path) => access(path).then(() => true, () => false);
+
+test("supervisor registration remains invisible until its complete JSON record is durable", () => {
+  assert.equal(parseCompleteSupervisorRegistration(""), undefined);
+  assert.equal(parseCompleteSupervisorRegistration('{"version":1}'), undefined);
+  assert.deepEqual(parseCompleteSupervisorRegistration('{"version":1}\n'), { version: 1 });
+  assert.throws(() => parseCompleteSupervisorRegistration("{\n"), SyntaxError);
+});
 
 const terminateRunner = async (child) => {
   if (child.exitCode !== null || child.signalCode !== null) return;

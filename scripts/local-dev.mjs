@@ -192,6 +192,9 @@ const writeGate = async (path, nonce) => {
   await chmod(path, 0o600);
 };
 
+export const parseCompleteSupervisorRegistration = (text) =>
+  text.endsWith("\n") ? JSON.parse(text) : undefined;
+
 const writeFunctionsAttestation = async ({ path, localDirectory, checkoutRealpath, fixtureRoot, nonce, service }) => {
   if (path !== join(localDirectory, "functions.attestation.json") || service.name !== "functions" || service.status !== "ready" ||
     service.port !== 7071 || service.cwd !== join(checkoutRealpath, "api") || service.logPath !== join(localDirectory, "functions.log")) {
@@ -225,7 +228,11 @@ const waitForSupervisorRegistration = async (child, gate, timeoutMs = 10_000) =>
     try {
       const metadata = await lstat(gate.registrationPath);
       if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error("Unsafe service supervisor registration.");
-      const registration = JSON.parse(await readFile(gate.registrationPath, "utf8"));
+      const registration = parseCompleteSupervisorRegistration(await readFile(gate.registrationPath, "utf8"));
+      if (registration === undefined) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+        continue;
+      }
       if (registration?.version !== 1 || registration?.nonce !== gate.nonce || registration?.identity?.pid !== child.pid) {
         throw new Error("Invalid service supervisor registration.");
       }
