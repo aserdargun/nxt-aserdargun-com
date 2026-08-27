@@ -88,6 +88,29 @@ test("manual Azure apply validates exact target and exposes only sorted key name
   assert.deepEqual(await readdir(temporaryParent), []);
 });
 
+test("Azure apply accepts the null provisioning state returned for a verified Static Web App", async (context) => {
+  const { applyAzureSettings } = await loadRelease();
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-azure-null-provisioning-")));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const envFile = join(directory, ".env.local");
+  await writeFile(envFile, source(), { mode: 0o600 });
+
+  await assert.doesNotReject(applyAzureSettings({
+    envFile,
+    identity: { repository: "nxt-aserdargun-com" },
+    runAz: successRunner([], {
+      app: {
+        ...validApp,
+        provisioningState: null,
+        repositoryUrl: null,
+        branch: null,
+        stagingEnvironmentPolicy: "Enabled"
+      }
+    }),
+    log: () => undefined
+  }));
+});
+
 test("Azure apply redacts sentinel values from child diagnostics and thrown errors", async (context) => {
   const { applyAzureSettings } = await loadRelease();
   const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-azure-redaction-")));
