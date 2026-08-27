@@ -4,7 +4,7 @@
 
 DONE
 
-Task 15 was initially implemented in commit `cde52276e8f3a30bd408561384d4729103ad1daf` (`test: cover nxt owner and public journeys`). Review fix round 1 is implemented in commit `8ab05f4` (`fix: harden browser acceptance harness`). The updated report and progress-ledger entry are committed separately.
+Task 15 was initially implemented in commit `cde52276e8f3a30bd408561384d4729103ad1daf` (`test: cover nxt owner and public journeys`). Review fix round 1 is implemented in commit `8ab05f4` (`fix: harden browser acceptance harness`), and review fix round 2 is implemented in commit `083736a` (`fix: serialize browser harness teardown`). The updated report and progress-ledger entry are committed separately.
 
 The suite drives the real Vite → Azure Functions Core Tools → SWA CLI stack with Chromium. It uses SWA CLI's local GitHub-provider emulator, an exact checkout-owned filesystem fixture, production handlers, and real browser requests; no application API is mocked in the page.
 
@@ -201,3 +201,71 @@ exit 0
 The sole skip remains the existing opt-in live Google Drive integration. `web/tsconfig.tsbuildinfo` was restored after the gate. The final screenshots at the three absolute paths listed above were re-inspected at original resolution: the settled command dialog is legible with visible focus, the `390x844` workspace has no horizontal overflow and reachable actions, and the public page contains no owner chrome. Its large white responsive panel is still the intentional deterministic `1x1` white PNG fixture, not a missing asset. Screenshots remain ignored and uncommitted.
 
 No browser mock response, live Drive/Google/GitHub OAuth, Azure control plane, DNS, remote, workflow, deployment, push, or external mutable state was accessed or changed. The SWA CLI global-header omission remains an emulator evidence gap; static configuration and artifact checks remain strict. The emulator-auth page's own Microsoft CDN references remain the previously disclosed CLI behavior.
+
+## Review fix round 2 closure
+
+Implementation commit `083736a` (`fix: serialize browser harness teardown`) closes both remaining race findings without changing production storage, the Task 14 sandbox, or any external system:
+
+- Every Playwright command now runs as the root of its own detached checkout-owned process group. Interruption captures and repeatedly revalidates full PID, PGID, start-time, cwd, executable, and command identity for the direct child, recursive descendants, and exact PGID members; it signals verified members individually in leaf-first order, never uses a negative PID or port-based kill, rediscoveries late/reparented members through bounded TERM/KILL phases, reaps the direct child, and requires two empty discovery passes. Enumeration or identity uncertainty fails closed while the runner still invokes the exact checkout Stop path.
+- A real subprocess regression proves SIGTERM removes both a direct fake Playwright child and its TERM-resistant same-group grandchild, preserves captured stdout/stderr and a nonzero result, invokes Stop, and leaves a same-name foreign process in another PGID alive. The focused fixture startup allowance is five seconds; the actual interruption cleanup remains bounded below five seconds.
+- The former check-then-rename fixture reset was removed. Each Playwright test now owns a fresh complete Vite → Functions → SWA stack: Start seeds the exact deterministic canonical fixture before navigation, and `finally` runs exact Stop before any later test may seed another generation. The fixture has its own 120-second Playwright allowance; its owned Start and Stop commands also have independent 45-second and 60-second abort limits so a fixture timeout cannot leave a child running. The outer runner retains only emergency final Stop and an independent port/state proof.
+- In-place fixture reset now always refuses after canonical-root and live-Drive validation. A controlled writer regression intentionally fails the first test, writes during exact Stop, proves that Stop completes and removes the old generation, then starts a second deterministic generation with no crossed late write. It also proves the failure path still calls Stop and leaves no `.nxt-local` state.
+- Playwright stays at one worker. Publication has explicit base URLs for its separately created anonymous contexts and closes those contexts in `finally`, so an assertion cannot keep a request/page alive across exact stack Stop. The owner tree keyboard test waits for completed owner hydration before proving ArrowUp/ArrowDown focus movement.
+
+### Fix-round RED and GREEN evidence
+
+Focused RED was captured before production changes:
+
+```text
+runner interruption fixture: TERM-resistant grandchild survived
+fixture generation fixture: controlled check-to-rename writer reopened the fresh root
+focused result: 5 passed, 2 failed
+```
+
+Final focused Node 22 evidence:
+
+```text
+node --test tools/e2e-runner.integration.test.mjs tools/e2e-stack.integration.test.mjs tools/local-fixtures.test.mjs tools/static-security.test.mjs
+11/11 passed in 5.269 seconds
+```
+
+Real filtered lifecycle evidence:
+
+```text
+accessibility two-test filter: 2/2 passed in 41.7 seconds
+pnpm e2e -- e2e/publication.spec.ts: 1/1 passed in 27.5 seconds
+each test: NXT ready -> exact checkout Stop
+outer emergency Stop: already stopped
+```
+
+The final exclusive full browser run used Node `22.23.1`, pnpm `11.22.0`, Playwright `1.62.1`, Chromium `151.0.7922.34`, one worker, and every live Google/Drive/local/auth variable unset:
+
+```text
+desktop Chromium: 9 passed
+mobile Chromium: 2 passed
+reduced-motion Chromium: 1 passed
+total: 12/12 passed in 4.2 minutes
+every test opened and stopped its own exact stack
+final emergency Stop: already stopped
+```
+
+The slower duration is intentional: fixture replacement now happens only across a proven Functions/worker/process Stop boundary, rather than while a shared live server may accept another request.
+
+### Final repository validation after serialized teardown
+
+```text
+PATH=/Users/aserdargun/.nvm/versions/node/v22.23.1/bin:$PATH pnpm validate:codex
+lint/typecheck: PASS
+API artifact + web build + artifact verifier: PASS (13 web files, 3 API files)
+contracts: 14 passed
+domain: 29 passed
+web: 170 passed
+API: 404 passed, 1 skipped
+repository test total: 617 passed, 1 skipped
+project contract: 2/2 passed
+static/artifact/fixture/runner/lifecycle: 46/46 passed in 174.985 seconds
+git diff --check: PASS
+exit 0
+```
+
+The sole skip remains the opt-in live Google Drive integration. `web/tsconfig.tsbuildinfo` was restored after validation. Final exact checks found ports `4280`, `5173`, and `7071` closed, `.nxt-local` absent, and no checkout-owned E2E/Playwright/Vite/Functions/SWA process. Generated builds, traces, and screenshots remain ignored and uncommitted. No live Drive/Google/GitHub OAuth, Azure control plane, DNS, remote, workflow, deployment, push, root checkout, or external mutable system was accessed or changed.
