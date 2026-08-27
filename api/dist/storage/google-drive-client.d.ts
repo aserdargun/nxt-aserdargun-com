@@ -53,6 +53,9 @@ export interface GoogleDriveClient {
             data: unknown;
             headers?: unknown;
         }>;
+        getVersion(fileId: string): Promise<{
+            data: unknown;
+        }>;
         list(input: GoogleDriveListInput): Promise<{
             data: unknown;
         }>;
@@ -91,12 +94,43 @@ interface RawGoogleDriveClient {
         create(input: GoogleDriveCreateInput, options: GoogleRequestOptions): Promise<{
             data: unknown;
         }>;
-        update(input: GoogleDriveUpdateInput, options: GoogleRequestOptions): Promise<{
-            data: unknown;
-        }>;
     };
     revisions: {
         list(input: GoogleDriveRevisionListInput, options: GoogleRequestOptions): Promise<{
+            data: unknown;
+        }>;
+    };
+}
+interface GoogleDriveV2PatchInput {
+    fileId: string;
+    requestBody?: {
+        mimeType?: string;
+        title?: string;
+        labels?: {
+            trashed: boolean;
+        };
+    };
+    media?: {
+        mimeType: string;
+        body: string | Uint8Array;
+    };
+    addParents?: string;
+    removeParents?: string;
+    fields: "id";
+}
+interface RawGoogleDriveV2Client {
+    files: {
+        get(input: {
+            fileId: string;
+            fields: "id,etag,version";
+            updateViewedDate: false;
+        }, options: GoogleRequestOptions): Promise<{
+            data: unknown;
+        }>;
+        patch(input: GoogleDriveV2PatchInput, options: GoogleRequestOptions): Promise<{
+            data: unknown;
+        }>;
+        update(input: GoogleDriveV2PatchInput, options: GoogleRequestOptions): Promise<{
             data: unknown;
         }>;
     };
@@ -113,6 +147,6 @@ export interface GoogleDriveIntegrationSettings {
 }
 export declare const assertPrivateIntegrationFolderMetadata: (value: unknown, settings: GoogleDriveIntegrationSettings) => void;
 export declare const createGoogleDriveClient: (credentials: GoogleDriveCredentials) => GoogleDriveClient;
-export declare const wrapGoogleDriveClient: (raw: RawGoogleDriveClient) => GoogleDriveClient;
+export declare const wrapGoogleDriveClient: (raw: RawGoogleDriveClient, rawV2: RawGoogleDriveV2Client) => GoogleDriveClient;
 export {};
 //# sourceMappingURL=google-drive-client.d.ts.map

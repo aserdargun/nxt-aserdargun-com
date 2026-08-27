@@ -1276,6 +1276,17 @@ const createRescanGoogleDrive = () => {
           ? { data: value.content ?? "" }
           : { data: metadata(value), headers: { etag: `"version-${value.version}"` } };
       },
+      getVersion: async (fileId) => {
+        rawCalls += 1;
+        const value = file(fileId);
+        return {
+          data: {
+            id: value.id,
+            etag: `"version-${value.version}"`,
+            version: String(value.version)
+          }
+        };
+      },
       list: async (input) => {
         rawCalls += 1;
         const match = /^'([^']+)' in parents/u.exec(input.q);

@@ -63,6 +63,7 @@ export interface GoogleDriveClient {
       input: GoogleDriveGetInput,
       options?: { responseType: "arraybuffer" }
     ): Promise<{ data: unknown; headers?: unknown }>;
+    getVersion(fileId: string): Promise<{ data: unknown }>;
     list(input: GoogleDriveListInput): Promise<{ data: unknown }>;
     create(input: GoogleDriveCreateInput): Promise<{ data: unknown }>;
     update(
@@ -95,14 +96,47 @@ interface RawGoogleDriveClient {
       input: GoogleDriveCreateInput,
       options: GoogleRequestOptions
     ): Promise<{ data: unknown }>;
-    update(
-      input: GoogleDriveUpdateInput,
-      options: GoogleRequestOptions
-    ): Promise<{ data: unknown }>;
   };
   revisions: {
     list(
       input: GoogleDriveRevisionListInput,
+      options: GoogleRequestOptions
+    ): Promise<{ data: unknown }>;
+  };
+}
+
+interface GoogleDriveV2PatchInput {
+  fileId: string;
+  requestBody?: {
+    mimeType?: string;
+    title?: string;
+    labels?: { trashed: boolean };
+  };
+  media?: {
+    mimeType: string;
+    body: string | Uint8Array;
+  };
+  addParents?: string;
+  removeParents?: string;
+  fields: "id";
+}
+
+interface RawGoogleDriveV2Client {
+  files: {
+    get(
+      input: {
+        fileId: string;
+        fields: "id,etag,version";
+        updateViewedDate: false;
+      },
+      options: GoogleRequestOptions
+    ): Promise<{ data: unknown }>;
+    patch(
+      input: GoogleDriveV2PatchInput,
+      options: GoogleRequestOptions
+    ): Promise<{ data: unknown }>;
+    update(
+      input: GoogleDriveV2PatchInput,
       options: GoogleRequestOptions
     ): Promise<{ data: unknown }>;
   };
@@ -166,22 +200,70 @@ export const createGoogleDriveClient = (
     credentials.clientSecret
   );
   auth.setCredentials({ refresh_token: credentials.refreshToken });
-  return wrapGoogleDriveClient(google.drive({ version: "v3", auth }));
+  return wrapGoogleDriveClient(
+    google.drive({ version: "v3", auth }),
+    google.drive({ version: "v2", auth })
+  );
 };
 
 export const wrapGoogleDriveClient = (
-  raw: RawGoogleDriveClient
+  raw: RawGoogleDriveClient,
+  rawV2: RawGoogleDriveV2Client
 ): GoogleDriveClient => ({
   files: {
     get: (input, options) =>
       raw.files.get(input, { ...options, retry: false }),
+    getVersion: (fileId) =>
+      rawV2.files.get(
+        {
+          fileId,
+          fields: "id,etag,version",
+          updateViewedDate: false
+        },
+        { retry: false }
+      ),
     list: (input) => raw.files.list(input, { retry: false }),
     create: (input) => raw.files.create(input, { retry: false }),
-    update: (input, options) => raw.files.update(input, { ...options, retry: false })
+    update: (input, options) => {
+      const operation = input.media === undefined
+        ? rawV2.files.patch.bind(rawV2.files)
+        : rawV2.files.update.bind(rawV2.files);
+      return operation(toV2PatchInput(input), {
+        ...options,
+        retry: false
+      });
+    }
   },
   revisions: {
     list: (input) => raw.revisions.list(input, { retry: false })
   }
+});
+
+const toV2PatchInput = (
+  input: GoogleDriveUpdateInput
+): GoogleDriveV2PatchInput => ({
+  fileId: input.fileId,
+  ...(input.requestBody === undefined
+    ? {}
+    : {
+        requestBody: {
+          ...(input.requestBody.mimeType === undefined
+            ? {}
+            : { mimeType: input.requestBody.mimeType }),
+          ...(input.requestBody.name === undefined
+            ? {}
+            : { title: input.requestBody.name }),
+          ...(input.requestBody.trashed === undefined
+            ? {}
+            : { labels: { trashed: input.requestBody.trashed } })
+        }
+      }),
+  ...(input.media === undefined ? {} : { media: input.media }),
+  ...(input.addParents === undefined ? {} : { addParents: input.addParents }),
+  ...(input.removeParents === undefined
+    ? {}
+    : { removeParents: input.removeParents }),
+  fields: input.fields
 });
 
 const assertCredential = (value: string): void => {

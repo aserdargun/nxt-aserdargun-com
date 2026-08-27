@@ -32,18 +32,55 @@ export const createGoogleDriveClient = (credentials) => {
     assertCredential(credentials.refreshToken);
     const auth = new google.auth.OAuth2(credentials.clientId, credentials.clientSecret);
     auth.setCredentials({ refresh_token: credentials.refreshToken });
-    return wrapGoogleDriveClient(google.drive({ version: "v3", auth }));
+    return wrapGoogleDriveClient(google.drive({ version: "v3", auth }), google.drive({ version: "v2", auth }));
 };
-export const wrapGoogleDriveClient = (raw) => ({
+export const wrapGoogleDriveClient = (raw, rawV2) => ({
     files: {
         get: (input, options) => raw.files.get(input, { ...options, retry: false }),
+        getVersion: (fileId) => rawV2.files.get({
+            fileId,
+            fields: "id,etag,version",
+            updateViewedDate: false
+        }, { retry: false }),
         list: (input) => raw.files.list(input, { retry: false }),
         create: (input) => raw.files.create(input, { retry: false }),
-        update: (input, options) => raw.files.update(input, { ...options, retry: false })
+        update: (input, options) => {
+            const operation = input.media === undefined
+                ? rawV2.files.patch.bind(rawV2.files)
+                : rawV2.files.update.bind(rawV2.files);
+            return operation(toV2PatchInput(input), {
+                ...options,
+                retry: false
+            });
+        }
     },
     revisions: {
         list: (input) => raw.revisions.list(input, { retry: false })
     }
+});
+const toV2PatchInput = (input) => ({
+    fileId: input.fileId,
+    ...(input.requestBody === undefined
+        ? {}
+        : {
+            requestBody: {
+                ...(input.requestBody.mimeType === undefined
+                    ? {}
+                    : { mimeType: input.requestBody.mimeType }),
+                ...(input.requestBody.name === undefined
+                    ? {}
+                    : { title: input.requestBody.name }),
+                ...(input.requestBody.trashed === undefined
+                    ? {}
+                    : { labels: { trashed: input.requestBody.trashed } })
+            }
+        }),
+    ...(input.media === undefined ? {} : { media: input.media }),
+    ...(input.addParents === undefined ? {} : { addParents: input.addParents }),
+    ...(input.removeParents === undefined
+        ? {}
+        : { removeParents: input.removeParents }),
+    fields: input.fields
 });
 const assertCredential = (value) => {
     if (typeof value !== "string" || value.trim() === "") {

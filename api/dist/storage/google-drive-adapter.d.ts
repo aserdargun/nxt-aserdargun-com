@@ -75,6 +75,7 @@ export declare class GoogleDriveAdapter implements StoragePort {
     private readMetadataAfterWrite;
     private readMetadata;
     private readMetadataSnapshot;
+    private readVersionedMetadataSnapshot;
     private readWithRetry;
 }
 export declare const escapeDriveQueryLiteral: (value: string) => string;

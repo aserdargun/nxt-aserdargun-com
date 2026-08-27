@@ -107,6 +107,9 @@ describe("GoogleDriveAdapter", () => {
     const adapter = new GoogleDriveAdapter(
       createClient({
         get: async () => ({ data: driveFile({ version: "7" }) }),
+        getVersion: async () => ({
+          data: { id: "file-id", etag: '"version-7"', version: "7" }
+        }),
         update: async () => {
           updateCalls += 1;
           return { data: { id: "file-id" } };
@@ -432,6 +435,36 @@ describe("GoogleDriveAdapter", () => {
         fields: "id"
       }
     ]);
+  });
+
+  it("returns the settled Drive version after post-write version churn", async () => {
+    const versions = ["1", "2", "3", "3"];
+    const sleeps: number[] = [];
+    const adapter = new GoogleDriveAdapter(
+      createClient({
+        create: async () => ({ data: { id: "created-id" } }),
+        get: async () => ({
+          data: driveFile({
+            id: "created-id",
+            name: "note.txt",
+            mimeType: "text/plain",
+            parents: ["parent-id"],
+            version: versions.shift() ?? "3",
+            size: "3",
+            md5Checksum: createHash("md5").update("one").digest("hex")
+          })
+        })
+      }),
+      { sleep: async (milliseconds) => { sleeps.push(milliseconds); } }
+    );
+
+    await expect(adapter.createText({
+      parentId: "parent-id",
+      name: "note.txt",
+      mimeType: "text/plain",
+      text: "one"
+    })).resolves.toMatchObject({ version: "3" });
+    expect(sleeps).toEqual([100, 200, 400]);
   });
 
   it("fails create readback when Drive changes the requested parent, name, or MIME", async () => {
@@ -803,7 +836,10 @@ describe("GoogleDriveAdapter", () => {
         data: metadataReads++ === 0
           ? driveFile({ parents: ["from-parent"], version: "7" })
           : driveFile({ parents: ["to-parent"], version: "8" }),
-        headers: { etag: '"etag-version-7"' }
+        headers: {}
+      }),
+      getVersion: async () => ({
+        data: { id: "file-id", etag: '"etag-version-7"', version: "7" }
       }),
       update
     }));
@@ -833,8 +869,10 @@ describe("GoogleDriveAdapter", () => {
       get: async () => ({
         data: metadataReads++ === 0
           ? driveFile({ parents: ["from-parent"], version: "7" })
-          : driveFile({ parents: ["to-parent"], version: "8" }),
-        headers: { etag }
+          : driveFile({ parents: ["to-parent"], version: "8" })
+      }),
+      getVersion: async () => ({
+        data: { id: "file-id", etag, version: "7" }
       }),
       update: (async (...args: unknown[]) => {
         calls.push(args);
@@ -860,10 +898,15 @@ describe("GoogleDriveAdapter", () => {
     ["trailing data", { etag: '"version-7" trailing' }],
     ["control", { etag: '"version\u0001-7"' }],
     ["oversized", { etag: `"${"x".repeat(511)}"` }]
-  ])("rejects a %s Drive ETag before moving", async (_label, headers) => {
+  ])("rejects a %s Drive ETag before moving", async (_label, token) => {
     let writes = 0;
     const adapter = new GoogleDriveAdapter(createClient({
-      get: async () => ({ data: driveFile({ parents: ["from-parent"], version: "7" }), headers }),
+      get: async () => ({
+        data: driveFile({ parents: ["from-parent"], version: "7" })
+      }),
+      getVersion: async () => ({
+        data: { id: "file-id", version: "7", ...token }
+      }),
       update: async () => {
         writes += 1;
         return { data: { id: "file-id" } };
@@ -905,8 +948,10 @@ describe("GoogleDriveAdapter", () => {
   it("maps a Drive 412 move rejection to the typed storage version conflict", async () => {
     const adapter = new GoogleDriveAdapter(createClient({
       get: async () => ({
-        data: driveFile({ parents: ["from-parent"], version: "7" }),
-        headers: { etag: '"version-7"' }
+        data: driveFile({ parents: ["from-parent"], version: "7" })
+      }),
+      getVersion: async () => ({
+        data: { id: "file-id", etag: '"version-7"', version: "7" }
       }),
       update: async () => { throw statusError(412, "raw file-id precondition failed"); }
     }));
@@ -1029,6 +1074,7 @@ const statusError = (status: number, message: string) =>
 const createClient = (
   overrides: {
     get?: GoogleDriveClient["files"]["get"];
+    getVersion?: GoogleDriveClient["files"]["getVersion"];
     list?: GoogleDriveClient["files"]["list"];
     create?: GoogleDriveClient["files"]["create"];
     update?: GoogleDriveClient["files"]["update"];
@@ -1042,6 +1088,9 @@ const createClient = (
       const response = await get(input, options);
       return { ...response, headers: response.headers ?? { etag: '"test-etag"' } };
     },
+    getVersion: overrides.getVersion ?? (async (fileId) => ({
+      data: { id: fileId, etag: '"test-etag"', version: "1" }
+    })),
     list: overrides.list ?? (async () => ({ data: { files: [] } })),
     create: overrides.create ?? (async () => ({ data: { id: "created-id" } })),
     update: overrides.update ?? (async () => ({ data: { id: "file-id" } }))

@@ -45,6 +45,8 @@ NXT-PRIVATE-COM
 
 Application operations are constrained to configured IDs below these roots. The owner-visible root contains portable Markdown and attachments. The private root contains derived state, bounded test fixtures, and publication snapshots. Publication manifests expose only opaque public IDs and allowlisted snapshot assets.
 
+The storage client uses Drive v3 for normal reads, creates, listings, and revision history. Conditional mutations bridge to Drive v2 only to obtain and enforce the resource ETag that v3 no longer exposes: the v2 token must match a v3 version snapshot, media changes use conditional `files.update`, metadata-only changes use conditional `files.patch`, and every write is followed by stable-version and checksum/ancestry verification.
+
 ## Local composition
 
 Task 14 owns the local lifecycle:

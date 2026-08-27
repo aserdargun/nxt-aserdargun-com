@@ -11,6 +11,7 @@ const MAX_FILE_ID_LENGTH = 512;
 const MAX_PAGE_SIZE = 1000;
 const MAX_READ_ATTEMPTS = 3;
 const BASE_RETRY_DELAY_MS = 50;
+const POST_WRITE_STABILITY_DELAYS_MS = [100, 200, 400];
 const MAX_REVISION_PAGES = 1000;
 const RETRYABLE_READ_STATUSES = new Set([429, 500, 502, 503, 504]);
 export class GoogleDriveAdapter {
@@ -120,9 +121,9 @@ export class GoogleDriveAdapter {
         let before;
         let etag;
         try {
-            const snapshot = await this.readMetadataSnapshot(input.fileId, context);
+            const snapshot = await this.readVersionedMetadataSnapshot(input.fileId, context);
             before = toStoredFile(snapshot.data, this.rootId);
-            etag = responseEtag(snapshot.headers);
+            etag = snapshot.etag;
         }
         catch (error) {
             throw preserveSafeError(error, "Google Drive read failed.");
@@ -170,9 +171,9 @@ export class GoogleDriveAdapter {
         let before;
         let etag;
         try {
-            const snapshot = await this.readMetadataSnapshot(input.fileId, context);
+            const snapshot = await this.readVersionedMetadataSnapshot(input.fileId, context);
             before = toStoredFile(snapshot.data, this.rootId);
-            etag = responseEtag(snapshot.headers);
+            etag = snapshot.etag;
         }
         catch (error) {
             throw preserveSafeError(error, "Google Drive read failed.");
@@ -239,9 +240,9 @@ export class GoogleDriveAdapter {
         let before;
         let etag;
         try {
-            const snapshot = await this.readMetadataSnapshot(fileId, context);
+            const snapshot = await this.readVersionedMetadataSnapshot(fileId, context);
             before = toStoredFile(snapshot.data, this.rootId);
-            etag = responseEtag(snapshot.headers);
+            etag = snapshot.etag;
         }
         catch (error) {
             throw preserveSafeError(error, "Google Drive read failed.");
@@ -379,10 +380,25 @@ export class GoogleDriveAdapter {
     }
     async readMetadataAfterWrite(fileId, context) {
         try {
-            return await this.readMetadata(fileId, context);
+            let previousVersion;
+            for (let readIndex = 0; readIndex <= POST_WRITE_STABILITY_DELAYS_MS.length; readIndex += 1) {
+                if (readIndex > 0) {
+                    await this.sleep(POST_WRITE_STABILITY_DELAYS_MS[readIndex - 1]);
+                }
+                const metadata = await this.readMetadata(fileId, context);
+                const version = requireNonEmptyString(requireRecord(metadata).version);
+                assertVersion(version);
+                if (readIndex >= 2 && version === previousVersion) {
+                    return metadata;
+                }
+                previousVersion = version;
+            }
+            throw new DriveContractError("Google Drive write readback did not settle.");
         }
         catch (error) {
             if (error instanceof StorageOperationBudgetExceededError)
+                throw error;
+            if (error instanceof DriveContractError)
                 throw error;
             throw new DriveContractError("Google Drive write readback failed.");
         }
@@ -394,6 +410,17 @@ export class GoogleDriveAdapter {
         assertFileId(fileId);
         const response = await this.readWithRetry(() => this.client.files.get({ fileId, fields: FILE_FIELDS }), context);
         return response;
+    }
+    async readVersionedMetadataSnapshot(fileId, context) {
+        const versionResponse = await this.readWithRetry(() => this.client.files.getVersion(fileId), context);
+        const precondition = versionPrecondition(versionResponse.data);
+        const snapshot = await this.readMetadataSnapshot(fileId, context);
+        const metadata = requireRecord(snapshot.data);
+        if (metadata.id !== precondition.id ||
+            metadata.version !== precondition.version) {
+            throw new DriveContractError("Google Drive version snapshot changed.");
+        }
+        return { data: snapshot.data, etag: precondition.etag };
     }
     async readWithRetry(operation, context) {
         let lastError;
@@ -526,23 +553,19 @@ const requireNonEmptyString = (value) => {
         throw new DriveContractError("Google Drive response is invalid.");
     return value;
 };
-const responseEtag = (headers) => {
-    const record = requireRecord(headers);
-    let etag = record.etag ?? record.ETag;
-    if (typeof etag !== "string" && typeof record.get === "function") {
-        try {
-            etag = record.get("etag");
-        }
-        catch {
-            etag = undefined;
-        }
-    }
+const versionPrecondition = (value) => {
+    const record = requireRecord(value);
+    const id = requireNonEmptyString(record.id);
+    assertFileId(id);
+    const version = requireNonEmptyString(record.version);
+    assertVersion(version);
+    const etag = record.etag;
     if (typeof etag !== "string" ||
         etag.length > 512 ||
         !/^(?:W\/)?"[\x21\x23-\x7E\x80-\xFF]*"$/u.test(etag)) {
         throw new DriveContractError("Google Drive version precondition is unavailable.");
     }
-    return etag;
+    return { id, version, etag };
 };
 const optionalString = (value) => {
     if (value === undefined || value === null || value === "")

@@ -34,6 +34,8 @@ Mitigations:
 - Read-back metadata/checksum verification after mutations.
 - Redaction-safe CLI output and ignored mode-`0600` local credentials.
 
+Drive v3 remains the primary metadata, media-read, list, create, and revision API. Because Drive v3 removed the resource `etag`, conditional mutations first bind the exact v2 `id,etag,version` resource token to a matching v3 metadata snapshot. Content writes use a v2 `files.update` media request; rename, move, and Trash mutations use v2 `files.patch`. Every mutation sends `If-Match`, disables automatic write retries, maps `412` to a version conflict, and waits for a stable post-write version before validating ancestry, MIME, active state, and checksum. This compatibility bridge is limited to the same official Drive service and does not weaken the configured root boundary.
+
 An External Google consent screen left in Testing can limit a Drive-scope refresh token to seven days. Durable publication requires an eligible Internal consent configuration or External consent moved to Production/published status before a new refresh token is issued. Token status is an operator release gate.
 
 ## Secrets and release settings

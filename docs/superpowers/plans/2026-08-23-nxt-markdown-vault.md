@@ -6,7 +6,7 @@
 
 **Architecture:** A React/Vite/TypeScript SPA communicates only with managed Node.js 22 Azure Functions. Functions enforce the exact GitHub owner, own full-scope Google Drive OAuth, constrain all file operations to `NXT-ASERDARGUN-COM` or `NXT-PRIVATE-COM`, and expose immutable allowlisted public snapshots. IndexedDB protects unsynced browser drafts; Google Drive remains the sole canonical persistent store.
 
-**Tech Stack:** Node.js 22, pnpm 11.22.0, TypeScript 5.9.3, React 19.2.8, Vite 8.2.2, Azure Functions Node programming model v4, CodeMirror 6, unified/remark/rehype, Zod 4.4.3, Google Drive API v3, MiniSearch 7.2.0, IndexedDB via idb 8.0.3, Vitest 4.1.11, Playwright 1.62.1, and Azure Static Web Apps CLI 2.0.10.
+**Tech Stack:** Node.js 22, pnpm 11.22.0, TypeScript 5.9.3, React 19.2.8, Vite 8.2.2, Azure Functions Node programming model v4, CodeMirror 6, unified/remark/rehype, Zod 4.4.3, Google Drive API v3 with a bounded v2 ETag compatibility bridge for conditional mutations, MiniSearch 7.2.0, IndexedDB via idb 8.0.3, Vitest 4.1.11, Playwright 1.62.1, and Azure Static Web Apps CLI 2.0.10.
 
 **Spec:** `docs/superpowers/specs/2026-08-23-nxt-markdown-vault-design.md`
 
@@ -696,7 +696,7 @@ NXT_PUBLICATION_MANIFEST_DRIVE_FILE_ID
 
 - [ ] **Step 5: Implement the Google Drive adapter**
 
-Add `googleapis@176.0.0` to `api/package.json` dependencies. Escape Drive query literals. Request only required fields. Convert Drive's monotonically increasing `version` to the `StoragePort` string version. Use multipart upload for text and byte updates; immediately read back `id,name,mimeType,parents,version,modifiedTime,size,trashed` and a checksum. Retry only idempotent reads on `429`, `500`, `502`, `503`, and `504` with bounded exponential backoff and jitter.
+Add `googleapis@176.0.0` to `api/package.json` dependencies. Escape Drive query literals. Request only required fields. Convert Drive's monotonically increasing `version` to the `StoragePort` string version. Use Drive v3 for ordinary reads/creates/lists/revisions. Because v3 omits resource ETags, bind the exact v2 `id,etag,version` token to a matching v3 snapshot before a conditional mutation. Use v2 `files.update` for preconditioned media uploads and v2 `files.patch` for metadata-only changes. Disable write retries, map `412` to a version conflict, wait for a stable post-write version, and then validate `id,name,mimeType,parents,version,modifiedTime,size,trashed` plus checksum. Retry only idempotent reads on `429`, `500`, `502`, `503`, and `504` with bounded exponential backoff and jitter.
 
 Do not call `files.delete` or `emptyTrash`. Implement `trash` through `files.update({ requestBody: { trashed: true } })`.
 
