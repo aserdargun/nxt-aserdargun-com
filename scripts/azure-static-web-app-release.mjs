@@ -31,6 +31,11 @@ const settingKeys = Object.freeze([
   "NXT_PUBLICATION_MANIFEST_DRIVE_FILE_ID"
 ]);
 const settingKeySet = new Set(settingKeys);
+const operatorOnlyKeySet = new Set([
+  "NXT_ALLOWED_GOOGLE_EMAIL",
+  "NXT_INTEGRATION_TEST_DRIVE_FOLDER_ID"
+]);
+const admittedKeySet = new Set([...settingKeySet, ...operatorOnlyKeySet]);
 
 const refuse = (message) => new Error(`Refusing Azure release: ${message}.`);
 const safeString = (value) => typeof value === "string" ? value : "";
@@ -65,16 +70,18 @@ export const readReleaseEnvironment = async (envFile, { openFile = open } = {}) 
     await handle.close().catch(() => undefined);
   }
   const values = {};
+  const seenKeys = new Set();
   for (const raw of source.split("\n")) {
     if (raw === "" || raw.startsWith("#")) continue;
     const separator = raw.indexOf("=");
     if (separator <= 0) throw refuse("environment line is invalid");
     const key = raw.slice(0, separator);
     const value = raw.slice(separator + 1);
-    if (!settingKeySet.has(key)) throw refuse("environment key is unknown");
-    if (Object.hasOwn(values, key)) throw refuse("environment key is duplicated");
+    if (!admittedKeySet.has(key)) throw refuse("environment key is unknown");
+    if (seenKeys.has(key)) throw refuse("environment key is duplicated");
+    seenKeys.add(key);
     if (value.trim() === "" || Buffer.byteLength(value) > MAX_VALUE_BYTES || containsControls(value)) throw refuse("environment value is invalid");
-    values[key] = value;
+    if (settingKeySet.has(key)) values[key] = value;
   }
   if (Object.keys(values).length !== settingKeys.length || settingKeys.some((key) => !Object.hasOwn(values, key))) throw refuse("environment keys are incomplete");
   if (values.NXT_ALLOWED_GITHUB_USER !== "aserdargun") throw refuse("exact GitHub owner is required");

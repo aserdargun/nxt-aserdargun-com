@@ -360,6 +360,8 @@ test("Azure env admission refuses symlinks, wrong modes, unknown/local keys, dup
   const envFile = join(directory, ".env.local");
   await writeFile(envFile, source(), { mode: 0o600 });
   assert.deepEqual(await readReleaseEnvironment(envFile), settings);
+  await writeFile(envFile, `${source()}NXT_ALLOWED_GOOGLE_EMAIL=owner@example.invalid\nNXT_INTEGRATION_TEST_DRIVE_FOLDER_ID=integration-folder-id\n`, { mode: 0o600 });
+  assert.deepEqual(await readReleaseEnvironment(envFile), settings);
   await chmod(envFile, 0o644);
   await assert.rejects(readReleaseEnvironment(envFile), /mode 0600/u);
   await chmod(envFile, 0o600);
