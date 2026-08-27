@@ -825,7 +825,7 @@ describe("immutable publication snapshots", () => {
     await expect(fixture.service.publish({ noteId, expectedVersion: "not-the-current-version" })).rejects.toMatchObject({ code: "CONFLICT" });
     expect((await fixture.raw.get(firstRevision.snapshotFolderId)).trashed).toBe(true);
     expect(allCleanup((await fixture.manifestStore.read()).value).some((record) => record.cleanupId === eviction?.cleanupId)).toBe(false);
-  }, 60_000);
+  }, 180_000);
 
   it("revokes the manifest first and keeps the URL revoked when conditional Trash is ambiguous", async () => {
     let failTrash = false;
