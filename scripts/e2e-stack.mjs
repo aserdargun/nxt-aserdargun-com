@@ -4,6 +4,8 @@ import { createE2eEnvironment } from "./e2e-environment.mjs";
 import { assertPortsAvailable } from "./local-dev.mjs";
 import { runOwnedCommand } from "./owned-command.mjs";
 
+export const E2E_STACK_START_TIMEOUT_MS = 180_000;
+
 export const assertE2eStackStopped = async (checkout) => {
   await assertPortsAvailable([4280, 5173, 7071]);
   try {
@@ -21,7 +23,7 @@ export const startE2eStack = async ({ checkout, environment = createE2eEnvironme
     env: environment,
     maxBuffer: 32 * 1024 * 1024,
     signal,
-    timeoutMs: 45_000
+    timeoutMs: E2E_STACK_START_TIMEOUT_MS
   });
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);

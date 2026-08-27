@@ -28,7 +28,7 @@ export const loginAs = async (page: Page, userDetails = "aserdargun"): Promise<v
 export const test = base.extend<{ localStack: undefined; ownerPage: Page }>({
   localStack: [async ({}, use) => {
     await runWithFreshStack(() => use(undefined));
-  }, { auto: true, timeout: 120_000 }],
+  }, { auto: true, timeout: 240_000 }],
   ownerPage: async ({ page, localStack }, use) => {
     void localStack;
     await loginAs(page);

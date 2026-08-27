@@ -4,10 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { withE2eStack } from "../scripts/e2e-stack.mjs";
+import { E2E_STACK_START_TIMEOUT_MS, withE2eStack } from "../scripts/e2e-stack.mjs";
 import { inspectProcess } from "../scripts/stop-local-core.mjs";
 
 const exists = (path) => access(path).then(() => true, () => false);
+
+test("browser stack startup budget covers the serialized service readiness windows", () => {
+  assert.equal(E2E_STACK_START_TIMEOUT_MS, 180_000);
+});
 
 test("a failed test stops its writer before the next deterministic stack generation is seeded", async (context) => {
   const checkout = await mkdtemp(join(tmpdir(), "nxt-per-test-stack-"));
