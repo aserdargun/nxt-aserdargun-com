@@ -110,5 +110,8 @@ test("release identity accepts only a clean exact main checkout and exact origin
 
   await writeFile(join(exact, "untracked.txt"), "dirty\n");
   await assert.rejects(verifyReleaseIdentity({ checkoutPath: exact }), /clean exact release checkout/u);
-  await assert.rejects(verifyReleaseIdentity({ checkoutPath: checkout }), /exact release checkout/u);
+  await assert.rejects(
+    verifyReleaseIdentity({ checkoutPath: join(exact, ".github") }),
+    /exact release checkout/u
+  );
 });
