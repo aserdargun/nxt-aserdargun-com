@@ -34,6 +34,7 @@ test("PR and deployment workflows pin permissions, platforms, gates, and prebuil
   assert.deepEqual(Object.keys(ci.on).sort(), ["pull_request", "workflow_dispatch"]);
   assert.deepEqual(ci.permissions, { contents: "read" });
   assert.equal(ci.jobs.portable["runs-on"], "ubuntu-latest");
+  assert.deepEqual(ci.jobs.portable.env, { NXT_VITEST_MAX_WORKERS: "1" });
   assert.equal(ci.jobs.macos_acceptance["runs-on"], "macos-latest");
   assert.deepEqual(ci.jobs.macos_acceptance.env, {
     NODE_OPTIONS: "--max-old-space-size=4096",
@@ -47,12 +48,14 @@ test("PR and deployment workflows pin permissions, platforms, gates, and prebuil
   assert.deepEqual(deploy.on.push.branches, ["main"]);
   assert.deepEqual(deploy.permissions, { contents: "read" });
   assert.deepEqual(deploy.concurrency, { group: "swa-nxt-aserdargun-com-production", "cancel-in-progress": false });
+  assert.deepEqual(deploy.jobs.portable.env, { NXT_VITEST_MAX_WORKERS: "1" });
   assert.deepEqual(deploy.jobs.deploy.needs, ["portable", "macos_acceptance"]);
   assert.deepEqual(deploy.jobs.macos_acceptance.env, {
     NODE_OPTIONS: "--max-old-space-size=4096",
     NXT_VITEST_MAX_WORKERS: "1"
   });
   assert.equal(deploy.jobs.deploy.if, "github.ref == 'refs/heads/main'");
+  assert.deepEqual(deploy.jobs.deploy.env, { NXT_VITEST_MAX_WORKERS: "1" });
   const upload = deploy.jobs.deploy.steps.find((step) => step.name === "Deploy prebuilt artifacts");
   assert.deepEqual(upload.with, {
     azure_static_web_apps_api_token: "${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_SWA_NXT_ASERDARGUN_COM }}",
