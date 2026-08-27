@@ -269,3 +269,7 @@ git diff --check: PASS
 ```
 
 `web/tsconfig.tsbuildinfo` was restored. Checkout-owned Stop reported already stopped; ports `4280`, `5173`, and `7071` had no listeners; `.nxt-local` was absent; and the lifecycle/E2E Node-process probe returned empty. Only fake runners and disposable filesystem fixtures were used. No live Azure, Google, Drive, GitHub, DNS, remote, workflow, deployment, push, or root-checkout operation ran, and custom-domain work remains unstarted.
+
+### Independent final re-review
+
+The fix-round-3 independent re-review is **CLEAN** with zero Critical, Important, or Minor findings. The reviewer reran the deployment, Azure, backup, and project contracts (`19/19`) under Node `22.23.1` with live external variables unset, reran source deployment verification, and confirmed that all earlier findings remain closed. The retained-inode truncation and the explicitly documented quiescent POSIX cleanup boundary match the final source. Worktree, generated state, project ports, and processes remained clean.
