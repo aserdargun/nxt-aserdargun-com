@@ -1,0 +1,82 @@
+# NXT Security Model
+
+## Assets and trust boundaries
+
+Protected assets include Markdown, attachments, preferences, vault index, publication manifest/snapshots, Google OAuth values, Drive IDs, the Azure deployment token, application settings, and checkout lifecycle ownership state.
+
+Trust boundaries are:
+
+- anonymous browser to the public snapshot API;
+- authenticated SWA principal to the exact-owner API;
+- Functions to Google Drive;
+- local operator to ignored mode-`0600` credentials;
+- GitHub Actions to the prebuilt Azure upload token;
+- backup adapter to a new protected offline directory.
+
+## GitHub exact-owner defense
+
+Azure's `authenticated` role only proves that some provider identity signed in. Private handlers also parse the SWA principal, require GitHub provider semantics, validate the closed identity shape, and compare the normalized username with exact configured owner `aserdargun`. Malformed, missing in production, wrong-provider, and wrong-owner principals fail closed.
+
+The local bypass is not an alternative production identity. It is accepted only when the principal header is absent, the Functions process is Development, and the launcher supplies exact local fixture/control/attestation evidence. A supplied principal always follows normal owner verification. Build, Vite, and SWA children never receive the bypass.
+
+## Google OAuth and full Drive scope
+
+NXT currently requires `https://www.googleapis.com/auth/drive` to support owner-approved create/update/move-to-Trash operations and private system/publication state. A narrower file-picker-only scope cannot maintain the selected dedicated hierarchy and recover existing files after reauthorization.
+
+Mitigations:
+
+- Desktop-app OAuth only; no web client secret embedded in the browser.
+- Exact `127.0.0.1` high-port callback, PKCE, state, callback host/path, and owner-email verification.
+- Two dedicated exact roots and stored-ID/root ancestry checks on every operation.
+- No sharing/permission mutation path.
+- Bounded pagination, calls, bytes, entries, confirmations, and optimistic version checks.
+- Three validated private system files rather than broad Drive discovery.
+- Read-back metadata/checksum verification after mutations.
+- Redaction-safe CLI output and ignored mode-`0600` local credentials.
+
+An External Google consent screen left in Testing can limit a Drive-scope refresh token to seven days. Durable publication requires an eligible Internal consent configuration or External consent moved to Production/published status before a new refresh token is issued. Token status is an operator release gate.
+
+## Secrets and release settings
+
+`.env.local` must be a canonical regular non-symlink mode-`0600` file and is ignored by Git. The manual Azure release tool accepts only the closed production key set, rejects duplicates/unknown/local/test/control/empty/oversized values, repeats exact release identity, and validates the enabled subscription plus exact Ready Free SWA with zero custom hostnames.
+
+The Azure settings subprocess uses `--only-show-errors --output none`. The tool discards/redacts child diagnostics on failure and reports only state plus sorted key names. It has no `--force`, worktree-basename bypass, or environment-controlled test mode. Tests inject a fake runner through the exported boundary and use sentinel secret values.
+
+The deployment workflow reads only `AZURE_STATIC_WEB_APPS_API_TOKEN_SWA_NXT_ASERDARGUN_COM`. GitHub permissions are `contents: read`; no OIDC/id-token permission or `github_id_token` input exists. Deployment is serialized with cancellation disabled and cannot start until both portable and real macOS acceptance jobs pass.
+
+## CSP, attachments, and public snapshots
+
+Static Web Apps configuration enforces a self-first CSP, no objects, no framing, no base/form escape, no referrer, restricted browser permissions, and MIME sniffing prevention. Attachments are size/name/MIME/signature checked. Structurally proven PNG/JPEG/GIF may render inline; WebP/PDF are conservatively downloaded according to policy; active or unsupported content is forced to safe download or rejected.
+
+Publishing copies an immutable source snapshot and only referenced, verified attachments into the private publication area. The anonymous API resolves an opaque public ID through the allowlisted manifest, returns generic redacted not-found responses, and never exposes owner/Drive/snapshot identifiers. Revocation removes manifest reachability. The public route imports no owner shell and sends no private/session request.
+
+## Backup and recovery safety
+
+Drive inventory is read-only. It refuses missing/duplicate/overlapping roots, Google-native exports, malformed metadata, ancestry ambiguity, pagination cycles, duplicate/cyclic IDs, unsafe/ambiguous normalized paths, unknown checksums, and size/operation bounds. Export filenames are SHA-256 hashes of Drive IDs, so a Drive name cannot traverse or overwrite the operator destination. Original paths remain only inside the protected manifest.
+
+Creation requires a new canonical destination and never overwrites prior backups. Partial creation retains an explicit incomplete marker. Offline verification uses lstat plus `O_NOFOLLOW`, validates mode/schema/root/parent/path/count invariants, rejects symlink/special/extra/missing files, and verifies Drive MD5 plus local SHA-256 evidence. Metadata-only records must have no exported file.
+
+The backup tool has no Drive create/update/delete/trash/share method. Restoration is a separately authorized, reviewed operation after offline verification and exact owner/root confirmation.
+
+## Rotation
+
+- Google OAuth: revoke the old grant, rotate client secret if necessary, authorize the exact Desktop client and owner again, prove both roots/system files, update Azure manually, and create a new verified inventory.
+- Azure deployment token: rotate in the exact SWA, update only the exact GitHub Actions secret, then correlate a new main workflow run with the generated host.
+- GitHub identity: stop private access before changing the configured exact owner; review SWA provider claims and callbacks before restoring.
+- Public snapshot incident: revoke the manifest entry, preserve hashes/timestamps, inspect referenced assets, rotate affected credentials, and republish only from a verified saved source.
+
+## Incident recovery
+
+1. Stop the checkout-owned stack or disable the production application path as appropriate.
+2. Revoke affected OAuth/deployment credentials without printing them.
+3. Preserve the last mode-protected inventory and run offline verification.
+4. Inspect exact Drive roots, ownership, ancestry, sharing, system-file schemas, publication manifest, and Azure hostname/settings state.
+5. Restore deliberately from verified evidence; never perform an unreviewed bulk overwrite.
+6. Re-run unit/static/lifecycle/browser gates, Drive health/integration, generated-host HTTP/MIME/auth checks, and a new backup verification.
+7. Record rotated key names, timestamps, and outcomes—not secret values.
+
+## Explicit non-goals and stop boundary
+
+Task 16 does not access or mutate live Drive, GitHub, Azure, DNS, remotes, workflows, secrets, or deployments. Task 17/18 require fresh exact target display and action-time authorization.
+
+Custom domains are out of scope. Stop before Azure custom hostname, `_dnsauth` TXT, CNAME/A/AAAA/ALIAS, IHS/e-destek, certificate, nameserver, apex, `www`, or mail changes. Those actions require the separate domain workflow and a new confirmation at mutation time.

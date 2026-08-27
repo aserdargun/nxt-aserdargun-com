@@ -19,7 +19,12 @@
     "artifact:verify": "node scripts/verify-artifacts.mjs",
     "dev:codex": "node scripts/local-dev.mjs",
     "stop:codex": "node scripts/stop-local.mjs",
-    "validate:codex": "pnpm lint && pnpm typecheck && pnpm api:build && pnpm web:build && pnpm artifact:verify && pnpm test && pnpm project:test && node --test --test-concurrency=1 tools/static-security.test.mjs tools/artifact-contract.test.mjs tools/local-fixtures.test.mjs tools/e2e-stack.integration.test.mjs tools/e2e-runner.integration.test.mjs tools/local-lifecycle.integration.test.mjs && git diff --check"
+    "deployment:verify": "node scripts/verify-deployment-contract.mjs source",
+    "azure:release": "node scripts/azure-static-web-app-release.mjs",
+    "drive:backup": "node scripts/google-drive-backup.mjs",
+    "validate:ci": "pnpm lint && pnpm typecheck && pnpm api:build && pnpm web:build && pnpm artifact:verify && pnpm test && pnpm project:test && node --test --test-concurrency=1 tools/static-security.test.mjs tools/artifact-contract.test.mjs tools/local-fixtures.test.mjs tools/deployment-contract.test.mjs tools/azure-release.test.mjs tools/google-drive-backup.test.mjs && git diff --check",
+    "validate:codex": "pnpm lint && pnpm typecheck && pnpm api:build && pnpm web:build && pnpm artifact:verify && pnpm test && pnpm project:test && node --test --test-concurrency=1 tools/static-security.test.mjs tools/artifact-contract.test.mjs tools/local-fixtures.test.mjs tools/deployment-contract.test.mjs tools/azure-release.test.mjs tools/google-drive-backup.test.mjs tools/e2e-stack.integration.test.mjs tools/e2e-runner.integration.test.mjs tools/local-lifecycle.integration.test.mjs && git diff --check",
+    "validate:macos": "pnpm validate:codex && pnpm e2e"
   },
   "devDependencies": {
     "@axe-core/playwright": "4.13.0",

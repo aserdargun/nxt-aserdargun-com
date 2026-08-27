@@ -20,7 +20,12 @@ test("root contract pins the supported toolchain and lifecycle", async () => {
     "e2e",
     "dev:codex",
     "stop:codex",
-    "validate:codex"
+    "validate:codex",
+    "validate:ci",
+    "validate:macos",
+    "deployment:verify",
+    "azure:release",
+    "drive:backup"
   ]) {
     assert.equal(typeof pkg.scripts[script], "string", `${script} must exist`);
   }
