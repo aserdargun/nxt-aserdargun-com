@@ -254,7 +254,7 @@ export const applyAzureSettings = async ({ envFile, identity, runAz = defaultAzu
   const targetArgs = ["--name", "swa-nxt-aserdargun-com", "--resource-group", "rg-nxt-aserdargun-com", "--only-show-errors", "--output", "json"];
   const app = parseJson(await runChecked(runAz, ["staticwebapp", "show", ...targetArgs], "Azure Static Web App verification"), "Azure Static Web App verification");
   if (safeString(app?.id).toLowerCase() !== expectedResourceId.toLowerCase() || app?.name !== "swa-nxt-aserdargun-com" || app?.resourceGroup !== "rg-nxt-aserdargun-com" ||
-      (app?.provisioningState !== null && app?.provisioningState !== "Succeeded") ||
+      (app?.provisioningState !== undefined && app?.provisioningState !== null && app?.provisioningState !== "Succeeded") ||
       app?.sku?.name !== "Free" || safeString(app?.location).replace(/\s+/gu, "").toLowerCase() !== "westeurope" ||
       typeof app?.defaultHostname !== "string" || !app.defaultHostname.endsWith(".azurestaticapps.net")) {
     throw refuse("exact Ready Free Static Web App is required");

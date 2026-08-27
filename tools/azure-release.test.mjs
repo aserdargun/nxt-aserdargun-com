@@ -88,7 +88,7 @@ test("manual Azure apply validates exact target and exposes only sorted key name
   assert.deepEqual(await readdir(temporaryParent), []);
 });
 
-test("Azure apply accepts the null provisioning state returned for a verified Static Web App", async (context) => {
+test("Azure apply accepts an omitted provisioning state for a verified Static Web App", async (context) => {
   const { applyAzureSettings } = await loadRelease();
   const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-azure-null-provisioning-")));
   context.after(() => rm(directory, { recursive: true, force: true }));
@@ -101,7 +101,7 @@ test("Azure apply accepts the null provisioning state returned for a verified St
     runAz: successRunner([], {
       app: {
         ...validApp,
-        provisioningState: null,
+        provisioningState: undefined,
         repositoryUrl: null,
         branch: null,
         stagingEnvironmentPolicy: "Enabled"
