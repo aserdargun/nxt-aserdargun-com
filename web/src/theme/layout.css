@@ -1064,9 +1064,8 @@ textarea:focus-visible,
 .attachment-card object {
   display: block;
   width: 100%;
-  max-height: 220px;
+  height: auto;
   border: 0;
-  object-fit: contain;
 }
 
 .attachment-download,
