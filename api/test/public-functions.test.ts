@@ -2,6 +2,7 @@ import { HttpRequest } from "@azure/functions";
 import { describe, expect, it, vi } from "vitest";
 import { createPublicAssetHandler } from "../src/functions/public-assets.js";
 import { createPublicNoteHandler } from "../src/functions/public-notes.js";
+import { PublicRequestGate } from "../src/functions/public-http.js";
 import { task7Routes, task8Routes, task9Routes } from "../src/functions/index.js";
 import { createPublicationHandlers } from "../src/functions/publications.js";
 import { ApiResponseError } from "../src/http/api-response.js";
@@ -17,6 +18,33 @@ const request = (method: string, url: string, params: Record<string, string> = {
 });
 
 describe("Task 9 functions", () => {
+  it("bounds anonymous public work by rolling rate and concurrency", () => {
+    let now = 1_000;
+    const gate = new PublicRequestGate({
+      maxConcurrent: 2,
+      maxRequests: 3,
+      windowMs: 100,
+      now: () => now
+    });
+
+    const first = gate.tryAcquire();
+    const second = gate.tryAcquire();
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(gate.tryAcquire()).toBeNull();
+    first?.();
+    first?.();
+    second?.();
+
+    const third = gate.tryAcquire();
+    expect(third).not.toBeNull();
+    third?.();
+    expect(gate.tryAcquire()).toBeNull();
+
+    now += 101;
+    expect(gate.tryAcquire()).not.toBeNull();
+  });
+
   it("registers the Task 13 owner status route while preserving Task 7 and Task 8", () => {
     expect(task7Routes).toHaveLength(12);
     expect(task8Routes).toHaveLength(3);
@@ -128,6 +156,35 @@ describe("Task 9 functions", () => {
       expect(response.headers?.["x-request-id"]).toMatch(/^[0-9a-f-]{36}$/u);
       expect(JSON.stringify(response.jsonBody)).not.toMatch(/drive|manifest|path/iu);
     }
+  });
+
+  it("rejects saturated public routes before resolving Drive-backed readers", async () => {
+    const resolveNoteReader = vi.fn();
+    const resolveAssetReader = vi.fn();
+    const noteHandler = createPublicNoteHandler({
+      resolveReader: resolveNoteReader,
+      admit: () => null
+    });
+    const assetHandler = createPublicAssetHandler({
+      resolveReader: resolveAssetReader,
+      admit: () => null
+    });
+
+    const noteResponse = await noteHandler(request(
+      "GET",
+      `https://nxt.example/api/public/notes/${publicId}`,
+      { publicId }
+    ));
+    const assetResponse = await assetHandler(request(
+      "GET",
+      `https://nxt.example/api/public/assets/${publicId}/${assetId}`,
+      { publicId, assetId }
+    ));
+
+    expect(noteResponse.status).toBe(404);
+    expect(assetResponse.status).toBe(404);
+    expect(resolveNoteReader).not.toHaveBeenCalled();
+    expect(resolveAssetReader).not.toHaveBeenCalled();
   });
 
   it("derives public asset headers from verified delivery and uses a safe RFC5987 filename", async () => {

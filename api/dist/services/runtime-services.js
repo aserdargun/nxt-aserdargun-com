@@ -16,6 +16,7 @@ import { VaultService } from "./vault-service.js";
 import { PublicationService, PublicPublicationReader } from "./publication-service.js";
 import { verifyLocalRuntimeOwnership } from "./local-runtime-ownership.js";
 const GOOGLE_KEYS = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"];
+const MAX_PUBLICATION_MANIFEST_BYTES = 16 * 1024 * 1024;
 let compositionPromise;
 export const resolveTask7Services = () => {
     compositionPromise ??= createRuntimeComposition();
@@ -92,7 +93,14 @@ const createLocalComposition = async () => {
 const compose = (vaultStorage, privateStorage, privateRootId, ids, tokenSecret, opaqueSecrets) => {
     const indexStore = new SystemFileStore({ storage: privateStorage, fileId: ids.index, parentId: privateRootId, name: "vault-index.json", schema: VaultIndexSchema });
     const preferencesStore = new SystemFileStore({ storage: privateStorage, fileId: ids.preferences, parentId: privateRootId, name: "preferences.json", schema: PreferencesSchema });
-    const manifestStore = new SystemFileStore({ storage: privateStorage, fileId: ids.manifest, parentId: privateRootId, name: "publication-manifest.json", schema: PublicationManifestSchema });
+    const manifestStore = new SystemFileStore({
+        storage: privateStorage,
+        fileId: ids.manifest,
+        parentId: privateRootId,
+        name: "publication-manifest.json",
+        schema: PublicationManifestSchema,
+        maxBytes: MAX_PUBLICATION_MANIFEST_BYTES
+    });
     const vault = new VaultService({
         storage: vaultStorage,
         indexStore,

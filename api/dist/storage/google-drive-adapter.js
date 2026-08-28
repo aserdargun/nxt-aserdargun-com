@@ -11,7 +11,8 @@ const MAX_FILE_ID_LENGTH = 512;
 const MAX_PAGE_SIZE = 1000;
 const MAX_READ_ATTEMPTS = 3;
 const BASE_RETRY_DELAY_MS = 50;
-const POST_WRITE_STABILITY_DELAYS_MS = [100, 200, 400];
+const POST_WRITE_STABILITY_DELAYS_MS = [250, 750, 1000, 2000];
+const MIN_POST_WRITE_STABILITY_READ_INDEX = 3;
 const MAX_REVISION_PAGES = 1000;
 const RETRYABLE_READ_STATUSES = new Set([429, 500, 502, 503, 504]);
 export class GoogleDriveAdapter {
@@ -388,7 +389,8 @@ export class GoogleDriveAdapter {
                 const metadata = await this.readMetadata(fileId, context);
                 const version = requireNonEmptyString(requireRecord(metadata).version);
                 assertVersion(version);
-                if (readIndex >= 2 && version === previousVersion) {
+                if (readIndex >= MIN_POST_WRITE_STABILITY_READ_INDEX &&
+                    version === previousVersion) {
                     return metadata;
                 }
                 previousVersion = version;

@@ -139,6 +139,59 @@ describe("SystemFileStore", () => {
     await expect(validStore.update({ schemaVersion: 2, entries: [] } as never))
       .rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
   });
+
+  it("rejects an oversized version-cached system file before reading its body", async () => {
+    const { raw, ids } = await setup();
+    let bodyReads = 0;
+    const storage = {
+      ...raw,
+      get: raw.get.bind(raw),
+      readText: async (fileId: string) => {
+        bodyReads += 1;
+        return raw.readText(fileId);
+      }
+    } as StoragePort;
+    const boundedStore = new SystemFileStore({
+      storage,
+      fileId: ids.index.id,
+      parentId: "private",
+      name: "vault-index.json",
+      schema: VaultIndexSchema,
+      maxBytes: 16
+    });
+
+    await expect(boundedStore.readVersionCached()).rejects.toMatchObject({
+      code: "DRIVE_UNAVAILABLE"
+    });
+    expect(bodyReads).toBe(0);
+
+    let bodyWrites = 0;
+    const writeStorage = {
+      ...raw,
+      get: raw.get.bind(raw),
+      readText: raw.readText.bind(raw),
+      updateText: async (input: Parameters<StoragePort["updateText"]>[0]) => {
+        bodyWrites += 1;
+        return raw.updateText(input);
+      }
+    } as StoragePort;
+    const boundedWriteStore = new SystemFileStore({
+      storage: writeStorage,
+      fileId: ids.index.id,
+      parentId: "private",
+      name: "vault-index.json",
+      schema: VaultIndexSchema,
+      maxBytes: 64
+    });
+    expect(new TextEncoder().encode(boundedWriteStore.prepare({
+      schemaVersion: 1,
+      entries: []
+    }).source).byteLength).toBeGreaterThan(64);
+
+    await expect(boundedWriteStore.update({ schemaVersion: 1, entries: [] }))
+      .rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+    expect(bodyWrites).toBe(0);
+  });
 });
 
 describe("VaultService notes", () => {

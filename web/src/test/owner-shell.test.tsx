@@ -439,4 +439,24 @@ describe("production bundle boundary", () => {
       await rm(outputDirectory, { recursive: true, force: true });
     }
   });
+
+  it("keeps the owner workspace out of the anonymous entry bundle", async () => {
+    const outputDirectory = await mkdtemp(join(tmpdir(), "nxt-web-entry-"));
+    try {
+      await build({
+        root: WEB_ROOT,
+        configFile: resolve(WEB_ROOT, "vite.config.ts"),
+        logLevel: "silent",
+        build: { outDir: outputDirectory, emptyOutDir: true }
+      });
+      const html = await readFile(join(outputDirectory, "index.html"), "utf8");
+      const entryPath = html.match(/<script[^>]+src="([^"]+)"/u)?.[1];
+      if (entryPath === undefined) throw new Error("Production entry script is missing.");
+      const entry = await readFile(join(outputDirectory, entryPath.replace(/^\//u, "")), "utf8");
+
+      expect(entry).not.toContain("owner-shell");
+    } finally {
+      await rm(outputDirectory, { recursive: true, force: true });
+    }
+  });
 });

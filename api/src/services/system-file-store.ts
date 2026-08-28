@@ -29,6 +29,9 @@ export interface PreparedSystemFile<T> {
 }
 
 export class SystemFileStore<T> {
+  private cachedSnapshot: SystemFileSnapshot<T> | undefined;
+  private cachedRead: Promise<SystemFileSnapshot<T>> | undefined;
+
   public constructor(
     private readonly options: {
       storage: StoragePort;
@@ -36,23 +39,60 @@ export class SystemFileStore<T> {
       parentId: string;
       name: string;
       schema: RuntimeSchema<T>;
+      maxBytes?: number;
     }
-  ) {}
+  ) {
+    if (
+      options.maxBytes !== undefined &&
+      (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 1)
+    ) throw new Error("invalid system file byte limit");
+  }
+
+  public readVersionCached(context?: StorageOperationContext): Promise<SystemFileSnapshot<T>> {
+    this.cachedRead ??= this.readVersionCachedFresh(context).finally(() => {
+      this.cachedRead = undefined;
+    });
+    return this.cachedRead;
+  }
 
   public async read(context?: StorageOperationContext): Promise<SystemFileSnapshot<T>> {
     try {
-      const readback = await this.options.storage.readText(this.options.fileId, context);
-      this.assertPinnedFile(readback.file);
-      this.assertChecksum(readback.text, readback.checksum);
-      return {
-        value: this.options.schema.parse(JSON.parse(readback.text) as unknown),
-        file: readback.file,
-        source: readback.text,
-        checksum: readback.checksum
-      };
+      if (this.options.maxBytes !== undefined) {
+        const metadata = await this.options.storage.get(this.options.fileId, context);
+        this.assertPinnedFile(metadata);
+        this.assertWithinByteLimit(metadata);
+      }
+      return await this.readBody(context);
     } catch (error) {
       throw preserveApiError(error, "DRIVE_UNAVAILABLE");
     }
+  }
+
+  private async readVersionCachedFresh(context?: StorageOperationContext): Promise<SystemFileSnapshot<T>> {
+    try {
+      const file = await this.options.storage.get(this.options.fileId, context);
+      this.assertPinnedFile(file);
+      this.assertWithinByteLimit(file);
+      if (this.cachedSnapshot?.file.version === file.version) return this.cachedSnapshot;
+      const snapshot = await this.readBody(context);
+      this.cachedSnapshot = snapshot;
+      return snapshot;
+    } catch (error) {
+      throw preserveApiError(error, "DRIVE_UNAVAILABLE");
+    }
+  }
+
+  private async readBody(context?: StorageOperationContext): Promise<SystemFileSnapshot<T>> {
+    const readback = await this.options.storage.readText(this.options.fileId, context);
+    this.assertPinnedFile(readback.file);
+    this.assertWithinByteLimit(readback.file, readback.text);
+    this.assertChecksum(readback.text, readback.checksum);
+    return {
+      value: this.options.schema.parse(JSON.parse(readback.text) as unknown),
+      file: readback.file,
+      source: readback.text,
+      checksum: readback.checksum
+    };
   }
 
   public async update(value: T, expectedVersion?: string, context?: StorageOperationContext): Promise<SystemFileSnapshot<T>> {
@@ -62,6 +102,7 @@ export class SystemFileStore<T> {
     }
     const prepared = this.prepare(value);
     const source = prepared.source;
+    this.assertSourceWithinByteLimit(source);
     let updated: StoredFile;
     try {
       updated = await this.options.storage.updateText({
@@ -137,6 +178,23 @@ export class SystemFileStore<T> {
     if (!CHECKSUM.test(checksum) || createHash("sha256").update(source).digest("hex") !== checksum) {
       throw new ApiResponseError("DRIVE_UNAVAILABLE");
     }
+  }
+
+  private assertWithinByteLimit(file: StoredFile, source?: string): void {
+    const maxBytes = this.options.maxBytes;
+    if (
+      maxBytes !== undefined &&
+      (file.size > maxBytes || (source !== undefined && !this.sourceIsWithinByteLimit(source)))
+    ) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+  }
+
+  private assertSourceWithinByteLimit(source: string): void {
+    if (!this.sourceIsWithinByteLimit(source)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+  }
+
+  private sourceIsWithinByteLimit(source: string): boolean {
+    return this.options.maxBytes === undefined ||
+      new TextEncoder().encode(source).byteLength <= this.options.maxBytes;
   }
 }
 

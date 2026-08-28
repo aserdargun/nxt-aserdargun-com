@@ -2,6 +2,9 @@ packages:
   - "web"
   - "api"
   - "packages/*"
+overrides:
+  "@azure/static-web-apps-cli>adm-zip": "0.6.0"
+  "devcert>tmp": "0.2.7"
 allowBuilds:
   esbuild: true
   keytar: false

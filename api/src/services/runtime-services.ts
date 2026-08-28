@@ -18,6 +18,7 @@ import { PublicationService, PublicPublicationReader } from "./publication-servi
 import { verifyLocalRuntimeOwnership } from "./local-runtime-ownership.js";
 
 const GOOGLE_KEYS = ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"] as const;
+const MAX_PUBLICATION_MANIFEST_BYTES = 16 * 1024 * 1024;
 type RuntimeIds = {
   notes: string; inbox: string; plans: string; archive: string; assets: string; published: string;
   index: string; preferences: string; manifest: string;
@@ -127,7 +128,14 @@ const compose = (
 ): RuntimeComposition => {
   const indexStore = new SystemFileStore({ storage: privateStorage, fileId: ids.index, parentId: privateRootId, name: "vault-index.json", schema: VaultIndexSchema });
   const preferencesStore = new SystemFileStore({ storage: privateStorage, fileId: ids.preferences, parentId: privateRootId, name: "preferences.json", schema: PreferencesSchema });
-  const manifestStore = new SystemFileStore({ storage: privateStorage, fileId: ids.manifest, parentId: privateRootId, name: "publication-manifest.json", schema: PublicationManifestSchema });
+  const manifestStore = new SystemFileStore({
+    storage: privateStorage,
+    fileId: ids.manifest,
+    parentId: privateRootId,
+    name: "publication-manifest.json",
+    schema: PublicationManifestSchema,
+    maxBytes: MAX_PUBLICATION_MANIFEST_BYTES
+  });
   const vault = new VaultService({
     storage: vaultStorage,
     indexStore,

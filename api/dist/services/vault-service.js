@@ -77,7 +77,7 @@ export class VaultService {
                 text: source
             });
             await this.markDriveApplied(mutation.id, created.id);
-            const verified = await this.verifyNoteReadback(created.id, source, created.version);
+            const verified = await this.verifyNoteReadback(created.id, source);
             const path = await this.notePath(verified.file);
             await this.finalizeEntry(mutation.id, source, verified.file, path, []);
             return this.result(source, verified.file, path, verified.checksum);
@@ -423,7 +423,7 @@ export class VaultService {
                 written = await this.options.storage.move({ fileId: written.id, fromParentId: parentId, toParentId: parentId, expectedVersion: written.version, newName });
             }
             await this.markDriveApplied(mutation.id, written.id);
-            const verified = await this.verifyNoteReadback(written.id, source, written.version);
+            const verified = await this.verifyNoteReadback(written.id, source);
             const path = await this.notePath(verified.file);
             await this.finalizeEntry(mutation.id, source, verified.file, path, entry.attachments);
             return this.result(source, verified.file, path, verified.checksum);
@@ -499,7 +499,7 @@ export class VaultService {
             await this.checkpointMutation(mutation.id, { moveExpectedVersion: file.version });
             file = await this.options.storage.move({ fileId: file.id, fromParentId, toParentId: input.folderId, expectedVersion: file.version });
             await this.markDriveApplied(mutation.id, file.id);
-            const verified = await this.verifyNoteReadback(file.id, source, file.version);
+            const verified = await this.verifyNoteReadback(file.id, source);
             const path = await this.notePath(verified.file);
             await this.finalizeEntry(mutation.id, source, verified.file, path, entry.attachments);
             return this.result(source, verified.file, path, verified.checksum);
@@ -927,10 +927,10 @@ export class VaultService {
             throw new ApiResponseError("NOT_FOUND");
         return { index, entry };
     }
-    async verifyNoteReadback(fileId, source, expectedVersion) {
+    async verifyNoteReadback(fileId, source) {
         const readback = await this.readNote(fileId);
         this.assertMarkdownFile(readback.file);
-        if (readback.file.version !== expectedVersion || readback.text !== source || readback.checksum !== createHash("sha256").update(source).digest("hex")) {
+        if (readback.text !== source || readback.checksum !== createHash("sha256").update(source).digest("hex")) {
             throw new ApiResponseError("CONFLICT");
         }
         return { file: readback.file, checksum: readback.checksum };

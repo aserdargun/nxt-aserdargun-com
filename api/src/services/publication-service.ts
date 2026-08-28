@@ -1363,17 +1363,16 @@ export class PublicPublicationReader {
         JSON.stringify(parsed.assets) !== JSON.stringify(expectedAssets)
       ) throw new Error("public note projection mismatch");
       if (revision.assets.reduce((total, asset) => total + asset.size, 0) > MAX_PUBLICATION_TOTAL_ASSET_BYTES) throw new Error("public asset snapshot is too large");
-      const safeAssets = [];
-      for (const asset of revision.assets) {
-        const delivery = await this.readVerifiedAsset(publicId, revision, asset, context);
-        safeAssets.push({
-          assetId: asset.assetId,
-          url: `/api/public/assets/${publicId}/${asset.assetId}`,
-          name: delivery.name,
-          mimeType: delivery.mimeType,
-          disposition: delivery.disposition
-        });
-      }
+      const safeAssets = revision.assets.map((asset) => ({
+        assetId: asset.assetId,
+        url: `/api/public/assets/${publicId}/${asset.assetId}`,
+        name: asset.fileName,
+        mimeType: asset.mimeType,
+        disposition: safeAttachmentDisposition(asset.disposition, {
+          mimeType: asset.mimeType,
+          disposition: asset.disposition
+        })
+      }));
       return PublicNoteResponseSchema.parse({ ...parsed, assets: safeAssets });
     } catch {
       return null;
@@ -1386,9 +1385,9 @@ export class PublicPublicationReader {
       this.assertId(assetId);
       const context = this.context();
       const { entry, revision } = await this.resolve(publicId, context);
-      await this.verifySnapshotFolders(entry, revision, context);
       const asset = revision.assets.find((candidate) => candidate.assetId === assetId);
       if (asset === undefined) throw new Error("asset is not allowlisted");
+      await this.verifySnapshotFolders(entry, revision, context);
       return await this.readVerifiedAsset(publicId, revision, asset, context);
     } catch {
       throw new ApiResponseError("NOT_FOUND");
@@ -1429,7 +1428,7 @@ export class PublicPublicationReader {
   }
 
   private async resolve(publicId: string, context: StorageOperationContext): Promise<{ entry: ManifestEntry; revision: PublicationRevision }> {
-    const manifest = await this.options.manifestStore.read(context);
+    const manifest = await this.options.manifestStore.readVersionCached(context);
     const entry = manifest.value.entries.find((candidate) => candidate.publicId === publicId);
     if (entry === undefined) throw new Error("unknown public ID");
     return { entry, revision: activeRevision(entry) };

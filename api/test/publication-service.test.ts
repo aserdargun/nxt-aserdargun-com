@@ -714,6 +714,101 @@ describe("immutable publication snapshots", () => {
     await expect(fixture.reader.getAsset(result.publicId, "A".repeat(22))).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
+  it("serves public note metadata without reading attachment bodies", async () => {
+    const fixture = await setup({ source: sourceFor("Assets", `![included](../../_assets/${noteId}/included.png)`) });
+    await fixture.attachments.upload({ noteId, name: "included.png", declaredMime: "image/png", bytes: png });
+    const result = await publishCurrent(fixture);
+    const manifest = (await fixture.manifestStore.read()).value;
+    const entry = manifest.entries[0];
+    const revision = entry?.revisions.find((candidate) => candidate.revisionId === entry.activeRevisionId);
+    const assetSnapshotId = revision?.assets[0]?.snapshotDriveId;
+    if (assetSnapshotId === undefined) throw new Error("missing public asset fixture");
+    const reader = new PublicPublicationReader({
+      storage: delegateStorage(fixture.privateStorage, {
+        readBytes: async (fileId, context) => {
+          if (fileId === assetSnapshotId) throw new Error("attachment body read during note metadata request");
+          return fixture.privateStorage.readBytes(fileId, context);
+        }
+      }),
+      manifestStore: fixture.manifestStore,
+      privateRootId: "private",
+      publishedRootId: fixture.ids.published.id
+    });
+
+    await expect(reader.getNote(result.publicId)).resolves.toMatchObject({
+      title: "Assets",
+      assets: [{ name: "included.png", mimeType: "image/png", disposition: "inline" }]
+    });
+  });
+
+  it("rejects an unallowlisted public asset before verifying snapshot folders", async () => {
+    const fixture = await setup({ source: sourceFor("Assets", `![included](../../_assets/${noteId}/included.png)`) });
+    await fixture.attachments.upload({ noteId, name: "included.png", declaredMime: "image/png", bytes: png });
+    const result = await publishCurrent(fixture);
+    const manifest = (await fixture.manifestStore.read()).value;
+    const entry = manifest.entries[0];
+    const revision = entry?.revisions.find((candidate) => candidate.revisionId === entry.activeRevisionId);
+    if (entry === undefined || revision === undefined) throw new Error("missing public asset fixture");
+    const folderIds = new Set([
+      fixture.ids.published.id,
+      entry.publicFolderId,
+      revision.snapshotFolderId,
+      revision.assetsFolderId
+    ]);
+    const verifiedFolders: string[] = [];
+    const reader = new PublicPublicationReader({
+      storage: delegateStorage(fixture.privateStorage, {
+        get: async (fileId, context) => {
+          if (folderIds.has(fileId)) verifiedFolders.push(fileId);
+          return fixture.privateStorage.get(fileId, context);
+        }
+      }),
+      manifestStore: fixture.manifestStore,
+      privateRootId: "private",
+      publishedRootId: fixture.ids.published.id
+    });
+
+    await expect(reader.getAsset(result.publicId, "A".repeat(22))).rejects.toMatchObject({
+      code: "NOT_FOUND"
+    });
+    expect(verifiedFolders).toEqual([]);
+  });
+
+  it("coalesces public manifest bodies and refreshes the cache by exact Drive version", async () => {
+    const fixture = await setup();
+    let manifestBodyReads = 0;
+    const manifestStore = new SystemFileStore<PublicationManifest>({
+      storage: delegateStorage(fixture.privateStorage, {
+        readText: async (fileId, context) => {
+          if (fileId === fixture.ids.manifestFile.id) manifestBodyReads += 1;
+          return fixture.privateStorage.readText(fileId, context);
+        }
+      }),
+      fileId: fixture.ids.manifestFile.id,
+      parentId: "private",
+      name: "publication-manifest.json",
+      schema: PublicationManifestSchema
+    });
+    const reader = new PublicPublicationReader({
+      storage: fixture.privateStorage,
+      manifestStore,
+      privateRootId: "private",
+      publishedRootId: fixture.ids.published.id
+    });
+
+    await Promise.all([
+      reader.getNote("X".repeat(22)),
+      reader.getNote("Y".repeat(22)),
+      reader.getNote("Z".repeat(22))
+    ]);
+    await reader.getNote("W".repeat(22));
+    expect(manifestBodyReads).toBe(1);
+
+    const publication = await publishCurrent(fixture);
+    await expect(reader.getNote(publication.publicId)).resolves.toMatchObject({ title: "Share me" });
+    expect(manifestBodyReads).toBe(2);
+  });
+
   it("rejects a preexisting public asset URL that is not part of this snapshot allowlist", async () => {
     const fixture = await setup({ source: sourceFor("Probe", `![probe](/api/public/assets/${"A".repeat(22)}/${"B".repeat(22)})`) });
     await expect(publishCurrent(fixture)).rejects.toMatchObject({ code: "INVALID_INPUT" });

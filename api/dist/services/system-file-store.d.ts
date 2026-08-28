@@ -16,14 +16,20 @@ export interface PreparedSystemFile<T> {
 }
 export declare class SystemFileStore<T> {
     private readonly options;
+    private cachedSnapshot;
+    private cachedRead;
     constructor(options: {
         storage: StoragePort;
         fileId: string;
         parentId: string;
         name: string;
         schema: RuntimeSchema<T>;
+        maxBytes?: number;
     });
+    readVersionCached(context?: StorageOperationContext): Promise<SystemFileSnapshot<T>>;
     read(context?: StorageOperationContext): Promise<SystemFileSnapshot<T>>;
+    private readVersionCachedFresh;
+    private readBody;
     update(value: T, expectedVersion?: string, context?: StorageOperationContext): Promise<SystemFileSnapshot<T>>;
     prepare(value: T): PreparedSystemFile<T>;
     compareAndSet(transform: (current: T) => T, options?: {
@@ -32,6 +38,9 @@ export declare class SystemFileStore<T> {
     }): Promise<SystemFileSnapshot<T>>;
     private assertPinnedFile;
     private assertChecksum;
+    private assertWithinByteLimit;
+    private assertSourceWithinByteLimit;
+    private sourceIsWithinByteLimit;
 }
 export declare const preserveApiError: (error: unknown, fallback: ConstructorParameters<typeof ApiResponseError>[0]) => Error;
 //# sourceMappingURL=system-file-store.d.ts.map
