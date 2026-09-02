@@ -737,15 +737,16 @@ textarea:focus-visible,
 
 .folder-actions {
   position: relative;
-  flex: 0 0 36px;
+  flex: 0 0 44px;
 }
 
 .folder-actions-trigger {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  min-width: 36px;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
   color: var(--muted);
 }
 
@@ -757,7 +758,7 @@ textarea:focus-visible,
 
 .folder-menu {
   position: absolute;
-  top: 38px;
+  top: 46px;
   right: 4px;
   z-index: 24;
   width: min(230px, calc(100vw - 32px));
@@ -809,7 +810,8 @@ textarea:focus-visible,
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 32px;
+  min-height: 44px;
+  min-width: 44px;
   padding: 0 10px;
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -833,15 +835,16 @@ textarea:focus-visible,
 
 .note-actions {
   position: relative;
-  flex: 0 0 36px;
+  flex: 0 0 44px;
 }
 
 .note-actions-trigger {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  min-width: 36px;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
   color: var(--muted);
 }
 
@@ -853,7 +856,7 @@ textarea:focus-visible,
 
 .note-menu {
   position: absolute;
-  top: 38px;
+  top: 46px;
   right: 4px;
   z-index: 24;
   width: min(230px, calc(100vw - 32px));
