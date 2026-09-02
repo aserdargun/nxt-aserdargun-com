@@ -49,17 +49,15 @@ import {
 } from "../api/vault";
 import type { DraftStore } from "../editor/draft-store";
 import type { AttachmentInsertion, EditorWorkspaceState } from "../editor/editor-workspace";
-import { AttachmentPicker } from "../editor/attachment-picker";
-import { AttachmentView } from "../editor/attachment-view";
 import type { SaveStatus } from "../editor/use-autosave";
 import type { KnowledgeLink } from "../explorer/backlinks-panel";
 import { useCommandPaletteShortcut } from "../explorer/command-palette-shortcut";
 import type { CommandPaletteAction } from "../explorer/command-palette";
-import {
-  ExplorerOperationDialog,
-  type ExplorerOperation,
-  type ExplorerOperationValue
+import type {
+  ExplorerOperation,
+  ExplorerOperationValue
 } from "../explorer/explorer-operation-dialog";
+import { ExplorerOperationDialog } from "../explorer/explorer-operation-dialog";
 import { FavoritesPanel } from "../explorer/favorites-panel";
 import {
   buildExplorerTree,
@@ -69,8 +67,6 @@ import {
   type NoteExplorerNode
 } from "../explorer/file-tree";
 import { TagsPanel } from "../explorer/tags-panel";
-import { PublishDialog } from "../publication/publish-dialog";
-import { PublicationStatus } from "../publication/publication-status";
 
 const EditorWorkspace = lazy(async () => {
   const module = await import("../editor/editor-workspace");
@@ -85,6 +81,26 @@ const SearchPanel = lazy(async () => {
 const CommandPalette = lazy(async () => {
   const module = await import("../explorer/command-palette");
   return { default: module.CommandPalette };
+});
+
+const AttachmentPicker = lazy(async () => {
+  const module = await import("../editor/attachment-picker");
+  return { default: module.AttachmentPicker };
+});
+
+const AttachmentView = lazy(async () => {
+  const module = await import("../editor/attachment-view");
+  return { default: module.AttachmentView };
+});
+
+const PublishDialog = lazy(async () => {
+  const module = await import("../publication/publish-dialog");
+  return { default: module.PublishDialog };
+});
+
+const PublicationStatus = lazy(async () => {
+  const module = await import("../publication/publication-status");
+  return { default: module.PublicationStatus };
 });
 
 type Destination = "files" | "editor" | "preview" | "info";
@@ -1109,12 +1125,19 @@ export const OwnerShell = ({
       <span>Add attachment</span>
     </button>
   ) : (
-    <AttachmentPicker
-      noteId={noteId}
-      client={attachmentApi}
-      disabledReason={attachmentDisabledReason}
-      onUploaded={completeAttachmentUpload}
-    />
+    <Suspense fallback={
+      <button className="text-action touch-target" type="button" disabled aria-busy="true" title="Loading attachment picker">
+        <Paperclip size={19} strokeWidth={1.75} aria-hidden />
+        <span>Add attachment</span>
+      </button>
+    }>
+      <AttachmentPicker
+        noteId={noteId}
+        client={attachmentApi}
+        disabledReason={attachmentDisabledReason}
+        onUploaded={completeAttachmentUpload}
+      />
+    </Suspense>
   );
   const publicationAction = (
     <button
@@ -1134,14 +1157,18 @@ export const OwnerShell = ({
   ) : (
     <div className="attachment-list">
       {selectedEntry.attachments.map((attachment) => (
-        <AttachmentView
-          attachment={attachment}
+        <Suspense
           key={attachment.assetId}
-          onTrash={async (assetId) => {
-            await attachmentApi.trash(assetId);
-            await refreshVault();
-          }}
-        />
+          fallback={<div className="attachment-card-skeleton" aria-busy="true" />}
+        >
+          <AttachmentView
+            attachment={attachment}
+            onTrash={async (assetId) => {
+              await attachmentApi.trash(assetId);
+              await refreshVault();
+            }}
+          />
+        </Suspense>
       ))}
     </div>
   );
@@ -1152,17 +1179,19 @@ export const OwnerShell = ({
   ) : currentPublication === null ? (
     <p className="empty-info">Not published</p>
   ) : (
-    <PublicationStatus
-      status={currentPublication}
-      client={publicationApi}
-      revokeOpen={revokeOpen}
-      onRevokeOpenChange={setRevokeOpen}
-      onRevoked={async () => {
-        await refreshVault();
-        publishTriggerRef.current?.focus();
-        setPublicationState({ noteId: noteId ?? null, loading: false, status: null, error: false });
-      }}
-    />
+    <Suspense fallback={<div className="publication-status-skeleton" aria-busy="true" />}>
+      <PublicationStatus
+        status={currentPublication}
+        client={publicationApi}
+        revokeOpen={revokeOpen}
+        onRevokeOpenChange={setRevokeOpen}
+        onRevoked={async () => {
+          await refreshVault();
+          publishTriggerRef.current?.focus();
+          setPublicationState({ noteId: noteId ?? null, loading: false, status: null, error: false });
+        }}
+      />
+    </Suspense>
   );
 
   return (
@@ -1258,19 +1287,21 @@ export const OwnerShell = ({
         />
       </Suspense>
       {!editorIsSaved || noteId === undefined || editorState.version === null ? null : (
-        <PublishDialog
-          open={publishOpen}
-          onOpenChange={setPublishOpen}
-          noteId={noteId}
-          sourceVersion={editorState.version}
-          attachmentCount={referencedAttachmentCount}
-          client={publicationApi}
-          onPublished={async (status) => {
-            setPublicationState({ noteId, loading: false, status, error: false });
-            await refreshVault();
-            setActiveDestination("info");
-          }}
-        />
+        <Suspense fallback={null}>
+          <PublishDialog
+            open={publishOpen}
+            onOpenChange={setPublishOpen}
+            noteId={noteId}
+            sourceVersion={editorState.version}
+            attachmentCount={referencedAttachmentCount}
+            client={publicationApi}
+            onPublished={async (status) => {
+              setPublicationState({ noteId, loading: false, status, error: false });
+              await refreshVault();
+              setActiveDestination("info");
+            }}
+          />
+        </Suspense>
       )}
       {pendingOperation === null || vault === undefined ? null : (
         <ExplorerOperationDialog
