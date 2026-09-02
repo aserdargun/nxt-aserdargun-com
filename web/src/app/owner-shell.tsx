@@ -37,6 +37,7 @@ import {
   type ComponentType
 } from "react";
 import { notesClient, type NotesClient } from "../api/notes";
+import type { ArchiveNoteRequest } from "@nxt/contracts";
 import { attachmentClient, type AttachmentClient, type UploadedAttachment } from "../api/attachments";
 import { publicationClient, type PublicationClient } from "../api/publications";
 import {
@@ -64,7 +65,8 @@ import {
   buildExplorerTree,
   FileTree,
   type FileTreeProps,
-  type FolderExplorerNode
+  type FolderExplorerNode,
+  type NoteExplorerNode
 } from "../explorer/file-tree";
 import { TagsPanel } from "../explorer/tags-panel";
 import { PublishDialog } from "../publication/publish-dialog";
@@ -310,6 +312,13 @@ const VaultExplorerRegion = ({
   onMoveFolder,
   onArchiveFolder,
   onTrashFolder,
+  onRenameNote,
+  onMoveNote,
+  onArchiveNote,
+  onTrashNote,
+  onNewNote,
+  onNewFolder,
+  newActionsDisabledReason,
   now
 }: {
   readonly hidden: boolean;
@@ -320,6 +329,13 @@ const VaultExplorerRegion = ({
   readonly onMoveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onTrashFolder?: FileTreeProps["onTrashFolder"];
+  readonly onRenameNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onMoveNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onArchiveNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onTrashNote?: FileTreeProps["onTrashNote"];
+  readonly onNewNote?: ((parentId: string | null) => void) | undefined;
+  readonly onNewFolder?: ((parentId: string | null) => void) | undefined;
+  readonly newActionsDisabledReason?: string | null | undefined;
   readonly now?: (() => Date) | undefined;
 }): React.JSX.Element => {
   const [requestedSearch, setRequestedSearch] = useState<string | undefined>();
@@ -379,6 +395,13 @@ const VaultExplorerRegion = ({
             onMoveFolder={onMoveFolder}
             onArchiveFolder={onArchiveFolder}
             onTrashFolder={onTrashFolder}
+            onRenameNote={onRenameNote}
+            onMoveNote={onMoveNote}
+            onArchiveNote={onArchiveNote}
+            onTrashNote={onTrashNote}
+            onNewNote={onNewNote}
+            onNewFolder={onNewFolder}
+            newActionsDisabledReason={newActionsDisabledReason}
             now={now}
           />
         </section>
@@ -398,6 +421,13 @@ const ExplorerRegion = ({
   onMoveFolder,
   onArchiveFolder,
   onTrashFolder,
+  onRenameNote,
+  onMoveNote,
+  onArchiveNote,
+  onTrashNote,
+  onNewNote,
+  onNewFolder,
+  newActionsDisabledReason,
   now
 }: {
   readonly hidden: boolean;
@@ -408,6 +438,13 @@ const ExplorerRegion = ({
   readonly onMoveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onTrashFolder?: FileTreeProps["onTrashFolder"];
+  readonly onRenameNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onMoveNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onArchiveNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onTrashNote?: FileTreeProps["onTrashNote"];
+  readonly onNewNote?: ((parentId: string | null) => void) | undefined;
+  readonly onNewFolder?: ((parentId: string | null) => void) | undefined;
+  readonly newActionsDisabledReason?: string | null | undefined;
   readonly now?: (() => Date) | undefined;
 }): React.JSX.Element => vault === undefined
   ? <StaticExplorerRegion hidden={hidden} />
@@ -421,6 +458,13 @@ const ExplorerRegion = ({
       onMoveFolder={onMoveFolder}
       onArchiveFolder={onArchiveFolder}
       onTrashFolder={onTrashFolder}
+      onRenameNote={onRenameNote}
+      onMoveNote={onMoveNote}
+      onArchiveNote={onArchiveNote}
+      onTrashNote={onTrashNote}
+      onNewNote={onNewNote}
+      onNewFolder={onNewFolder}
+      newActionsDisabledReason={newActionsDisabledReason}
       now={now}
     />
   );
@@ -731,19 +775,30 @@ export const OwnerShell = ({
     });
   }, [attachmentMarkdown, noteId, refreshVault]);
 
-  const openNoteOperation = useCallback((kind: "rename" | "move"): void => {
-    if (selectedEntry === undefined || selectedFolder === undefined) return;
+  const openNoteOperation = useCallback((kind: "rename" | "move", source?: NoteExplorerNode): void => {
+    const target = source === null
+      ? undefined
+      : (source ?? (selectedEntry === undefined ? undefined : {
+          id: selectedEntry.id,
+          name: selectedEntry.title,
+          path: selectedEntry.path,
+          version: selectedEntry.driveVersion
+        }));
+    if (target === undefined) return;
+    const parentPath = target.path.slice(0, target.path.lastIndexOf("/"));
+    const parentFolder = vault?.folders.find((candidate) => candidate.path === parentPath) ?? selectedFolder;
+    if (parentFolder === undefined) return;
     setOperationError(null);
     setPendingOperation({
       operation: {
         kind,
         selectionKind: "note",
-        initialName: selectedEntry.title,
-        initialFolderId: selectedFolder.id
+        initialName: target.name,
+        initialFolderId: parentFolder.id
       },
-      target: { id: selectedEntry.id, version: selectedEntry.driveVersion }
+      target: { id: target.id, version: target.version }
     });
-  }, [selectedEntry, selectedFolder]);
+  }, [selectedEntry, selectedFolder, vault]);
 
   const openFolderOperation = useCallback((kind: "rename" | "move", folder: FolderExplorerNode): void => {
     if (folder.protected) return;
@@ -799,6 +854,68 @@ export const OwnerShell = ({
       target: null
     });
   }, [newNoteFolder]);
+
+  const runNoteArchive = useCallback(async (note: NoteExplorerNode): Promise<void> => {
+    await notesApi.archiveNote(note.id, { expectedVersion: note.version });
+    await refreshVault();
+    if (note.id === noteId) {
+      const remaining = vault?.entries.filter((entry) => entry.id !== note.id) ?? [];
+      const fallback = remaining[0]?.id;
+      if (fallback !== undefined) onNavigateNote?.(fallback);
+    }
+  }, [notesApi, noteId, onNavigateNote, refreshVault, vault]);
+
+  const runNoteTrash = useCallback(async (
+    note: NoteExplorerNode,
+    input: ArchiveNoteRequest
+  ): Promise<void> => {
+    try {
+      await notesApi.trashNote(note.id, input);
+    } catch (error) {
+      await refreshVault().catch(() => undefined);
+      throw error;
+    }
+    await refreshVault();
+    if (note.id === noteId) {
+      const remaining = vault?.entries.filter((entry) => entry.id !== note.id) ?? [];
+      const fallback = remaining[0]?.id;
+      if (fallback !== undefined) onNavigateNote?.(fallback);
+    }
+  }, [notesApi, noteId, onNavigateNote, refreshVault, vault]);
+
+  const requestNewNote = useCallback((parentId: string | null): void => {
+    const folder = parentId !== null
+      ? vault?.folders.find((candidate) => candidate.id === parentId)
+      : newNoteFolder;
+    if (folder === undefined) return;
+    setOperationError(null);
+    setPendingOperation({
+      operation: {
+        kind: "new-note",
+        selectionKind: "note",
+        initialName: "",
+        initialFolderId: folder.id
+      },
+      target: null
+    });
+  }, [newNoteFolder, vault]);
+
+  const requestNewFolder = useCallback((parentId: string | null): void => {
+    const folder = parentId !== null
+      ? vault?.folders.find((candidate) => candidate.id === parentId)
+      : selectedFolder ?? plansFolder ?? inboxFolder;
+    if (folder === undefined) return;
+    setOperationError(null);
+    setPendingOperation({
+      operation: {
+        kind: "new-folder",
+        selectionKind: "folder",
+        initialName: "",
+        initialFolderId: folder.id
+      },
+      target: null
+    });
+  }, [inboxFolder, plansFolder, selectedFolder, vault]);
 
   const paletteActions = useMemo<readonly CommandPaletteAction[]>(() => {
     const noVault = "Open a complete vault first.";
@@ -1074,6 +1191,13 @@ export const OwnerShell = ({
           onMoveFolder={(folder) => openFolderOperation("move", folder)}
           onArchiveFolder={archiveFolder === undefined ? undefined : (folder) => void runFolderArchive(folder)}
           onTrashFolder={runFolderTrash}
+          onRenameNote={(note) => openNoteOperation("rename", note)}
+          onMoveNote={(note) => openNoteOperation("move", note)}
+          onArchiveNote={(note) => void runNoteArchive(note)}
+          onTrashNote={runNoteTrash}
+          onNewNote={requestNewNote}
+          onNewFolder={requestNewFolder}
+          newActionsDisabledReason={vault === undefined ? "The vault is loading." : null}
           now={now}
         />
         {noteId === undefined ? (

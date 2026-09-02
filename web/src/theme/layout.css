@@ -125,6 +125,41 @@ textarea:focus-visible,
   line-height: 1.25;
 }
 
+.login-eyebrow {
+  max-width: 34rem;
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.login-title {
+  max-width: 34rem;
+  margin: 0 0 12px;
+  color: var(--text);
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.login-helper {
+  max-width: 34rem;
+  margin: 0 0 22px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.login-helper[data-probe="checking"] {
+  color: var(--text);
+}
+
+.login-helper[data-probe="restored"] {
+  color: var(--accent-green);
+}
+
 .route-main p {
   max-width: 34rem;
   margin: 0;
@@ -761,6 +796,93 @@ textarea:focus-visible,
   color: var(--muted);
   font-size: 11px;
   line-height: 1.45;
+}
+
+.file-tree-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.file-tree-toolbar-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  background: var(--panel);
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.2;
+}
+
+.file-tree-toolbar-action:hover:not(:disabled),
+.file-tree-toolbar-action:focus-visible {
+  border-color: var(--yellow);
+  color: var(--yellow);
+}
+
+.file-tree-toolbar-action:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.note-actions {
+  position: relative;
+  flex: 0 0 36px;
+}
+
+.note-actions-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  min-width: 36px;
+  color: var(--muted);
+}
+
+.note-actions-trigger:hover,
+.note-actions-trigger[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--selection);
+}
+
+.note-menu {
+  position: absolute;
+  top: 38px;
+  right: 4px;
+  z-index: 24;
+  width: min(230px, calc(100vw - 32px));
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel);
+  box-shadow: 0 12px 34px rgb(0 0 0 / 38%);
+}
+
+.note-menu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 38px;
+  gap: 9px;
+  padding: 0 9px;
+  border-radius: 4px;
+  color: var(--text);
+  text-align: left;
+}
+
+.note-menu button:hover:not(:disabled),
+.note-menu button:focus-visible {
+  background: var(--selection);
+}
+
+.tree-action-row .note-actions {
+  pointer-events: auto;
 }
 
 .knowledge-panel,
