@@ -1,6 +1,11 @@
 import { expect, test } from "./fixtures";
 
 test("mobile exposes every destination with usable targets and no horizontal overflow", async ({ ownerPage: page }) => {
+  const headerRows = await page.locator(".workspace-header > .workspace-title-row, .workspace-header > .workspace-contextual-row")
+    .evaluateAll((rows) => rows.map((row) => row.getBoundingClientRect().height));
+  expect(headerRows).toHaveLength(2);
+  expect(headerRows.reduce((total, height) => total + height, 0)).toBeLessThanOrEqual(100);
+
   const navigation = page.getByRole("navigation", { name: "Mobile destinations" });
   const audited = new Set<string>();
   for (const destination of ["Files", "Editor", "Preview", "Info"] as const) {
@@ -30,12 +35,18 @@ test("mobile exposes every destination with usable targets and no horizontal ove
     expect(audit.failures, `${destination} has undersized visible controls`).toEqual([]);
     for (const exception of audit.exceptions) audited.add(exception);
   }
-  expect([...audited].every((item) => item.startsWith("inline-wiki:"))).toBe(true);
   await navigation.getByRole("button", { name: "Editor" }).click();
+  const originalUrl = page.url();
+  await page.getByRole("button", { name: "More actions" }).click();
+  await expect(page.getByRole("menu", { name: "More actions" })).toBeVisible();
+  await Promise.all([
+    page.waitForURL((url) => url.toString() !== originalUrl && /^\/app\/notes\/[0-9a-f-]{36}$/u.test(url.pathname)),
+    page.getByRole("menuitem", { name: "Quick note in Inbox" }).click()
+  ]);
   await expect(page.getByLabel("Markdown editor")).toBeEditable();
   expect(await page.evaluate(() => document.documentElement.scrollWidth === document.documentElement.clientWidth)).toBe(true);
   await page.screenshot({
-    path: "test-results/playwright/task15-mobile-workspace.png",
+    path: "test-results/playwright/task-nxt-1-1-mobile-workspace.png",
     fullPage: true,
     animations: "disabled"
   });

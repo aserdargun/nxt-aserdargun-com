@@ -59,6 +59,55 @@ describe("anonymous public note", () => {
     expect(screen.queryByRole("link", { name: /public notes/iu })).not.toBeInTheDocument();
   });
 
+  it("lets an equivalent leading body H1 own the single visible document title", async () => {
+    const { PublicNotePage } = await import("../publication/public-note-page");
+    const title = "Published plan";
+    const getNote = vi.fn().mockResolvedValue({
+      ...note,
+      title,
+      html: '<h1 id="body-title"> Published\u00a0  plan </h1><p>Frozen body</p>'
+    });
+    render(<PublicNotePage publicId={PUBLIC_ID} client={{ getNote }} />);
+
+    await screen.findByText("Frozen body");
+    const headings = screen.getAllByRole("heading", { level: 1 });
+    expect(headings).toHaveLength(1);
+    expect(headings[0]?.textContent?.normalize("NFC").replace(/\s+/gu, " ").trim()).toBe(title);
+  });
+
+  it("retains the metadata H1 when the frozen HTML has no leading H1", async () => {
+    const { PublicNotePage } = await import("../publication/public-note-page");
+    const getNote = vi.fn().mockResolvedValue({
+      ...note,
+      html: "<p>Frozen body</p><h2>Details</h2>"
+    });
+    render(<PublicNotePage publicId={PUBLIC_ID} client={{ getNote }} />);
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Published plan" })).toBeVisible();
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  });
+
+  it("retains the metadata H1 when the leading body H1 differs by case", async () => {
+    const { PublicNotePage } = await import("../publication/public-note-page");
+    const getNote = vi.fn().mockResolvedValue({ ...note, html: "<h1>published plan</h1>" });
+    render(<PublicNotePage publicId={PUBLIC_ID} client={{ getNote }} />);
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Published plan" })).toBeVisible();
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(2);
+  });
+
+  it("retains the metadata H1 when an equivalent body H1 appears later", async () => {
+    const { PublicNotePage } = await import("../publication/public-note-page");
+    const getNote = vi.fn().mockResolvedValue({
+      ...note,
+      html: "<p>Intro</p><h1>Published plan</h1>"
+    });
+    render(<PublicNotePage publicId={PUBLIC_ID} client={{ getNote }} />);
+
+    await screen.findAllByRole("heading", { level: 1, name: "Published plan" });
+    expect(screen.getAllByRole("heading", { level: 1, name: "Published plan" })).toHaveLength(2);
+  });
+
   it("validates the route ID before fetch and maps every failure to one generic Not found surface", async () => {
     const { PublicNotePage } = await import("../publication/public-note-page");
     const getNote = vi.fn();

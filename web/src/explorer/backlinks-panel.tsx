@@ -41,11 +41,15 @@ export const BacklinksPanel = ({
   readonly backlinks: readonly KnowledgeLink[];
   readonly wikiLinks: readonly KnowledgeLink[];
   readonly onNavigate: (noteId: string) => void;
-}): React.JSX.Element => (
-  <div className="knowledge-panel">
-    <section aria-labelledby="backlinks-panel-heading">
-      <h2 id="backlinks-panel-heading">Backlinks</h2>
-      {[...backlinks, ...wikiLinks].map((link) => <KnowledgeLinkRow key={link.key} link={link} onNavigate={onNavigate} />)}
-    </section>
-  </div>
-);
+}): React.JSX.Element => {
+  const links = [...backlinks, ...wikiLinks];
+  return (
+    <div className="knowledge-panel">
+      <section aria-labelledby="backlinks-panel-heading">
+        <h2 id="backlinks-panel-heading">Backlinks</h2>
+        {links.length === 0 ? <p className="empty-info">No links to show</p> : null}
+        {links.map((link) => <KnowledgeLinkRow key={link.key} link={link} onNavigate={onNavigate} />)}
+      </section>
+    </div>
+  );
+};

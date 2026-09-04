@@ -107,6 +107,7 @@ const invoke = (
 };
 
 const originalVisualQaFlag = process.env.NXT_VISUAL_QA_SESSION;
+const originalE2eHmrFlag = process.env.NXT_E2E_DISABLE_VITE_HMR;
 
 afterEach(() => {
   if (originalVisualQaFlag === undefined) {
@@ -114,7 +115,29 @@ afterEach(() => {
   } else {
     process.env.NXT_VISUAL_QA_SESSION = originalVisualQaFlag;
   }
+  if (originalE2eHmrFlag === undefined) {
+    delete process.env.NXT_E2E_DISABLE_VITE_HMR;
+  } else {
+    process.env.NXT_E2E_DISABLE_VITE_HMR = originalE2eHmrFlag;
+  }
   vi.restoreAllMocks();
+});
+
+describe("E2E Vite HMR boundary", () => {
+  it.each([
+    [undefined, undefined],
+    ["0", undefined],
+    ["true", undefined],
+    ["1", false]
+  ] as const)("maps opt-in value %s to HMR setting %s", async (flag, expected) => {
+    if (flag === undefined) delete process.env.NXT_E2E_DISABLE_VITE_HMR;
+    else process.env.NXT_E2E_DISABLE_VITE_HMR = flag;
+    vi.resetModules();
+
+    const loaded = (await import("../../vite.config")).default;
+
+    expect(loaded.server?.hmr).toBe(expected);
+  });
 });
 
 describe("local visual-QA preview boundary", () => {

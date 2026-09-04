@@ -16,6 +16,7 @@ import {
   stopControlledStack,
   writeOwnedControlRecord
 } from "./stop-local-core.mjs";
+import { createE2eEnvironment, createViteServiceEnvironment } from "./e2e-environment.mjs";
 import { seedLocalFixtures } from "./local-fixtures.mjs";
 
 const run = promisify(execFile);
@@ -257,7 +258,7 @@ const sanitizedBaseEnvironment = () => {
   const environment = { ...process.env };
   delete environment.NXT_LOCAL_AUTH_BYPASS;
   for (const key of localRuntimeKeys) delete environment[key];
-  return environment;
+  return createE2eEnvironment(environment);
 };
 
 export const startLocalStack = async ({ checkout = checkoutPath, localFixtures = false, testHooks } = {}) => {
@@ -374,7 +375,7 @@ export const startLocalStack = async ({ checkout = checkoutPath, localFixtures =
 
     await addService({
       name: "vite", executable: process.execPath, args: [viteBin, "--host", "127.0.0.1", "--port", "5173", "--strictPort"],
-      cwd: join(checkoutRealpath, "web"), env: baseEnvironment, port: 5173
+      cwd: join(checkoutRealpath, "web"), env: createViteServiceEnvironment(baseEnvironment, localFixtures), port: 5173
     });
     await addService({
       name: "functions", executable: "/usr/bin/sandbox-exec",

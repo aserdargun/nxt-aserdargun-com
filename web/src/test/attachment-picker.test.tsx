@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import layoutCss from "../theme/layout.css?raw";
 
 const NOTE_ID = "018f47d2-6a34-7b2a-9f21-8a7034963aef";
 const OTHER_NOTE_ID = "028f47d2-6a34-7b2a-9f21-8a7034963aef";
@@ -77,7 +78,9 @@ describe("attachment picker", () => {
 
     await user.upload(screen.getByLabelText("Add attachment"), file);
 
-    expect(screen.getByRole("alert")).toHaveTextContent("20 MB");
+    const failure = screen.getByRole("alert");
+    expect(failure).toHaveAttribute("data-tone", "error");
+    expect(failure).toHaveTextContent("Attachments must be 20 MB or smaller.");
     expect(read).not.toHaveBeenCalled();
     expect(upload).not.toHaveBeenCalled();
   });
@@ -180,6 +183,65 @@ describe("attachment picker", () => {
 });
 
 describe("persisted attachment cards", () => {
+  it("formats attachment sizes at the byte, KB, and MB boundaries", async () => {
+    const { formatAttachmentSize } = await import("../editor/attachment-view");
+
+    expect(formatAttachmentSize(4)).toBe("4 B");
+    expect(formatAttachmentSize(1024)).toBe("1.0 KB");
+    expect(formatAttachmentSize(10 * 1024)).toBe("10 KB");
+    expect(formatAttachmentSize(1024 * 1024)).toBe("1.0 MB");
+    expect(formatAttachmentSize(10 * 1024 * 1024)).toBe("10 MB");
+  });
+
+  it("shows image metadata and opens only the same private image in a lightbox", async () => {
+    const { AttachmentView } = await import("../editor/attachment-view");
+    const user = userEvent.setup();
+    render(<AttachmentView attachment={uploaded.asset} onTrash={vi.fn()} />);
+
+    expect(screen.getByText("diagram.png")).toBeVisible();
+    expect(screen.getByText("image/png")).toBeVisible();
+    expect(screen.getByText("4 B")).toBeVisible();
+    const open = screen.getByRole("button", { name: "Open diagram.png" });
+    expect(screen.getByRole("button", { name: "Trash diagram.png" })).toBeVisible();
+
+    await user.click(open);
+    const dialog = screen.getByRole("dialog", { name: "diagram.png" });
+    expect(within(dialog).getByText("diagram.png")).toBeVisible();
+    expect(within(dialog).getByRole("img", { name: "diagram.png" })).toHaveAttribute(
+      "src",
+      `/api/private/attachments/${ASSET_ID}`
+    );
+    expect(within(dialog).queryByRole("link")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("textbox")).not.toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "Close attachment viewer" }));
+    await waitFor(() => expect(open).toHaveFocus());
+  });
+
+  it("keeps a long MIME value visible and contained in a narrow attachment card", async () => {
+    const { AttachmentView } = await import("../editor/attachment-view");
+    const longMime = `application/vnd.${"nxt".repeat(75)}+zip`;
+    const style = document.createElement("style");
+    style.dataset.attachmentLayoutTest = "true";
+    style.textContent = layoutCss;
+    document.head.append(style);
+
+    render(
+      <div style={{ width: 240 }}>
+        <AttachmentView
+          attachment={{ ...uploaded.asset, mimeType: longMime, disposition: "download" }}
+          onTrash={vi.fn()}
+        />
+      </div>
+    );
+
+    const mime = screen.getByText(longMime);
+    expect(mime).toBeVisible();
+    expect(getComputedStyle(mime).minWidth).toBe("0px");
+    expect(getComputedStyle(mime).overflowWrap).toBe("anywhere");
+    style.remove();
+  });
+
   it("renders only classified same-origin inline surfaces and downloads everything else", async () => {
     const { AttachmentView } = await import("../editor/attachment-view");
     const image = render(<AttachmentView attachment={uploaded.asset} onTrash={vi.fn()} />);

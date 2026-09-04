@@ -1,10 +1,29 @@
-import { describe, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   SearchClient,
   StaleSearchResponseError,
   type SearchWorkerLike
 } from "../explorer/search-client";
+import { SearchPanel } from "../explorer/search-panel";
 import { createSearchIndex, searchIndex, type SearchRecord } from "../explorer/search-worker";
+
+const deferredControl = vi.hoisted(() => ({ hold: false, value: "" }));
+
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react")>();
+  return {
+    ...actual,
+    useDeferredValue<T>(value: T): T {
+      const deferred = actual.useDeferredValue(value);
+      if (deferredControl.hold) return deferredControl.value as T;
+      deferredControl.value = deferred as string;
+      return deferred;
+    }
+  };
+});
 
 const indexFixture: readonly SearchRecord[] = [
   {
@@ -38,7 +57,90 @@ class ControlledWorker implements SearchWorkerLike {
   }
 }
 
+afterEach(() => {
+  cleanup();
+  deferredControl.hold = false;
+  deferredControl.value = "";
+});
+
 describe("bounded Turkish vault search", () => {
+  it("shows an empty result only after the current query completes and clears it without recreating the client", async () => {
+    const user = userEvent.setup();
+    const query = vi.fn().mockResolvedValue([]);
+    const terminate = vi.fn();
+    const createClient = vi.fn().mockResolvedValue({ query, terminate });
+    render(createElement(SearchPanel, {
+      records: indexFixture,
+      onOpenNote: vi.fn(),
+      createClient
+    }));
+
+    await user.type(screen.getByRole("searchbox", { name: "Search files" }), "not present");
+
+    expect(await screen.findByText("No matching notes")).toBeVisible();
+    expect(query).toHaveBeenLastCalledWith("not present");
+    await user.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(screen.getByRole("searchbox", { name: "Search files" })).toHaveValue("");
+    expect(createClient).toHaveBeenCalledOnce();
+  });
+
+  it("does not replay an unchanged requested query when the change callback is replaced", async () => {
+    const firstChange = vi.fn();
+    const view = render(createElement(SearchPanel, {
+      records: indexFixture,
+      onOpenNote: vi.fn(),
+      requestedQuery: "plan",
+      onQueryChange: firstChange,
+      createClient: vi.fn().mockResolvedValue({ query: vi.fn().mockResolvedValue([]), terminate: vi.fn() })
+    }));
+    const search = screen.getByRole("searchbox", { name: "Search files" });
+    await waitFor(() => expect(search).toHaveValue("plan"));
+
+    fireEvent.change(search, { target: { value: "personal" } });
+    expect(search).toHaveValue("personal");
+
+    view.rerender(createElement(SearchPanel, {
+      records: indexFixture,
+      onOpenNote: vi.fn(),
+      requestedQuery: "plan",
+      onQueryChange: vi.fn(),
+      createClient: vi.fn().mockResolvedValue({ query: vi.fn().mockResolvedValue([]), terminate: vi.fn() })
+    }));
+
+    expect(search).toHaveValue("personal");
+  });
+
+  it.each([
+    ["result", [{ id: "note-2026", title: "2026 Yıllık Planı", path: "Notes/Plans/2026 Yıllık Planı.md", folder: "Plans", tags: ["plan"], favorite: true, score: 10 }]],
+    ["empty state", []]
+  ] as const)("hides an earlier %s synchronously when the visible query outruns the deferred query", async (_state, priorAnswer) => {
+    let resolveCurrent!: (value: []) => void;
+    const current = new Promise<[]>((resolve) => { resolveCurrent = resolve; });
+    const query = vi.fn((value: string) => value === "missing" ? current : Promise.resolve(priorAnswer));
+    const createClient = vi.fn().mockResolvedValue({ query, terminate: vi.fn() });
+    const props = {
+      records: indexFixture,
+      onOpenNote: vi.fn(),
+      createClient
+    };
+    const view = render(createElement(SearchPanel, props));
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search files" }), { target: { value: "plan" } });
+    if (priorAnswer.length === 0) expect(await screen.findByText("No matching notes")).toBeVisible();
+    else expect(await screen.findByRole("button", { name: /2026 Yıllık Planı/u })).toBeVisible();
+    deferredControl.hold = true;
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search files" }), { target: { value: "missing" } });
+
+    expect(screen.getByRole("searchbox", { name: "Search files" })).toHaveValue("missing");
+    expect(screen.queryByRole("button", { name: /2026 Yıllık Planı/u })).not.toBeInTheDocument();
+    expect(screen.queryByText("No matching notes")).not.toBeInTheDocument();
+    deferredControl.hold = false;
+    view.rerender(createElement(SearchPanel, props));
+    await waitFor(() => expect(query).toHaveBeenLastCalledWith("missing"));
+    resolveCurrent([]);
+    expect(await screen.findByText("No matching notes")).toBeVisible();
+  });
+
   it("searches Turkish text, title, tag, folder, and favorite", () => {
     const index = createSearchIndex(indexFixture);
     const results = searchIndex(index, "yıllık tag:plan folder:Plans favorite:true");

@@ -1,15 +1,11 @@
+import * as Dialog from "@radix-ui/react-dialog";
 import {
   Archive,
   Bookmark,
-  Check,
   ChevronRight,
-  Eye,
   File,
-  FilePenLine,
   Folder,
-  Info,
   Inbox,
-  MoreVertical,
   Paperclip,
   Search,
   Tags,
@@ -32,9 +28,7 @@ import {
   useEffect,
   useMemo,
   useRef,
-  useState,
-  useSyncExternalStore,
-  type ComponentType
+  useState
 } from "react";
 import { notesClient, type NotesClient } from "../api/notes";
 import { attachmentClient, type AttachmentClient, type UploadedAttachment } from "../api/attachments";
@@ -50,10 +44,9 @@ import type { DraftStore } from "../editor/draft-store";
 import type { AttachmentInsertion, EditorWorkspaceState } from "../editor/editor-workspace";
 import { AttachmentPicker } from "../editor/attachment-picker";
 import { AttachmentView } from "../editor/attachment-view";
-import type { SaveStatus } from "../editor/use-autosave";
 import type { KnowledgeLink } from "../explorer/backlinks-panel";
 import { useCommandPaletteShortcut } from "../explorer/command-palette-shortcut";
-import type { CommandPaletteAction } from "../explorer/command-palette";
+import type { CommandPaletteAction } from "../explorer/command-catalog";
 import {
   ExplorerOperationDialog,
   type ExplorerOperation,
@@ -69,6 +62,11 @@ import {
 import { TagsPanel } from "../explorer/tags-panel";
 import { PublishDialog } from "../publication/publish-dialog";
 import { PublicationStatus } from "../publication/publication-status";
+import { MobileDestinationNav, type Destination } from "./mobile-destination-nav";
+import { OwnerOverflowMenu } from "./owner-overflow-menu";
+import { ActiveNotePath, WorkspaceHeader } from "./workspace-header";
+import { useWorkspaceViewport } from "./workspace-layout";
+import { StatusCallout } from "./status-callout";
 
 const EditorWorkspace = lazy(async () => {
   const module = await import("../editor/editor-workspace");
@@ -84,21 +82,6 @@ const CommandPalette = lazy(async () => {
   const module = await import("../explorer/command-palette");
   return { default: module.CommandPalette };
 });
-
-type Destination = "files" | "editor" | "preview" | "info";
-
-interface DestinationItem {
-  readonly id: Destination;
-  readonly label: "Files" | "Editor" | "Preview" | "Info";
-  readonly icon: ComponentType<{ readonly size?: number; readonly strokeWidth?: number; readonly "aria-hidden"?: boolean }>;
-}
-
-const DESTINATIONS: readonly DestinationItem[] = [
-  { id: "files", label: "Files", icon: Folder },
-  { id: "editor", label: "Editor", icon: FilePenLine },
-  { id: "preview", label: "Preview", icon: Eye },
-  { id: "info", label: "Info", icon: Info }
-];
 
 const EDITOR_LINES = [
   "# Plans",
@@ -118,143 +101,6 @@ const ACTIVE_NOTE = {
   path: "Notes / Plans",
   title: "Plans"
 } as const;
-
-const MOBILE_MEDIA_QUERY = "(max-width: 767px)";
-// The 23% explorer track first fits the measured 93.1875px brand plus 4 × 44px targets at 1171px.
-const WIDE_DESKTOP_MEDIA_QUERY = "(min-width: 1171px)";
-
-const mobileViewportSnapshot = (): boolean =>
-  typeof window !== "undefined" &&
-  typeof window.matchMedia === "function" &&
-  window.matchMedia(MOBILE_MEDIA_QUERY).matches;
-
-const subscribeToMobileViewport = (onChange: () => void): (() => void) => {
-  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return () => {};
-  const query = window.matchMedia(MOBILE_MEDIA_QUERY);
-  query.addEventListener("change", onChange);
-  return () => query.removeEventListener("change", onChange);
-};
-
-const useMobileViewport = (): boolean =>
-  useSyncExternalStore(subscribeToMobileViewport, mobileViewportSnapshot, () => false);
-
-const wideDesktopViewportSnapshot = (): boolean =>
-  typeof window === "undefined" || typeof window.matchMedia !== "function"
-    ? true
-    : window.matchMedia(WIDE_DESKTOP_MEDIA_QUERY).matches;
-
-const subscribeToWideDesktopViewport = (onChange: () => void): (() => void) => {
-  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return () => {};
-  const query = window.matchMedia(WIDE_DESKTOP_MEDIA_QUERY);
-  query.addEventListener("change", onChange);
-  return () => query.removeEventListener("change", onChange);
-};
-
-const useWideDesktopViewport = (): boolean =>
-  useSyncExternalStore(
-    subscribeToWideDesktopViewport,
-    wideDesktopViewportSnapshot,
-    () => true
-  );
-
-interface DestinationNavigationProps {
-  readonly label: "Desktop destinations" | "Mobile destinations";
-  readonly activeDestination: Destination;
-  readonly onSelect: (destination: Destination) => void;
-  readonly mobile?: boolean;
-}
-
-const DestinationNavigation = ({
-  label,
-  activeDestination,
-  onSelect,
-  mobile = false
-}: DestinationNavigationProps): React.JSX.Element => (
-  <nav className={mobile ? "mobile-destinations" : "desktop-destinations"} aria-label={label}>
-    {DESTINATIONS.map(({ id, label: destinationLabel, icon: Icon }) => (
-      <button
-        className="destination-button touch-target"
-        type="button"
-        aria-label={destinationLabel}
-        aria-pressed={activeDestination === id}
-        onClick={() => onSelect(id)}
-        key={id}
-      >
-        <Icon size={mobile ? 24 : 19} strokeWidth={1.75} aria-hidden />
-        {mobile ? <span>{destinationLabel}</span> : null}
-      </button>
-    ))}
-  </nav>
-);
-
-const SaveStatusOutput = ({ status }: { readonly status: SaveStatus }): React.JSX.Element => (
-  <output className={`save-status save-status-${status.toLowerCase().replace(" ", "-")}`} aria-label="Save status" aria-live="polite">
-    <span>{status}</span>
-    {status === "Saved" ? (
-      <span className="save-icon" aria-hidden>
-        <Check size={13} strokeWidth={2.25} />
-      </span>
-    ) : null}
-  </output>
-);
-
-const ActiveNotePath = ({
-  className,
-  path,
-  withIcon = false
-}: {
-  readonly className: string;
-  readonly path: string;
-  readonly withIcon?: boolean;
-}): React.JSX.Element => (
-  <div className={className} aria-label={`Active note path: ${path}`} title={path}>
-    {withIcon ? <Folder size={18} strokeWidth={1.75} aria-hidden /> : null}
-    <span>{path}</span>
-  </div>
-);
-
-const ShellHeader = ({
-  activeDestination,
-  onSelect,
-  showDesktopDestinations,
-  noteTitle,
-  notePath,
-  saveStatus,
-  attachmentAction,
-  publicationAction
-}: {
-  readonly activeDestination: Destination;
-  readonly onSelect: (destination: Destination) => void;
-  readonly showDesktopDestinations: boolean;
-  readonly noteTitle: string;
-  readonly notePath: string;
-  readonly saveStatus: SaveStatus;
-  readonly attachmentAction: React.ReactNode;
-  readonly publicationAction: React.ReactNode;
-}): React.JSX.Element => (
-  <header className="shell-header">
-    <div className="shell-header-explorer">
-      <span className="brand shell-brand">NXT</span>
-      {showDesktopDestinations ? (
-        <DestinationNavigation
-          label="Desktop destinations"
-          activeDestination={activeDestination}
-          onSelect={onSelect}
-        />
-      ) : null}
-    </div>
-    <span className="mobile-title">{noteTitle}</span>
-    <button className="mobile-more touch-target" type="button" aria-label="Info" onClick={() => onSelect("info")}>
-      <MoreVertical size={23} strokeWidth={1.75} aria-hidden />
-    </button>
-    <div className="shell-actions" aria-label="Editor actions">
-      {attachmentAction}
-      {publicationAction}
-    </div>
-    <ActiveNotePath className="mobile-path" path={notePath} withIcon />
-    <SaveStatusOutput status={saveStatus} />
-  </header>
-);
 
 const StaticExplorerRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Element => (
   <section className="workspace-region explorer-region" role="region" aria-label="Files" hidden={hidden}>
@@ -304,25 +150,34 @@ const StaticExplorerRegion = ({ hidden }: { readonly hidden: boolean }): React.J
 const VaultExplorerRegion = ({
   hidden,
   vault,
+  searchQuery,
+  onSearchQueryChange,
+  expandedFolderIds,
+  onExpandedFolderIdsChange,
   selectedNoteId,
   onNavigateNote,
   onRenameFolder,
   onMoveFolder,
   onArchiveFolder,
   onTrashFolder,
+  onCreateNoteInFolder,
   now
 }: {
   readonly hidden: boolean;
   readonly vault: CompleteVault;
+  readonly searchQuery: string;
+  readonly onSearchQueryChange: (query: string) => void;
+  readonly expandedFolderIds: ReadonlySet<string>;
+  readonly onExpandedFolderIdsChange: (expandedIds: ReadonlySet<string>) => void;
   readonly selectedNoteId?: string | undefined;
   readonly onNavigateNote?: ((noteId: string) => void) | undefined;
   readonly onRenameFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onMoveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onTrashFolder?: FileTreeProps["onTrashFolder"];
+  readonly onCreateNoteInFolder?: FileTreeProps["onCreateNoteInFolder"];
   readonly now?: (() => Date) | undefined;
 }): React.JSX.Element => {
-  const [requestedSearch, setRequestedSearch] = useState<string | undefined>();
   const tree = useMemo(() => buildExplorerTree(vault), [vault]);
   const favorites = useMemo(() => {
     const byId = new Map(vault.entries.map((entry) => [entry.id, entry]));
@@ -362,7 +217,8 @@ const VaultExplorerRegion = ({
       <Suspense fallback={null}>
         <SearchPanel
           records={searchRecords}
-          requestedQuery={requestedSearch}
+          query={searchQuery}
+          onQueryChange={onSearchQueryChange}
           onOpenNote={(id) => onNavigateNote?.(id)}
         />
       </Suspense>
@@ -372,6 +228,8 @@ const VaultExplorerRegion = ({
           <FileTree
             tree={tree}
             selectedId={selectedNoteId}
+            expandedIds={expandedFolderIds}
+            onExpandedIdsChange={onExpandedFolderIdsChange}
             onSelect={(node) => {
               if (node.kind === "note") onNavigateNote?.(node.id);
             }}
@@ -379,11 +237,12 @@ const VaultExplorerRegion = ({
             onMoveFolder={onMoveFolder}
             onArchiveFolder={onArchiveFolder}
             onTrashFolder={onTrashFolder}
+            onCreateNoteInFolder={onCreateNoteInFolder}
             now={now}
           />
         </section>
         <FavoritesPanel items={favorites} onOpen={(id) => onNavigateNote?.(id)} />
-        <TagsPanel tags={tags} onSelect={(tag) => setRequestedSearch(`tag:${tag}`)} />
+        <TagsPanel tags={tags} onSelect={(tag) => onSearchQueryChange(`tag:${tag}`)} />
       </div>
     </section>
   );
@@ -392,22 +251,32 @@ const VaultExplorerRegion = ({
 const ExplorerRegion = ({
   hidden,
   vault,
+  searchQuery,
+  onSearchQueryChange,
+  expandedFolderIds,
+  onExpandedFolderIdsChange,
   selectedNoteId,
   onNavigateNote,
   onRenameFolder,
   onMoveFolder,
   onArchiveFolder,
   onTrashFolder,
+  onCreateNoteInFolder,
   now
 }: {
   readonly hidden: boolean;
   readonly vault?: CompleteVault | undefined;
+  readonly searchQuery: string;
+  readonly onSearchQueryChange: (query: string) => void;
+  readonly expandedFolderIds: ReadonlySet<string>;
+  readonly onExpandedFolderIdsChange: (expandedIds: ReadonlySet<string>) => void;
   readonly selectedNoteId?: string | undefined;
   readonly onNavigateNote?: ((noteId: string) => void) | undefined;
   readonly onRenameFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onMoveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onTrashFolder?: FileTreeProps["onTrashFolder"];
+  readonly onCreateNoteInFolder?: FileTreeProps["onCreateNoteInFolder"];
   readonly now?: (() => Date) | undefined;
 }): React.JSX.Element => vault === undefined
   ? <StaticExplorerRegion hidden={hidden} />
@@ -415,23 +284,38 @@ const ExplorerRegion = ({
     <VaultExplorerRegion
       hidden={hidden}
       vault={vault}
+      searchQuery={searchQuery}
+      onSearchQueryChange={onSearchQueryChange}
+      expandedFolderIds={expandedFolderIds}
+      onExpandedFolderIdsChange={onExpandedFolderIdsChange}
       selectedNoteId={selectedNoteId}
       onNavigateNote={onNavigateNote}
       onRenameFolder={onRenameFolder}
       onMoveFolder={onMoveFolder}
       onArchiveFolder={onArchiveFolder}
       onTrashFolder={onTrashFolder}
+      onCreateNoteInFolder={onCreateNoteInFolder}
       now={now}
     />
   );
 
-const EditorRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Element => (
+const EditorRegion = ({
+  hidden,
+  mobilePath
+}: {
+  readonly hidden: boolean;
+  readonly mobilePath?: React.ReactNode;
+}): React.JSX.Element => (
   <section className="workspace-region editor-region" role="region" aria-label="Editor" hidden={hidden}>
     <div className="region-toolbar">
       <ActiveNotePath className="desktop-path" path={ACTIVE_NOTE.path} />
       <span className="region-label">Editor</span>
     </div>
-    <div className="editor-canvas" aria-label="Editor">
+    <div
+      className={`editor-canvas${mobilePath === undefined ? "" : " workspace-scroll-target"}`}
+      aria-label="Editor"
+    >
+      {mobilePath}
       {EDITOR_LINES.map((line, index) => (
         <div className="editor-line" key={`${index}-${line}`}>
           <span className="line-number" aria-hidden>{index + 1}</span>
@@ -445,17 +329,20 @@ const EditorRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Eleme
 const EmptyEditorRegion = ({
   hidden,
   disabledReason,
-  onCreate
+  onCreate,
+  mobilePath
 }: {
   readonly hidden: boolean;
   readonly disabledReason: string | null;
   readonly onCreate: () => void;
+  readonly mobilePath?: React.ReactNode;
 }): React.JSX.Element => (
   <section className="workspace-region editor-region" role="region" aria-label="Editor" hidden={hidden}>
     <div className="region-toolbar">
       <span className="region-label">Editor</span>
     </div>
-    <div className="empty-editor-state">
+    <div className={`empty-editor-state${mobilePath === undefined ? "" : " workspace-scroll-target"}`}>
+      {mobilePath}
       <h1>No notes yet</h1>
       <p>Create your first Markdown note to start writing.</p>
       <button
@@ -467,18 +354,28 @@ const EmptyEditorRegion = ({
       >
         Create first note
       </button>
+      {disabledReason === null ? null : (
+        <StatusCallout tone="warning">{disabledReason}</StatusCallout>
+      )}
     </div>
   </section>
 );
 
-const PreviewRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Element => (
+const PreviewRegion = ({
+  hidden,
+  mobilePath
+}: {
+  readonly hidden: boolean;
+  readonly mobilePath?: React.ReactNode;
+}): React.JSX.Element => (
   <section className="context-region preview-region" role="region" aria-label="Preview" hidden={hidden}>
     <div className="context-tabs" role="tablist" aria-label="Preview">
       <button className="context-tab touch-target active" type="button" role="tab" aria-selected="true">Preview</button>
       <button className="context-tab touch-target" type="button" role="tab" aria-selected="false">Outline</button>
       <button className="context-tab touch-target" type="button" role="tab" aria-selected="false">Backlinks</button>
     </div>
-    <div className="preview-content">
+    <div className={`preview-content${mobilePath === undefined ? "" : " workspace-scroll-target"}`}>
+      {mobilePath}
       <h1>Plans</h1>
       <p>Notes</p>
       <section>
@@ -496,20 +393,40 @@ const PreviewRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Elem
 const InfoRegion = ({
   hidden,
   attachments,
-  publication
+  publication,
+  attachmentDisabledReason,
+  publicationDisabledReason,
+  publicationHeadingRef
 }: {
   readonly hidden: boolean;
   readonly attachments?: React.ReactNode;
   readonly publication?: React.ReactNode;
+  readonly attachmentDisabledReason?: string | null;
+  readonly publicationDisabledReason?: string | null;
+  readonly publicationHeadingRef?: React.RefObject<HTMLHeadingElement | null>;
 }): React.JSX.Element => (
   <section className="context-region info-region" role="region" aria-label="Info" hidden={hidden}>
     <div className="region-toolbar"><span className="region-label">Info</span></div>
     <div className="info-content">
       <h1>Info</h1>
-      <section><h2>Outline</h2></section>
-      <section><h2>Backlinks</h2></section>
-      {attachments === undefined ? null : <section><h2>Attachments</h2>{attachments}</section>}
-      {publication === undefined ? null : <section><h2>Publication</h2>{publication}</section>}
+      {attachments === undefined ? null : (
+        <section>
+          <h2>Attachments</h2>
+          {attachmentDisabledReason === null || attachmentDisabledReason === undefined ? null : (
+            <p className="control-disabled-reason">{attachmentDisabledReason}</p>
+          )}
+          {attachments}
+        </section>
+      )}
+      {publication === undefined ? null : (
+        <section>
+          <h2 ref={publicationHeadingRef} tabIndex={-1}>Publication</h2>
+          {publicationDisabledReason === null || publicationDisabledReason === undefined ? null : (
+            <p className="control-disabled-reason">{publicationDisabledReason}</p>
+          )}
+          {publication}
+        </section>
+      )}
     </div>
   </section>
 );
@@ -557,6 +474,9 @@ export const OwnerShell = ({
   now
 }: OwnerShellProps = {}): React.JSX.Element => {
   const [activeDestination, setActiveDestination] = useState<Destination>("editor");
+  const [explorerOpen, setExplorerOpen] = useState(true);
+  const [explorerSearchQuery, setExplorerSearchQuery] = useState("");
+  const [expandedFolderIds, setExpandedFolderIds] = useState<ReadonlySet<string>>(() => new Set());
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [pendingOperation, setPendingOperation] = useState<PendingExplorerOperation | null>(null);
   const [operationBusy, setOperationBusy] = useState(false);
@@ -579,9 +499,11 @@ export const OwnerShell = ({
     readonly error: boolean;
   }>({ noteId: null, loading: false, status: null, error: false });
   const insertionTokenRef = useRef(0);
+  const publicationCheckRef = useRef(0);
+  const publicationHeadingRef = useRef<HTMLHeadingElement>(null);
   const publishTriggerRef = useRef<HTMLButtonElement>(null);
-  const isMobileViewport = useMobileViewport();
-  const isWideDesktopViewport = useWideDesktopViewport();
+  const explorerTriggerRef = useRef<HTMLButtonElement>(null);
+  const { layout, compactTablet } = useWorkspaceViewport();
   const selectedEntry = useMemo(
     () => noteId === undefined || vault === undefined
       ? undefined
@@ -636,8 +558,21 @@ export const OwnerShell = ({
   }, [selectedEntry, vault, vaultWikiResolver]);
   const navigateWiki = onNavigateNote ?? onWikiNavigate;
   const notesApi = notes ?? notesClient;
-  const isHidden = (destination: Destination): boolean =>
-    isMobileViewport && activeDestination !== destination;
+  const tabletPrimaryDestination: Exclude<Destination, "files"> = activeDestination === "files"
+    ? "editor"
+    : activeDestination;
+  const isHidden = (destination: Destination): boolean => {
+    if (layout === "desktop") return false;
+    if (destination === "files") {
+      if (layout === "mobile") return activeDestination !== "files";
+      return compactTablet ? false : !explorerOpen;
+    }
+    return (layout === "tablet" ? tabletPrimaryDestination : activeDestination) !== destination;
+  };
+
+  useEffect(() => {
+    if (compactTablet) setExplorerOpen(false);
+  }, [compactTablet]);
 
   const openPalette = useCallback(() => setPaletteOpen(true), []);
   useCommandPaletteShortcut(openPalette);
@@ -659,25 +594,37 @@ export const OwnerShell = ({
     await onRefreshVault?.();
   }, [onRefreshVault]);
 
-  useEffect(() => {
-    setPublishOpen(false);
-    setRevokeOpen(false);
-    setAttachmentInsertion(null);
+  const checkPublicationStatus = useCallback((): void => {
+    const operation = ++publicationCheckRef.current;
     if (noteId === undefined) {
       setPublicationState({ noteId: null, loading: false, status: null, error: false });
       return;
     }
-    let active = true;
     setPublicationState({ noteId, loading: true, status: null, error: false });
     void publicationApi.getStatus(noteId).then((status) => {
-      if (active) setPublicationState({ noteId, loading: false, status, error: false });
+      if (publicationCheckRef.current === operation) {
+        setPublicationState({ noteId, loading: false, status, error: false });
+      }
     }).catch(() => {
-      if (active) setPublicationState({ noteId, loading: false, status: null, error: true });
+      if (publicationCheckRef.current === operation) {
+        setPublicationState({ noteId, loading: false, status: null, error: true });
+      }
     });
-    return () => { active = false; };
   }, [noteId, publicationApi]);
 
+  useEffect(() => {
+    setPublishOpen(false);
+    setRevokeOpen(false);
+    setAttachmentInsertion(null);
+    checkPublicationStatus();
+    return () => { publicationCheckRef.current += 1; };
+  }, [checkPublicationStatus]);
+
   const currentPublication = publicationState.noteId === noteId ? publicationState.status : null;
+  const retryPublicationStatus = useCallback((): void => {
+    publicationHeadingRef.current?.focus({ preventScroll: true });
+    checkPublicationStatus();
+  }, [checkPublicationStatus]);
   const hasAuthoritativeEditorState = noteId !== undefined && selectedEntry !== undefined &&
     editorState.noteId === noteId && editorState.source !== null && editorState.path.length > 0 &&
     editorState.version !== null;
@@ -799,6 +746,18 @@ export const OwnerShell = ({
       target: null
     });
   }, [newNoteFolder]);
+  const openNewNoteInFolder = useCallback((folder: FolderExplorerNode): void => {
+    setOperationError(null);
+    setPendingOperation({
+      operation: {
+        kind: "new-note",
+        selectionKind: "note",
+        initialName: "",
+        initialFolderId: folder.id
+      },
+      target: null
+    });
+  }, []);
 
   const paletteActions = useMemo<readonly CommandPaletteAction[]>(() => {
     const noVault = "Open a complete vault first.";
@@ -1031,7 +990,12 @@ export const OwnerShell = ({
   const publicationPanel = publicationState.noteId !== noteId || publicationState.loading ? (
     <div role="status">Checking publication status</div>
   ) : publicationState.error ? (
-    <p role="alert">Publication status could not be verified.</p>
+    <StatusCallout tone="error">
+      <span>Publication status could not be verified.</span>
+      <button className="secondary-action touch-target" type="button" onClick={retryPublicationStatus}>
+        Check again
+      </button>
+    </StatusCallout>
   ) : currentPublication === null ? (
     <p className="empty-info">Not published</p>
   ) : (
@@ -1047,35 +1011,36 @@ export const OwnerShell = ({
       }}
     />
   );
+  const explorerRegion = (
+    <ExplorerRegion
+      hidden={isHidden("files")}
+      vault={vault}
+      searchQuery={explorerSearchQuery}
+      onSearchQueryChange={setExplorerSearchQuery}
+      expandedFolderIds={expandedFolderIds}
+      onExpandedFolderIdsChange={setExpandedFolderIds}
+      selectedNoteId={noteId}
+      onNavigateNote={onNavigateNote}
+      onRenameFolder={(folder) => openFolderOperation("rename", folder)}
+      onMoveFolder={(folder) => openFolderOperation("move", folder)}
+      onArchiveFolder={archiveFolder === undefined ? undefined : (folder) => void runFolderArchive(folder)}
+      onTrashFolder={runFolderTrash}
+      onCreateNoteInFolder={openNewNoteInFolder}
+      now={now}
+    />
+  );
 
   return (
     <div
       className="owner-shell"
       data-testid="owner-shell"
       data-mobile-destination={activeDestination}
+      data-layout={layout}
+      data-compact-tablet={compactTablet ? "true" : "false"}
+      data-explorer-open={explorerOpen ? "true" : "false"}
     >
-      <ShellHeader
-        activeDestination={activeDestination}
-        onSelect={setActiveDestination}
-        showDesktopDestinations={!isMobileViewport && isWideDesktopViewport}
-        noteTitle={editorState.title}
-        notePath={editorState.path}
-        saveStatus={editorState.status}
-        attachmentAction={attachmentAction}
-        publicationAction={publicationAction}
-      />
       <main className="workspace" aria-label="NXT workspace">
-        <ExplorerRegion
-          hidden={isHidden("files")}
-          vault={vault}
-          selectedNoteId={noteId}
-          onNavigateNote={onNavigateNote}
-          onRenameFolder={(folder) => openFolderOperation("rename", folder)}
-          onMoveFolder={(folder) => openFolderOperation("move", folder)}
-          onArchiveFolder={archiveFolder === undefined ? undefined : (folder) => void runFolderArchive(folder)}
-          onTrashFolder={runFolderTrash}
-          now={now}
-        />
+        {layout === "tablet" && compactTablet ? null : explorerRegion}
         {noteId === undefined ? (
           <>
             {vault !== undefined && vault.entries.length === 0 ? (
@@ -1083,13 +1048,33 @@ export const OwnerShell = ({
                 hidden={isHidden("editor")}
                 disabledReason={newNoteFolder === undefined ? "The Plans or Inbox folder is unavailable." : null}
                 onCreate={openNewNote}
+                mobilePath={layout === "mobile" ? (
+                  <ActiveNotePath className="mobile-content-path" path={editorState.path} withIcon />
+                ) : undefined}
               />
             ) : (
-              <EditorRegion hidden={isHidden("editor")} />
+              <EditorRegion
+                hidden={isHidden("editor")}
+                mobilePath={layout === "mobile" ? (
+                  <ActiveNotePath className="mobile-content-path" path={editorState.path} withIcon />
+                ) : undefined}
+              />
             )}
             <div className="context-column">
-              <PreviewRegion hidden={isHidden("preview")} />
-              <InfoRegion hidden={isHidden("info")} attachments={attachmentCards} publication={publicationPanel} />
+              <PreviewRegion
+                hidden={isHidden("preview")}
+                mobilePath={layout === "mobile" ? (
+                  <ActiveNotePath className="mobile-content-path" path={editorState.path} withIcon />
+                ) : undefined}
+              />
+              <InfoRegion
+                hidden={isHidden("info")}
+                attachments={attachmentCards}
+                publication={publicationPanel}
+                attachmentDisabledReason={attachmentDisabledReason}
+                publicationDisabledReason={publishDisabledReason}
+                publicationHeadingRef={publicationHeadingRef}
+              />
             </div>
           </>
         ) : (
@@ -1110,22 +1095,72 @@ export const OwnerShell = ({
               showStatus={false}
               onStateChange={setEditorState}
               attachmentInsertion={attachmentInsertion}
-              infoRegion={<InfoRegion hidden={isHidden("info")} attachments={attachmentCards} publication={publicationPanel} />}
+              mobile={layout === "mobile"}
+              mobilePath={layout === "mobile" ? (
+                <ActiveNotePath className="mobile-content-path" path={editorState.path} withIcon />
+              ) : undefined}
+              infoRegion={(
+                <InfoRegion
+                  hidden={isHidden("info")}
+                  attachments={attachmentCards}
+                  publication={publicationPanel}
+                  attachmentDisabledReason={attachmentDisabledReason}
+                  publicationDisabledReason={publishDisabledReason}
+                  publicationHeadingRef={publicationHeadingRef}
+                />
+              )}
             />
           </Suspense>
         )}
       </main>
+      <WorkspaceHeader
+        layout={layout}
+        compactTablet={compactTablet}
+        activeDestination={layout === "tablet" ? tabletPrimaryDestination : activeDestination}
+        explorerOpen={layout === "mobile" ? activeDestination === "files" : explorerOpen}
+        explorerTriggerRef={explorerTriggerRef}
+        noteTitle={editorState.title}
+        notePath={editorState.path}
+        saveStatus={editorState.status}
+        attachmentAction={attachmentAction}
+        publicationAction={publicationAction}
+        overflowAction={<OwnerOverflowMenu actions={paletteActions} onOpenCommandPalette={openPalette} />}
+        onToggleExplorer={() => {
+          if (layout === "mobile") {
+            setActiveDestination((current) => current === "files" ? "editor" : "files");
+          } else {
+            setExplorerOpen((current) => !current);
+          }
+        }}
+        onSelectDestination={setActiveDestination}
+        onOpenCommandPalette={openPalette}
+      />
       <footer className="shell-status" aria-label="Info">
         <span>Files</span>
         <span>Editor</span>
         <span>Info</span>
       </footer>
-      <DestinationNavigation
-        label="Mobile destinations"
-        activeDestination={activeDestination}
-        onSelect={setActiveDestination}
-        mobile
-      />
+      {layout === "mobile" ? (
+        <MobileDestinationNav activeDestination={activeDestination} onSelect={setActiveDestination} />
+      ) : null}
+      {layout === "tablet" && compactTablet ? (
+        <Dialog.Root open={explorerOpen} onOpenChange={setExplorerOpen}>
+          <Dialog.Portal>
+            <Dialog.Overlay className="explorer-sheet-overlay" />
+            <Dialog.Content
+              className="explorer-sheet-content"
+              aria-describedby={undefined}
+              onCloseAutoFocus={(event) => {
+                event.preventDefault();
+                explorerTriggerRef.current?.focus();
+              }}
+            >
+              <Dialog.Title className="sr-only">Files</Dialog.Title>
+              {explorerRegion}
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
+      ) : null}
       <Suspense fallback={null}>
         <CommandPalette
           open={paletteOpen}
@@ -1144,7 +1179,7 @@ export const OwnerShell = ({
           onPublished={async (status) => {
             setPublicationState({ noteId, loading: false, status, error: false });
             await refreshVault();
-            setActiveDestination("info");
+            if (layout !== "desktop") setActiveDestination("info");
           }}
         />
       )}

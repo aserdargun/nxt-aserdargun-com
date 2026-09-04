@@ -6,6 +6,7 @@ export interface TagSummary {
 export const TagsPanel = ({ tags, onSelect }: { readonly tags: readonly TagSummary[]; readonly onSelect: (tag: string) => void }): React.JSX.Element => (
   <section className="explorer-section" aria-labelledby="tags-heading">
     <h2 id="tags-heading">Tags</h2>
+    {tags.length === 0 ? <p className="empty-info">No tags yet</p> : null}
     {tags.map(({ tag, count }) => (
       <button className="tree-row touch-target" type="button" key={tag} onClick={() => onSelect(tag)}>
         <span>{tag}</span><small>{count}</small>

@@ -10,7 +10,11 @@ test("offline draft survives reload and returns online cleanly", async ({ ownerP
   await context.setOffline(true);
   try {
     await page.keyboard.insertText("Offline draft marker\n");
-    await expect(page.getByLabel("Save status")).toHaveText("Offline draft");
+    const recovery = page.locator(
+      '.status-callout[data-persistent="true"][data-tone="warning"]'
+    );
+    await expect(recovery).toBeVisible();
+    await expect(recovery).toHaveText("Your local recovery draft remains available.");
   } finally {
     await context.setOffline(false);
   }

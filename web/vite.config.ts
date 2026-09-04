@@ -22,6 +22,7 @@ const assertVisualQaPreviewBinding = (preview: {
 };
 
 export default defineConfig({
+  ...(process.env.NXT_E2E_DISABLE_VITE_HMR === "1" ? { server: { hmr: false } } : {}),
   preview: {
     host: VISUAL_QA_HOST,
     port: VISUAL_QA_PORT,

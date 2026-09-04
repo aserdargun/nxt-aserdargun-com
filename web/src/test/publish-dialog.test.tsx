@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -24,10 +24,14 @@ const json = (status: number, value: unknown): Response => new Response(JSON.str
   headers: { "content-type": "application/json" }
 });
 
-const deferred = <T,>(): { promise: Promise<T>; resolve(value: T): void } => {
+const deferred = <T,>(): { promise: Promise<T>; resolve(value: T): void; reject(reason: unknown): void } => {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => { resolve = next; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((next, fail) => {
+    resolve = next;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 };
 
 afterEach(() => {
@@ -107,6 +111,121 @@ describe("typed publication clients", () => {
 });
 
 describe("publish and revoke dialogs", () => {
+  it("shows and politely announces copy success", async () => {
+    const { PublicationStatus } = await import("../publication/publication-status");
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(navigator, "clipboard", "get").mockReturnValue({ writeText } as unknown as Clipboard);
+    render(
+      <PublicationStatus
+        status={STATUS}
+        client={{ getStatus: vi.fn(), publish: vi.fn(), revoke: vi.fn() }}
+        onRevoked={vi.fn()}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Copy link" }));
+    const feedback = await screen.findByText("Link copied.");
+    expect(feedback).toBeVisible();
+    expect(feedback).toHaveClass("publication-copy-status");
+    expect(feedback).not.toHaveClass("sr-only");
+    expect(feedback).toHaveAttribute("aria-live", "polite");
+    expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/p/${PUBLIC_ID}`);
+  });
+
+  it("keeps clipboard unavailability visible and polite", async () => {
+    const { PublicationStatus } = await import("../publication/publication-status");
+    const user = userEvent.setup();
+    vi.spyOn(navigator, "clipboard", "get").mockReturnValue(undefined as unknown as Clipboard);
+    render(
+      <PublicationStatus
+        status={STATUS}
+        client={{ getStatus: vi.fn(), publish: vi.fn(), revoke: vi.fn() }}
+        onRevoked={vi.fn()}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Copy link" }));
+    const feedback = screen.getByText("Copy unavailable");
+    expect(feedback).toBeVisible();
+    expect(feedback).toHaveClass("publication-copy-status");
+    expect(feedback).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("keeps the newest copy result when clipboard attempts settle out of order", async () => {
+    const { PublicationStatus } = await import("../publication/publication-status");
+    const user = userEvent.setup();
+    const older = deferred<void>();
+    const newer = deferred<void>();
+    const writeText = vi.fn()
+      .mockImplementationOnce(() => older.promise)
+      .mockImplementationOnce(() => newer.promise);
+    vi.spyOn(navigator, "clipboard", "get").mockReturnValue({ writeText } as unknown as Clipboard);
+    render(
+      <PublicationStatus
+        status={STATUS}
+        client={{ getStatus: vi.fn(), publish: vi.fn(), revoke: vi.fn() }}
+        onRevoked={vi.fn()}
+      />
+    );
+
+    const copy = screen.getByRole("button", { name: "Copy link" });
+    await user.click(copy);
+    await user.click(copy);
+    expect(writeText).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      newer.resolve(undefined);
+      await newer.promise;
+    });
+    expect(screen.getByText("Link copied.")).toBeVisible();
+
+    await act(async () => {
+      older.reject(new Error("older copy failed"));
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Link copied.")).toBeVisible();
+    expect(screen.queryByText("Copy unavailable")).not.toBeInTheDocument();
+  });
+
+  it("drops an old publication copy completion and allows copying the new link", async () => {
+    const { PublicationStatus } = await import("../publication/publication-status");
+    const user = userEvent.setup();
+    const older = deferred<void>();
+    const nextPublicId = "B".repeat(22);
+    const nextStatus = { ...STATUS, publicId: nextPublicId };
+    const writeText = vi.fn()
+      .mockImplementationOnce(() => older.promise)
+      .mockResolvedValueOnce(undefined);
+    vi.spyOn(navigator, "clipboard", "get").mockReturnValue({ writeText } as unknown as Clipboard);
+    const view = render(
+      <PublicationStatus
+        status={STATUS}
+        client={{ getStatus: vi.fn(), publish: vi.fn(), revoke: vi.fn() }}
+        onRevoked={vi.fn()}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Copy link" }));
+    view.rerender(
+      <PublicationStatus
+        status={nextStatus}
+        client={{ getStatus: vi.fn(), publish: vi.fn(), revoke: vi.fn() }}
+        onRevoked={vi.fn()}
+      />
+    );
+    await act(async () => {
+      older.resolve(undefined);
+      await older.promise;
+    });
+    expect(screen.queryByText("Link copied.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Copy unavailable")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Copy link" }));
+    expect(await screen.findByText("Link copied.")).toBeVisible();
+    expect(writeText).toHaveBeenLastCalledWith(`${window.location.origin}/p/${nextPublicId}`);
+  });
+
   it("restores focus to the publish trigger after a verified publish closes", async () => {
     const { PublishDialog } = await import("../publication/publish-dialog");
     const user = userEvent.setup();

@@ -17,7 +17,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { RouterProvider, createMemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useState } from "react";
+import { StrictMode, useState } from "react";
 import { ApiClientError, ApiContractError } from "../api/client";
 import type { AttachmentClient } from "../api/attachments";
 import { notesClient, type NotesClient } from "../api/notes";
@@ -31,7 +31,7 @@ import type {
   RecoveryCopy,
   RecoveryInput
 } from "../editor/draft-store";
-import { EditorWorkspace } from "../editor/editor-workspace";
+import { EditorWorkspace, type EditorWorkspaceState } from "../editor/editor-workspace";
 import { MarkdownEditor } from "../editor/markdown-editor";
 import { MarkdownPreview } from "../editor/markdown-preview";
 
@@ -46,14 +46,19 @@ const REQUEST_ID = "00000000-0000-4000-8000-000000000001";
 
 const source = (
   body: string,
-  input: { readonly id?: string; readonly title?: string; readonly updated?: string } = {}
+  input: {
+    readonly aliases?: readonly string[];
+    readonly id?: string;
+    readonly title?: string;
+    readonly updated?: string;
+  } = {}
 ): string => `---
 id: "${input.id ?? NOTE_ID}"
 title: "${input.title ?? "Plan"}"
 created: "2026-08-23T09:00:00.000Z"
 updated: "${input.updated ?? "2026-08-23T09:03:00.000Z"}"
 tags: []
-aliases: []
+aliases: [${(input.aliases ?? []).map((alias) => JSON.stringify(alias)).join(", ")}]
 ---
 
 ${body.replace(/\n*$/u, "")}
@@ -67,7 +72,12 @@ const MERGED_SOURCE = source("# Merged", { updated: "2026-08-23T09:16:00.000Z" }
 
 const noteDocument = (
   body: string,
-  input: { readonly id?: string; readonly title?: string; readonly updated?: string } = {}
+  input: {
+    readonly aliases?: readonly string[];
+    readonly id?: string;
+    readonly title?: string;
+    readonly updated?: string;
+  } = {}
 ): NoteResponse["note"] => ({
   frontmatter: {
     id: input.id ?? NOTE_ID,
@@ -75,7 +85,7 @@ const noteDocument = (
     created: "2026-08-23T09:00:00.000Z",
     updated: input.updated ?? "2026-08-23T09:03:00.000Z",
     tags: [],
-    aliases: []
+    aliases: [...(input.aliases ?? [])]
   },
   body: `\n${body.replace(/^\n+|\n+$/gu, "")}\n`
 });
@@ -83,6 +93,7 @@ const noteDocument = (
 const response = (
   body: string,
   input: {
+    readonly aliases?: readonly string[];
     readonly id?: string;
     readonly title?: string;
     readonly updated?: string;
@@ -258,6 +269,45 @@ const notesHarness = (initial: NoteResponse = BASE_RESPONSE): NotesHarness => {
   };
 };
 
+const stubMutableViewport = (initialWidth: number): {
+  readonly setWidth: (width: number) => void;
+} => {
+  let width = initialWidth;
+  const listeners = new Set<EventListener>();
+  vi.stubGlobal("matchMedia", vi.fn((query: string): MediaQueryList => {
+    const constraints = Array.from(
+      query.matchAll(/\((min|max)-width:\s*(\d+)px\)/gu),
+      ([, boundary, value]) => ({ boundary, value: Number(value) })
+    );
+    return {
+      get matches(): boolean {
+        return constraints.every(({ boundary, value }) =>
+          boundary === "min" ? width >= value : width <= value
+        );
+      },
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn((event: string, listener: EventListenerOrEventListenerObject | null) => {
+        if (event === "change" && typeof listener === "function") listeners.add(listener);
+      }),
+      removeEventListener: vi.fn((event: string, listener: EventListenerOrEventListenerObject | null) => {
+        if (event === "change" && typeof listener === "function") listeners.delete(listener);
+      }),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(() => true)
+    };
+  }));
+  return {
+    setWidth(nextWidth: number): void {
+      width = nextWidth;
+      act(() => {
+        for (const listener of listeners) listener(new Event("change"));
+      });
+    }
+  };
+};
+
 const deferred = <T,>(): {
   readonly promise: Promise<T>;
   readonly resolve: (value: T) => void;
@@ -277,6 +327,218 @@ const getEditorView = async (): Promise<EditorView> => {
   const view = EditorView.findFromDOM(textbox);
   if (view === null) throw new Error("CodeMirror view is unavailable.");
   return view;
+};
+
+const installCodeMirrorGeometryHarness = (lineCount: number): {
+  readonly getScrollTop: () => number;
+  readonly getWindowScrollCalls: () => readonly unknown[][];
+  readonly resetScrollWrites: () => void;
+  readonly restore: () => void;
+  readonly scrollWrites: readonly number[];
+} => {
+  const viewportHeight = 240;
+  const viewportWidth = 640;
+  const lineHeight = 20;
+  const documentHeight = lineCount * lineHeight;
+  let scrollTop = 0;
+  const scrollWrites: number[] = [];
+  const restores: Array<() => void> = [];
+  const override = (target: object, key: PropertyKey, descriptor: PropertyDescriptor): void => {
+    const original = Object.getOwnPropertyDescriptor(target, key);
+    Object.defineProperty(target, key, descriptor);
+    restores.push(() => {
+      if (original === undefined) Reflect.deleteProperty(target, key);
+      else Object.defineProperty(target, key, original);
+    });
+  };
+  const isScroller = (element: Element): boolean => element.classList.contains("cm-scroller");
+  const readNativeNumber = (
+    descriptor: PropertyDescriptor | undefined,
+    receiver: object
+  ): number => {
+    if (descriptor?.get === undefined) return 0;
+    const value: unknown = descriptor.get.call(receiver);
+    if (typeof value !== "number") throw new Error("A native geometry accessor returned a non-number.");
+    return value;
+  };
+  const writeNativeNumber = (
+    descriptor: PropertyDescriptor,
+    receiver: object,
+    value: number
+  ): void => {
+    if (descriptor.set === undefined) throw new Error("A native geometry setter is unavailable.");
+    descriptor.set.call(receiver, value);
+  };
+  const callNativeZeroArgumentMethod = (
+    descriptor: PropertyDescriptor | undefined,
+    receiver: object
+  ): unknown => {
+    const method: unknown = descriptor?.value;
+    if (typeof method !== "function") throw new Error("A native geometry method is unavailable.");
+    return Reflect.apply(method, receiver, []);
+  };
+  const readNativeRect = (
+    descriptor: PropertyDescriptor | undefined,
+    receiver: object
+  ): DOMRect => {
+    const value = callNativeZeroArgumentMethod(descriptor, receiver);
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      !("x" in value) || typeof value.x !== "number" ||
+      !("y" in value) || typeof value.y !== "number" ||
+      !("width" in value) || typeof value.width !== "number" ||
+      !("height" in value) || typeof value.height !== "number"
+    ) {
+      throw new Error("A native geometry method returned a non-rectangle.");
+    }
+    return new DOMRect(value.x, value.y, value.width, value.height);
+  };
+  const toDomRectList = (values: readonly DOMRect[]): DOMRectList => {
+    const rects = [...values];
+    return Object.assign(rects, {
+      item: (index: number): DOMRect | null => rects[index] ?? null
+    });
+  };
+  const readNativeRectList = (
+    descriptor: PropertyDescriptor | undefined,
+    receiver: object
+  ): DOMRectList => {
+    const value = callNativeZeroArgumentMethod(descriptor, receiver);
+    const isRectArray = (candidate: unknown): candidate is DOMRect[] =>
+      Array.isArray(candidate) && candidate.every((item: unknown) => item instanceof DOMRect);
+    if (!isRectArray(value)) {
+      throw new Error("A native geometry method returned a non-rectangle-list.");
+    }
+    return toDomRectList(value);
+  };
+
+  const elementPrototype = Element.prototype;
+  const htmlElementPrototype = HTMLElement.prototype;
+  const nativeClientHeight = Object.getOwnPropertyDescriptor(elementPrototype, "clientHeight");
+  const nativeClientWidth = Object.getOwnPropertyDescriptor(elementPrototype, "clientWidth");
+  const nativeScrollHeight = Object.getOwnPropertyDescriptor(elementPrototype, "scrollHeight");
+  const nativeScrollWidth = Object.getOwnPropertyDescriptor(elementPrototype, "scrollWidth");
+  const nativeScrollTop = Object.getOwnPropertyDescriptor(elementPrototype, "scrollTop");
+  const nativeOffsetHeight = Object.getOwnPropertyDescriptor(htmlElementPrototype, "offsetHeight");
+  const nativeOffsetWidth = Object.getOwnPropertyDescriptor(htmlElementPrototype, "offsetWidth");
+  if (nativeScrollTop?.get === undefined || nativeScrollTop.set === undefined) {
+    throw new Error("jsdom scrollTop accessors are unavailable.");
+  }
+
+  override(elementPrototype, "clientHeight", {
+    configurable: true,
+    get(this: Element): number {
+      return isScroller(this) ? viewportHeight : readNativeNumber(nativeClientHeight, this);
+    }
+  });
+  override(elementPrototype, "clientWidth", {
+    configurable: true,
+    get(this: Element): number {
+      return isScroller(this) ? viewportWidth : readNativeNumber(nativeClientWidth, this);
+    }
+  });
+  override(elementPrototype, "scrollHeight", {
+    configurable: true,
+    get(this: Element): number {
+      return isScroller(this) ? documentHeight : readNativeNumber(nativeScrollHeight, this);
+    }
+  });
+  override(elementPrototype, "scrollWidth", {
+    configurable: true,
+    get(this: Element): number {
+      return isScroller(this) ? viewportWidth : readNativeNumber(nativeScrollWidth, this);
+    }
+  });
+  override(elementPrototype, "scrollTop", {
+    configurable: true,
+    get(this: Element): number {
+      return isScroller(this) ? scrollTop : readNativeNumber(nativeScrollTop, this);
+    },
+    set(this: Element, value: number) {
+      if (isScroller(this)) {
+        scrollTop = Math.max(0, Math.min(Number(value), documentHeight - viewportHeight));
+        scrollWrites.push(scrollTop);
+      } else {
+        writeNativeNumber(nativeScrollTop, this, value);
+      }
+    }
+  });
+  override(htmlElementPrototype, "offsetHeight", {
+    configurable: true,
+    get(this: HTMLElement): number {
+      if (isScroller(this) || this.classList.contains("cm-editor")) return viewportHeight;
+      if (this.classList.contains("cm-content")) return documentHeight;
+      if (this.classList.contains("cm-line")) return lineHeight;
+      return readNativeNumber(nativeOffsetHeight, this);
+    }
+  });
+  override(htmlElementPrototype, "offsetWidth", {
+    configurable: true,
+    get(this: HTMLElement): number {
+      if (this.closest(".cm-editor") !== null) return viewportWidth;
+      return readNativeNumber(nativeOffsetWidth, this);
+    }
+  });
+
+  const rect = (left: number, top: number, width: number, height: number): DOMRect =>
+    new DOMRect(left, top, width, height);
+  const nativeElementRect = Object.getOwnPropertyDescriptor(Element.prototype, "getBoundingClientRect");
+  const elementRectSpy = vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(
+    function(this: Element): DOMRect {
+      if (isScroller(this) || this.classList.contains("cm-editor")) {
+        return rect(0, 0, viewportWidth, viewportHeight);
+      }
+      if (this.classList.contains("cm-content")) {
+        return rect(0, -scrollTop, viewportWidth, documentHeight);
+      }
+      if (this.classList.contains("cm-line")) {
+        const lineNumber = Number(/^line (\d+)$/u.exec(this.textContent?.trim() ?? "")?.[1]);
+        const top = Number.isFinite(lineNumber) ? (lineNumber - 1) * lineHeight - scrollTop : 0;
+        return rect(0, top, viewportWidth, lineHeight);
+      }
+      return readNativeRect(nativeElementRect, this);
+    }
+  );
+
+  const nativeRangeRects = Object.getOwnPropertyDescriptor(Range.prototype, "getClientRects");
+  const nativeRangeRect = Object.getOwnPropertyDescriptor(Range.prototype, "getBoundingClientRect");
+  const windowScrollBySpy = vi.spyOn(window, "scrollBy").mockImplementation(() => {});
+  const rangeRectsSpy = vi.spyOn(Range.prototype, "getClientRects").mockImplementation(
+    function(this: Range): DOMRectList {
+      const startElement = this.startContainer.nodeType === Node.ELEMENT_NODE
+        ? this.startContainer as Element
+        : this.startContainer.parentElement;
+      const line = startElement?.closest(".cm-line");
+      if (line === null || line === undefined) return readNativeRectList(nativeRangeRects, this);
+      const lineRect = line.getBoundingClientRect();
+      const start = this.startOffset;
+      const end = Math.max(start + 1, this.endOffset);
+      return toDomRectList([rect(72 + start * 8, lineRect.top, (end - start) * 8, lineHeight)]);
+    }
+  );
+  const rangeRectSpy = vi.spyOn(Range.prototype, "getBoundingClientRect").mockImplementation(
+    function(this: Range): DOMRect {
+      return this.getClientRects()[0] ?? readNativeRect(nativeRangeRect, this);
+    }
+  );
+
+  return {
+    getScrollTop: () => scrollTop,
+    getWindowScrollCalls: () => windowScrollBySpy.mock.calls,
+    resetScrollWrites: () => {
+      scrollWrites.length = 0;
+      windowScrollBySpy.mockClear();
+    },
+    restore: () => {
+      rangeRectSpy.mockRestore();
+      rangeRectsSpy.mockRestore();
+      elementRectSpy.mockRestore();
+      windowScrollBySpy.mockRestore();
+      for (const restore of restores.reverse()) restore();
+    },
+    scrollWrites
+  };
 };
 
 const replaceEditorSource = (view: EditorView, nextSource: string): void => {
@@ -402,6 +664,24 @@ describe("production note request boundary", () => {
 });
 
 describe("editor load and durable drafts", () => {
+  it("retains the Markdown editor DOM node when editor visibility changes", async () => {
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    const props = {
+      noteId: NOTE_ID,
+      draftStore: store,
+      notes: notes.client,
+      hiddenEditor: false,
+      hiddenPreview: false
+    };
+    const view = render(<EditorWorkspace {...props} />);
+
+    const editor = await screen.findByRole("textbox", { name: "Markdown editor" });
+    view.rerender(<EditorWorkspace {...props} hiddenEditor hiddenPreview={false} />);
+
+    expect(screen.getByRole("textbox", { name: "Markdown editor", hidden: true })).toBe(editor);
+  });
+
   it("restores a differing local draft without silently replacing it", async () => {
     const store = new MemoryDraftStore();
     await store.put({
@@ -819,6 +1099,356 @@ describe("editor load and durable drafts", () => {
     expect(store.drafts.has(NOTE_ID)).toBe(false);
   });
 
+  it("adopts the exact canonical same-parent rename response and confirms its submitted draft", async () => {
+    const renamedSource = source("# Local", { title: "Renamed" });
+    const canonicalSource = source("# Local", { title: "Renamed", aliases: ["Plan"] });
+    const canonicalResponse = response("# Local", {
+      title: "Renamed",
+      aliases: ["Plan"],
+      version: "8",
+      path: "Notes/Renamed.md"
+    });
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    notes.updateNote.mockResolvedValueOnce(canonicalResponse);
+    let latestState: EditorWorkspaceState | undefined;
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+        onStateChange={(state) => {
+          latestState = state;
+        }}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+
+    replaceEditorSource(view, renamedSource);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await flushMicrotasks();
+    vi.useRealTimers();
+
+    await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved"));
+    expect(view.state.doc.toString()).toBe(canonicalSource);
+    expect(latestState).toMatchObject({
+      source: canonicalSource,
+      version: "8",
+      path: "Notes/Renamed.md",
+      status: "Saved"
+    });
+    expect(store.drafts.has(NOTE_ID)).toBe(false);
+  });
+
+  it("rebases a newer local generation onto the canonical rename without losing its body", async () => {
+    const submittedSource = source("# First body", { title: "Renamed" });
+    const newerSource = source("# Newer body", { title: "Renamed" });
+    const canonicalSubmittedSource = source("# First body", {
+      title: "Renamed",
+      aliases: ["Plan"]
+    });
+    const rebasedNewerSource = source("# Newer body", {
+      title: "Renamed",
+      aliases: ["Plan"]
+    });
+    const first = deferred<NoteResponse>();
+    const second = deferred<NoteResponse>();
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    notes.updateNote.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+
+    replaceEditorSource(view, submittedSource);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    replaceEditorSource(view, newerSource);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    expect(notes.updateNote).toHaveBeenCalledTimes(1);
+
+    first.resolve(response("# First body", {
+      title: "Renamed",
+      aliases: ["Plan"],
+      version: "8",
+      path: "Notes/Renamed.md"
+    }));
+    await flushMicrotasks();
+    vi.useRealTimers();
+
+    await waitFor(() => expect(notes.updateNote).toHaveBeenCalledTimes(2));
+    expect(notes.updateNote).toHaveBeenNthCalledWith(1, NOTE_ID, {
+      expectedVersion: "7",
+      source: submittedSource
+    });
+    expect(notes.updateNote).toHaveBeenNthCalledWith(2, NOTE_ID, {
+      expectedVersion: "8",
+      source: rebasedNewerSource
+    });
+    expect(view.state.doc.toString()).toBe(rebasedNewerSource);
+    expect(view.state.doc.toString()).toContain("# Newer body");
+    expect(view.state.doc.toString()).not.toBe(canonicalSubmittedSource);
+    expect(store.drafts.get(NOTE_ID)).toMatchObject({
+      source: rebasedNewerSource,
+      baseVersion: "8",
+      path: "Notes/Renamed.md"
+    });
+    expect(screen.queryByRole("dialog", { name: "Version conflict" })).not.toBeInTheDocument();
+
+    second.resolve(response("# Newer body", {
+      title: "Renamed",
+      aliases: ["Plan"],
+      version: "9",
+      path: "Notes/Renamed.md"
+    }));
+    await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved"));
+    expect(store.drafts.has(NOTE_ID)).toBe(false);
+  });
+
+  it("durably rebases the current generation before resuming a canonical rename save", async () => {
+    const submittedSource = source("# First body", { title: "Renamed" });
+    const newerSource = source("# Newer body", { title: "Renamed" });
+    const thirdSource = source("# Third body", { title: "Renamed" });
+    const rebasedNewerSource = source("# Newer body", {
+      title: "Renamed",
+      aliases: ["Plan"]
+    });
+    const rebasedThirdSource = source("# Third body", {
+      title: "Renamed",
+      aliases: ["Plan"]
+    });
+    const firstResponse = deferred<NoteResponse>();
+    const secondResponse = deferred<NoteResponse>();
+    const firstRebaseWrite = deferred<void>();
+    const currentRebaseWrite = deferred<void>();
+    const store = new MemoryDraftStore();
+    let firstRebaseStarted = false;
+    let currentRebaseStarted = false;
+    vi.spyOn(store, "put").mockImplementation((draft) => {
+      const persist = (): void => {
+        store.drafts.set(draft.noteId, { ...draft });
+      };
+      if (draft.source === rebasedNewerSource && draft.baseVersion === "8") {
+        firstRebaseStarted = true;
+        return firstRebaseWrite.promise.then(persist);
+      }
+      if (draft.source === rebasedThirdSource && draft.baseVersion === "8") {
+        currentRebaseStarted = true;
+        return currentRebaseWrite.promise.then(persist);
+      }
+      persist();
+      return Promise.resolve();
+    });
+    const notes = notesHarness();
+    notes.updateNote
+      .mockReturnValueOnce(firstResponse.promise)
+      .mockReturnValueOnce(secondResponse.promise);
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+
+    replaceEditorSource(view, submittedSource);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    replaceEditorSource(view, newerSource);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+
+    firstResponse.resolve(response("# First body", {
+      title: "Renamed",
+      aliases: ["Plan"],
+      version: "8",
+      path: "Notes/Renamed.md"
+    }));
+    await flushMicrotasks();
+    vi.useRealTimers();
+    await waitFor(() => expect(firstRebaseStarted).toBe(true));
+    expect(view.state.doc.toString()).toBe(newerSource);
+
+    vi.useFakeTimers();
+    replaceEditorSource(view, thirdSource);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    expect(notes.updateNote).toHaveBeenCalledTimes(1);
+
+    vi.useRealTimers();
+    firstRebaseWrite.resolve();
+    await flushMicrotasks();
+    await waitFor(() => expect(currentRebaseStarted).toBe(true));
+    expect(notes.updateNote).toHaveBeenCalledTimes(1);
+
+    currentRebaseWrite.resolve();
+    await flushMicrotasks();
+    await waitFor(() => expect(notes.updateNote).toHaveBeenCalledTimes(2));
+    expect(notes.updateNote).toHaveBeenNthCalledWith(2, NOTE_ID, {
+      expectedVersion: "8",
+      source: rebasedThirdSource
+    });
+    expect(store.drafts.get(NOTE_ID)).toMatchObject({
+      source: rebasedThirdSource,
+      baseVersion: "8",
+      path: "Notes/Renamed.md"
+    });
+    expect(view.state.doc.toString()).toBe(rebasedThirdSource);
+
+    secondResponse.resolve(response("# Third body", {
+      title: "Renamed",
+      aliases: ["Plan"],
+      version: "9",
+      path: "Notes/Renamed.md"
+    }));
+    await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved"));
+    expect(store.drafts.has(NOTE_ID)).toBe(false);
+  });
+
+  it("does not resume a canonical rename save when its rebase draft write fails", async () => {
+    const submittedSource = source("# First body", { title: "Renamed" });
+    const newerSource = source("# Newer body", { title: "Renamed" });
+    const rebasedNewerSource = source("# Newer body", {
+      title: "Renamed",
+      aliases: ["Plan"]
+    });
+    const firstResponse = deferred<NoteResponse>();
+    const rebaseWrite = deferred<void>();
+    const store = new MemoryDraftStore();
+    let rebaseStarted = false;
+    vi.spyOn(store, "put").mockImplementation((draft) => {
+      if (draft.source === rebasedNewerSource && draft.baseVersion === "8") {
+        rebaseStarted = true;
+        return rebaseWrite.promise;
+      }
+      store.drafts.set(draft.noteId, { ...draft });
+      return Promise.resolve();
+    });
+    const notes = notesHarness();
+    notes.updateNote.mockReturnValueOnce(firstResponse.promise);
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+
+    replaceEditorSource(view, submittedSource);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    replaceEditorSource(view, newerSource);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    firstResponse.resolve(response("# First body", {
+      title: "Renamed",
+      aliases: ["Plan"],
+      version: "8",
+      path: "Notes/Renamed.md"
+    }));
+    await flushMicrotasks();
+    vi.useRealTimers();
+    await waitFor(() => expect(rebaseStarted).toBe(true));
+
+    rebaseWrite.reject(new Error("Draft storage failed"));
+    await flushMicrotasks();
+
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Error");
+    expect(notes.updateNote).toHaveBeenCalledTimes(1);
+    expect(store.drafts.get(NOTE_ID)).toMatchObject({
+      source: newerSource,
+      baseVersion: "7",
+      path: "Notes/Plan.md"
+    });
+  });
+
+  it("does not resume a canonical rename save with a malformed generation typed during rebase", async () => {
+    const submittedSource = source("# First body", { title: "Renamed" });
+    const newerSource = source("# Newer body", { title: "Renamed" });
+    const malformedSource = "---\nid: not-a-valid-note\n---\n\n# Third body\n";
+    const rebasedNewerSource = source("# Newer body", {
+      title: "Renamed",
+      aliases: ["Plan"]
+    });
+    const firstResponse = deferred<NoteResponse>();
+    const rebaseWrite = deferred<void>();
+    const store = new MemoryDraftStore();
+    let rebaseStarted = false;
+    vi.spyOn(store, "put").mockImplementation((draft) => {
+      const persist = (): void => {
+        store.drafts.set(draft.noteId, { ...draft });
+      };
+      if (draft.source === rebasedNewerSource && draft.baseVersion === "8") {
+        rebaseStarted = true;
+        return rebaseWrite.promise.then(persist);
+      }
+      persist();
+      return Promise.resolve();
+    });
+    const notes = notesHarness();
+    notes.updateNote.mockReturnValueOnce(firstResponse.promise);
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+
+    replaceEditorSource(view, submittedSource);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    replaceEditorSource(view, newerSource);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    firstResponse.resolve(response("# First body", {
+      title: "Renamed",
+      aliases: ["Plan"],
+      version: "8",
+      path: "Notes/Renamed.md"
+    }));
+    await flushMicrotasks();
+    vi.useRealTimers();
+    await waitFor(() => expect(rebaseStarted).toBe(true));
+
+    vi.useFakeTimers();
+    replaceEditorSource(view, malformedSource);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    vi.useRealTimers();
+    rebaseWrite.resolve();
+    await flushMicrotasks();
+
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Error");
+    expect(notes.updateNote).toHaveBeenCalledTimes(1);
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(malformedSource);
+  });
+
   it("does not let a stale network failure relabel or drop a newer queued edit", async () => {
     const store = new MemoryDraftStore();
     const notes = notesHarness();
@@ -896,8 +1526,69 @@ describe("editor load and durable drafts", () => {
     const notes = notesHarness();
     notes.updateNote.mockResolvedValueOnce(response("# Local", {
       title: "Renamed",
+      aliases: ["Plan"],
       version: "8",
       path: "Archive/Renamed.md"
+    }));
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, renamedSource);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await flushMicrotasks();
+
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Error");
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(renamedSource);
+  });
+
+  it("rejects a same-parent rename response that injects an unrelated alias", async () => {
+    const renamedSource = source("# Local", { title: "Renamed" });
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    notes.updateNote.mockResolvedValueOnce(response("# Local", {
+      title: "Renamed",
+      aliases: ["Plan", "Unrelated"],
+      version: "8",
+      path: "Notes/Renamed.md"
+    }));
+    render(
+      <EditorWorkspace
+        noteId={NOTE_ID}
+        hiddenEditor={false}
+        hiddenPreview={false}
+        draftStore={store}
+        notes={notes.client}
+      />
+    );
+    const view = await getEditorView();
+    vi.useFakeTimers();
+    replaceEditorSource(view, renamedSource);
+    await flushMicrotasks();
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await flushMicrotasks();
+
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Error");
+    expect(store.drafts.get(NOTE_ID)?.source).toBe(renamedSource);
+  });
+
+  it("rejects a canonical rename response with an unrelated same-parent basename", async () => {
+    const renamedSource = source("# Local", { title: "Renamed" });
+    const store = new MemoryDraftStore();
+    const notes = notesHarness();
+    notes.updateNote.mockResolvedValueOnce(response("# Local", {
+      title: "Renamed",
+      aliases: ["Plan"],
+      version: "8",
+      path: "Notes/Other.md"
     }));
     render(
       <EditorWorkspace
@@ -955,7 +1646,10 @@ describe("editor load and durable drafts", () => {
     expect(notes.getNote).toHaveBeenNthCalledWith(1, NOTE_ID);
     expect(notes.getNote).toHaveBeenNthCalledWith(2, NOTE_ID);
     const dialog = screen.getByRole("dialog", { name: "Version conflict" });
-    expect(within(dialog).getByRole("textbox", { name: "Local draft" })).toHaveValue(LOCAL_SOURCE);
+    const localEditor = within(dialog).getByRole("textbox", { name: "Local draft" });
+    const conflictView = EditorView.findFromDOM(localEditor);
+    if (conflictView === null) throw new Error("Local conflict editor is unavailable.");
+    expect(conflictView.state.doc.toString()).toBe(LOCAL_SOURCE);
     expect(within(dialog).getByRole("region", { name: "Drive version" })).toHaveTextContent("# Latest Drive");
     expect(view.state.doc.toString()).toBe(LOCAL_SOURCE);
     expect(store.drafts.get(NOTE_ID)?.source).toBe(LOCAL_SOURCE);
@@ -1211,7 +1905,9 @@ describe("conflict recovery outcomes", () => {
     await flushMicrotasks();
     vi.useRealTimers();
     const mergeEditor = await screen.findByRole("textbox", { name: "Local draft" });
-    fireEvent.change(mergeEditor, { target: { value: MERGED_SOURCE } });
+    const mergeView = EditorView.findFromDOM(mergeEditor);
+    if (mergeView === null) throw new Error("Local conflict editor is unavailable.");
+    replaceEditorSource(mergeView, MERGED_SOURCE);
     await flushMicrotasks();
     expect(store.drafts.get(NOTE_ID)?.source).toBe(MERGED_SOURCE);
     const merge = screen.getByRole("button", { name: "Merge versions" });
@@ -1365,9 +2061,158 @@ describe("CodeMirror production configuration", () => {
     expect(onChange).not.toHaveBeenCalled();
     expect(onLimitExceeded).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps the native scrollDOM authoritative with a leading mobile path in a long document", async () => {
+    const geometry = installCodeMirrorGeometryHarness(600);
+    const editorSource = Array.from({ length: 600 }, (_, index) => `line ${index + 1}`).join("\n");
+    const leadingContent = (
+      <div className="mobile-content-path" data-testid="editor-leading-path">Notes/Long.md</div>
+    );
+    const editorElement = (content?: React.ReactNode): React.JSX.Element => (
+      <StrictMode>
+        <MarkdownEditor value={editorSource} onChange={vi.fn()} leadingContent={content} />
+      </StrictMode>
+    );
+    try {
+      const rendered = render(editorElement(leadingContent));
+      const editor = await screen.findByRole("textbox", { name: "Markdown editor" });
+      const view = EditorView.findFromDOM(editor);
+      if (view === null) throw new Error("CodeMirror view is unavailable.");
+      const scrollDOM = view.scrollDOM;
+      const leadingPath = screen.getByTestId("editor-leading-path");
+
+      expect(editor.closest(".cm-scroller")).toBe(scrollDOM);
+      expect(scrollDOM).toHaveClass("workspace-scroll-target");
+      expect(scrollDOM).toContainElement(leadingPath);
+      expect(scrollDOM.firstElementChild).toHaveClass("markdown-editor-leading-slot");
+      expect(scrollDOM.firstElementChild?.firstElementChild).toBe(leadingPath);
+      expect(getComputedStyle(scrollDOM).overflow).toBe("auto");
+      await waitFor(() => expect(view.defaultLineHeight).toBe(20));
+
+      const targetOffset = view.state.doc.line(550).from;
+      expect(view.viewport.to).toBeLessThan(targetOffset);
+      expect(view.visibleRanges.some(({ from, to }) => from <= targetOffset && to >= targetOffset)).toBe(false);
+      act(() => {
+        scrollDOM.scrollTop = 320;
+        fireEvent.scroll(scrollDOM);
+      });
+      expect(geometry.getScrollTop()).toBe(320);
+      geometry.resetScrollWrites();
+
+      act(() => {
+        view.dispatch({
+          selection: { anchor: targetOffset },
+          effects: EditorView.scrollIntoView(targetOffset, { y: "center" })
+        });
+      });
+
+      await waitFor(() => expect(geometry.getScrollTop()).toBeGreaterThan(320));
+      expect(geometry.scrollWrites.at(-1)).toBe(geometry.getScrollTop());
+      expect(geometry.getWindowScrollCalls().every(([, vertical]) => vertical === 0)).toBe(true);
+      expect(view.scrollDOM).toBe(scrollDOM);
+      expect(view.state.doc.toString()).toBe(editorSource);
+      expect(view.state.selection.main.head).toBe(targetOffset);
+      expect(view.viewport.from).toBeLessThanOrEqual(targetOffset);
+      expect(view.viewport.to).toBeGreaterThanOrEqual(targetOffset);
+      expect(view.visibleRanges.some(({ from, to }) => from <= targetOffset && to >= targetOffset)).toBe(true);
+      const targetRect = view.coordsAtPos(targetOffset);
+      expect(targetRect).not.toBeNull();
+      expect(targetRect?.top).toBeGreaterThanOrEqual(scrollDOM.getBoundingClientRect().top);
+      expect(targetRect?.bottom).toBeLessThanOrEqual(scrollDOM.getBoundingClientRect().bottom);
+
+      rendered.rerender(editorElement());
+      expect(view.scrollDOM).toBe(scrollDOM);
+      expect(scrollDOM).not.toHaveClass("workspace-scroll-target");
+      expect(screen.queryByTestId("editor-leading-path")).not.toBeInTheDocument();
+
+      rendered.rerender(editorElement(leadingContent));
+      expect(screen.getByRole("textbox", { name: "Markdown editor" })).toBe(editor);
+      expect(view.scrollDOM).toBe(scrollDOM);
+      expect(scrollDOM.firstElementChild?.firstElementChild).toBe(screen.getByTestId("editor-leading-path"));
+
+      const leadingSlot = scrollDOM.firstElementChild;
+      rendered.unmount();
+      expect(leadingSlot?.isConnected).toBe(false);
+    } finally {
+      cleanup();
+      geometry.restore();
+    }
+  });
 });
 
 describe("owner-shell integration", () => {
+  it("places the live note breadcrumb inside the mobile editor and preview scroll containers", async () => {
+    const viewport = stubMutableViewport(390);
+    const user = userEvent.setup();
+    render(
+      <OwnerShell
+        noteId={NOTE_ID}
+        vault={OWNER_VAULT}
+        notes={notesHarness().client}
+        draftStore={new MemoryDraftStore()}
+      />
+    );
+
+    const editor = await screen.findByRole("textbox", { name: "Markdown editor" });
+    const editorView = EditorView.findFromDOM(editor);
+    if (editorView === null) throw new Error("CodeMirror view is unavailable.");
+    const editorScroll = editorView.scrollDOM;
+    const editorCanvas = editor.closest(".editor-canvas");
+    await waitFor(() => expect(within(editorScroll).getByLabelText(
+      "Active note path: Notes/Plan.md"
+    )).toBeVisible());
+    expect(editorScroll).toHaveClass("workspace-scroll-target");
+    expect(editorScroll.firstElementChild).toHaveClass("markdown-editor-leading-slot");
+    expect(editorScroll.firstElementChild?.firstElementChild).toHaveClass("mobile-content-path");
+
+    viewport.setWidth(1024);
+    expect(editorScroll).not.toHaveClass("workspace-scroll-target");
+    expect(within(editorScroll).queryByLabelText("Active note path: Notes/Plan.md")).not.toBeInTheDocument();
+    viewport.setWidth(390);
+    expect(screen.getByRole("textbox", { name: "Markdown editor" })).toBe(editor);
+    expect(editor.closest(".editor-canvas")).toBe(editorCanvas);
+    expect(editorView.scrollDOM).toBe(editorScroll);
+    expect(editorScroll.firstElementChild?.firstElementChild).toHaveClass("mobile-content-path");
+
+    await user.click(within(screen.getByRole("navigation", { name: "Mobile destinations" })).getByRole(
+      "button",
+      { name: "Preview" }
+    ));
+    const preview = screen.getByRole("region", { name: "Preview" });
+    const previewScroll = preview.querySelector(".preview-content");
+    expect(previewScroll).toHaveClass("workspace-scroll-target");
+    expect(previewScroll?.firstElementChild).toHaveClass("mobile-content-path");
+    expect(within(preview).getByLabelText("Active note path: Notes/Plan.md")).toBeVisible();
+  });
+
+  it("preserves the active note and Markdown editor DOM node across workspace layout changes", async () => {
+    const viewport = stubMutableViewport(1200);
+    const user = userEvent.setup();
+    render(
+      <OwnerShell
+        noteId={NOTE_ID}
+        vault={OWNER_VAULT}
+        notes={notesHarness().client}
+        draftStore={new MemoryDraftStore()}
+      />
+    );
+
+    const ownerShell = screen.getByTestId("owner-shell");
+    const editor = await screen.findByRole("textbox", { name: "Markdown editor" });
+
+    expect(ownerShell).toHaveAttribute("data-layout", "desktop");
+    viewport.setWidth(1024);
+    await user.click(screen.getByRole("button", { name: "Info" }));
+    expect(ownerShell).toHaveAttribute("data-mobile-destination", "info");
+    viewport.setWidth(390);
+
+    expect(screen.getByTestId("owner-shell")).toBe(ownerShell);
+    expect(ownerShell).toHaveAttribute("data-layout", "mobile");
+    expect(ownerShell).toHaveAttribute("data-mobile-destination", "info");
+    expect(ownerShell.querySelector(".mobile-title")).toHaveTextContent("Plan");
+    expect(screen.getByRole("textbox", { name: "Markdown editor", hidden: true })).toBe(editor);
+  });
+
   it("turns an empty vault into an editable first note from the visible editor action", async () => {
     const user = userEvent.setup();
     const created = response("", {
@@ -1524,6 +2369,43 @@ describe("owner-shell integration", () => {
     expect(publish).toBeEnabled();
   });
 
+  it.each([
+    [1505, "editor"],
+    [390, "info"]
+  ] as const)("redirects publication details only outside desktop at %ipx", async (width, destination) => {
+    stubMutableViewport(width);
+    const user = userEvent.setup();
+    const notes = notesHarness();
+    const publicationApi = {
+      getStatus: vi.fn().mockResolvedValue(null),
+      publish: vi.fn().mockResolvedValue({
+        publicId: "A".repeat(22),
+        publishedAt: "2026-08-29T12:00:00.000Z",
+        sourceVersion: "7",
+        attachmentCount: 1
+      }),
+      revoke: vi.fn()
+    };
+    render(
+      <OwnerShell
+        noteId={NOTE_ID}
+        vault={OWNER_VAULT}
+        notes={notes.client}
+        draftStore={new MemoryDraftStore()}
+        publicationApi={publicationApi}
+      />
+    );
+
+    const publish = screen.getByRole("button", { name: "Publish" });
+    await waitFor(() => expect(publish).toBeEnabled());
+    await user.click(publish);
+    await user.click(screen.getByRole("button", { name: "Publish snapshot" }));
+    await waitFor(() => expect(screen.getByTestId("owner-shell")).toHaveAttribute(
+      "data-mobile-destination",
+      destination
+    ));
+  });
+
   it("inserts the persisted server name as a portable nested reference used by preview and fences", async () => {
     const user = userEvent.setup();
     const name = "Café [draft] #1? report).png";
@@ -1601,7 +2483,8 @@ describe("owner-shell integration", () => {
     expect((await getEditorView()).state.doc.toString()).toBe(BASE_SOURCE);
     const paths = screen.getAllByLabelText("Active note path: Notes/Plan.md");
     expect(paths).toHaveLength(2);
-    expect(screen.getByText("Plan", { selector: ".mobile-title" })).toBeInTheDocument();
+    expect(paths.filter((path) => path.matches(".workspace-header-center .desktop-header-path"))).toHaveLength(1);
+    expect(paths.filter((path) => path.matches(".editor-region .desktop-path"))).toHaveLength(1);
     await waitFor(() => expect(screen.getByRole("region", { name: "Preview" })).toHaveTextContent("Drive"));
     await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved"));
   });

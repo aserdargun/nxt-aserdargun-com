@@ -26,6 +26,9 @@ export const PublicationStatus = ({
   const busyRef = useRef(false);
   const mountedRef = useRef(true);
   const operationRef = useRef(0);
+  const copyOperationRef = useRef(0);
+  const publicationIdRef = useRef(status.publicId);
+  publicationIdRef.current = status.publicId;
   const path = `/p/${status.publicId}`;
   const publicUrl = new URL(path, window.location.origin).toString();
   const open = revokeOpen ?? internalOpen;
@@ -36,6 +39,7 @@ export const PublicationStatus = ({
 
   useEffect(() => {
     operationRef.current += 1;
+    copyOperationRef.current += 1;
     busyRef.current = false;
     setBusy(false);
     setError(null);
@@ -47,18 +51,30 @@ export const PublicationStatus = ({
     return () => {
       mountedRef.current = false;
       operationRef.current += 1;
+      copyOperationRef.current += 1;
     };
   }, []);
 
   const copy = (): void => {
+    const operation = ++copyOperationRef.current;
+    const publicationId = status.publicId;
+    const complete = (nextStatus: string): void => {
+      if (
+        mountedRef.current &&
+        copyOperationRef.current === operation &&
+        publicationIdRef.current === publicationId
+      ) {
+        setCopyStatus(nextStatus);
+      }
+    };
     setCopyStatus(null);
     const clipboard = navigator.clipboard;
     if (clipboard === undefined) {
-      setCopyStatus("Copy is unavailable.");
+      complete("Copy unavailable");
       return;
     }
-    void clipboard.writeText(publicUrl).then(() => setCopyStatus("Link copied.")).catch(() => {
-      setCopyStatus("Copy is unavailable.");
+    void clipboard.writeText(publicUrl).then(() => complete("Link copied.")).catch(() => {
+      complete("Copy unavailable");
     });
   };
 
@@ -118,7 +134,9 @@ export const PublicationStatus = ({
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
-      {copyStatus === null ? null : <span className="sr-only" aria-live="polite">{copyStatus}</span>}
+      {copyStatus === null ? null : (
+        <span className="publication-copy-status" aria-live="polite">{copyStatus}</span>
+      )}
     </div>
   );
 };

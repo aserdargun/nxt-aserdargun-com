@@ -9,6 +9,14 @@ export interface PublicNotePageProps {
   readonly client?: PublicClient;
 }
 
+const normalizeVisibleTitle = (value: string): string => value.normalize("NFC").replace(/\s+/gu, " ").trim();
+
+const leadingBodyHeadingOwnsTitle = (title: string, html: string): boolean => {
+  const firstElement = new DOMParser().parseFromString(html, "text/html").body.firstElementChild;
+  return firstElement?.tagName === "H1" &&
+    normalizeVisibleTitle(firstElement.textContent ?? "") === normalizeVisibleTitle(title);
+};
+
 export const PublicNotePage = ({ publicId, client = publicClient }: PublicNotePageProps): React.JSX.Element => {
   useNoIndex();
   const requestRef = useRef(0);
@@ -59,7 +67,7 @@ export const PublicNotePage = ({ publicId, client = publicClient }: PublicNotePa
         <time dateTime={state.note.publishedAt}>Published {new Date(state.note.publishedAt).toLocaleDateString()}</time>
       </header>
       <article className="public-note-document">
-        <h1>{state.note.title}</h1>
+        {leadingBodyHeadingOwnsTitle(state.note.title, state.note.html) ? null : <h1>{state.note.title}</h1>}
         <div className="rendered-markdown" dangerouslySetInnerHTML={{ __html: state.note.html }} />
         {state.note.assets.length === 0 ? null : (
           <section className="public-assets" aria-label="Attachments">

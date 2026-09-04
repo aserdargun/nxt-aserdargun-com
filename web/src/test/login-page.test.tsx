@@ -6,8 +6,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiClientError, ApiContractError, requestJson } from "../api/client";
 import { getSession } from "../api/session";
 import { AppProviders } from "../app/providers";
-import { LoginPage } from "../app/login-page";
+import { GITHUB_LOGIN_PATH, LoginPage } from "../app/login-page";
 import { appRoutes } from "../app/router";
+import layoutCss from "../theme/layout.css?raw";
 
 const REQUEST_ID = "00000000-0000-4000-8000-000000000001";
 
@@ -43,12 +44,31 @@ afterEach(() => {
 });
 
 describe("login and application routing", () => {
+  it("caps only the login panel at exactly 420px", () => {
+    const style = document.createElement("style");
+    style.textContent = layoutCss;
+    document.head.append(style);
+    const rules = Array.from(style.sheet?.cssRules ?? []);
+    const widthFor = (selector: string): string => {
+      const rule = rules.find((candidate) => candidate.type === CSSRule.STYLE_RULE &&
+        (candidate as CSSStyleRule).selectorText.split(",").map((value) => value.trim()).includes(selector) &&
+        (candidate as CSSStyleRule).style.getPropertyValue("width") !== "") as CSSStyleRule | undefined;
+      if (rule === undefined) throw new Error(`Missing width rule for ${selector}.`);
+      return rule.style.getPropertyValue("width").trim();
+    };
+
+    expect(widthFor(".login-panel")).toBe("min(100%, 420px)");
+    expect(widthFor(".route-state-copy")).toBe("min(100%, 34rem)");
+    expect(widthFor(".route-progress")).toBe("min(100%, 34rem)");
+    style.remove();
+  });
+
   it("offers the exact GitHub sign-in path", () => {
     render(<LoginPage />);
-    expect(screen.getByRole("link", { name: "Continue with GitHub" })).toHaveAttribute(
-      "href",
-      "/.auth/login/github?post_login_redirect_uri=/app"
-    );
+    expect(screen.getByRole("heading", { name: "Private Markdown workspace" })).toBeVisible();
+    expect(screen.getByText("Owner access only. GitHub verifies identity; notes remain in Google Drive.")).toBeVisible();
+    expect(screen.getByText("Private by default · Unlisted snapshots only")).toBeVisible();
+    expect(screen.getByRole("link", { name: "Continue with GitHub" })).toHaveAttribute("href", GITHUB_LOGIN_PATH);
   });
 
   it("redirects the root entrypoint to the visible login route", async () => {
@@ -205,7 +225,7 @@ describe("session-gated owner route", () => {
     );
     const router = renderRoute("/app");
 
-    expect(await screen.findByRole("heading", { name: "Error" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "NXT could not verify access" })).toBeVisible();
     expect(screen.getByText("The service is temporarily unavailable.")).toBeVisible();
     expect(screen.queryByRole("link", { name: "Sign out" })).not.toBeInTheDocument();
     expect(router.state.location.pathname).toBe("/app");

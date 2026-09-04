@@ -44,6 +44,30 @@ const treeFixture: readonly ExplorerNode[] = [notesFixture];
 afterEach(cleanup);
 
 describe("accessible file tree", () => {
+  it("offers the exact expanded empty folder to the existing new-note flow", async () => {
+    const user = userEvent.setup();
+    const onCreateNoteInFolder = vi.fn();
+    const emptyFolder: FolderExplorerNode = {
+      kind: "folder",
+      id: "empty-folder",
+      name: "Empty Folder",
+      path: "Notes/Empty Folder",
+      version: "1",
+      protected: false,
+      deleteConfirmation: null,
+      children: []
+    };
+    render(<FileTree tree={[emptyFolder]} onCreateNoteInFolder={onCreateNoteInFolder} />);
+    const folder = screen.getByRole("treeitem", { name: "Empty Folder" });
+    folder.focus();
+
+    await user.keyboard("{ArrowRight}");
+
+    expect(screen.getByText("No notes in this folder")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "New note in Empty Folder" }));
+    expect(onCreateNoteInFolder).toHaveBeenCalledWith(emptyFolder);
+  });
+
   it("reveals the selected deep note and expands its ancestor folders", () => {
     render(<FileTree tree={treeFixture} selectedId="018f47d2-6a34-7b2a-9f21-8a7034963aef" />);
 

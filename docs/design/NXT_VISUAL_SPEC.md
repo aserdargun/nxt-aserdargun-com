@@ -1,6 +1,6 @@
 # NXT Visual Implementation Spec
 
-Status: approved on 2026-08-23.
+Status: approved NXT 1.1 evolution on 2026-08-29.
 
 ## Accepted concept set
 
@@ -9,6 +9,16 @@ Status: approved on 2026-08-23.
 - `concepts/nxt-desktop-conflict.png` — desktop version-conflict state, native concept size 1505×1045.
 
 The generated screenshots establish composition, density, panel anatomy, typography relationships, palette, control geometry, icon treatment, and responsive continuation. Exact product copy and behavior come from the approved product spec and implementation plan; minor spelling artifacts inside generated pixels are not product copy.
+
+## Approved NXT 1.1 deviations from the 2026-08-23 concepts
+
+- Desktop destination icons are removed because all panes are visible.
+- Fixed desktop ratios are replaced with bounded tracks.
+- Tablet has a two-region composition.
+- The mobile fixed header is reduced from 140px to 100px.
+- The mobile note path scrolls with content.
+- More actions is a real menu.
+- Semantic control/error tokens improve contrast without changing Gruvbox surface colors.
 
 ## Visual direction and container model
 
@@ -69,8 +79,10 @@ No eyebrow, kicker, badge, product claim, metric, or explanatory marketing copy 
 ## Responsive continuation
 
 - At desktop width, explorer/editor/context columns remain simultaneously visible; the editor owns the largest share.
+- At tablet width, the explorer and one selected primary destination form the two-region composition; compact tablet widths move the explorer into a focus-contained sheet.
 - At mobile width, only one destination surface is visible. Bottom navigation preserves Files, Editor, Preview, and Info feature parity.
-- Attachment and Publish remain directly reachable on mobile; path and save state remain visible without horizontal scrolling.
+- Attachment and Publish remain directly reachable on mobile; the two fixed header rows remain at or below 100px, while the note path scrolls with its destination content.
+- More actions opens an accessible menu whose direct Quick note in Inbox path takes no more than two user clicks.
 - Dialog panes stack vertically below the mobile breakpoint. Long filenames and paths truncate with an accessible full-value label.
 - No viewport may have document-level horizontal overflow.
 

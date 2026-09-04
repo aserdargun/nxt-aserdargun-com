@@ -48,7 +48,9 @@ export interface EditorWorkspaceProps {
   readonly showStatus?: boolean | undefined;
   readonly onStateChange?: ((state: EditorWorkspaceState) => void) | undefined;
   readonly infoRegion?: ReactNode | undefined;
+  readonly mobilePath?: ReactNode | undefined;
   readonly attachmentInsertion?: AttachmentInsertion | null | undefined;
+  readonly mobile?: boolean | undefined;
 }
 
 const systemNow = (): Date => new Date();
@@ -79,7 +81,9 @@ export const EditorWorkspace = ({
   showStatus = true,
   onStateChange,
   infoRegion,
-  attachmentInsertion
+  mobilePath,
+  attachmentInsertion,
+  mobile = false
 }: EditorWorkspaceProps): React.JSX.Element => {
   const [contextTab, setContextTab] = useState<"preview" | "outline" | "backlinks">("preview");
   const [pendingOutlineId, setPendingOutlineId] = useState<string | null>(null);
@@ -161,6 +165,7 @@ export const EditorWorkspace = ({
                 value={state.source}
                 onChange={onSourceChange}
                 onLimitExceeded={onLimitExceeded}
+                leadingContent={mobilePath}
               />
             </Suspense>
           )}
@@ -188,7 +193,11 @@ export const EditorWorkspace = ({
               </button>
             ))}
           </div>
-          <div className="preview-content" aria-busy={state.source === null}>
+          <div
+            className={`preview-content${mobilePath === undefined ? "" : " workspace-scroll-target"}`}
+            aria-busy={state.source === null}
+          >
+            {mobilePath}
             {state.source === null ? null : (
               <div hidden={contextTab !== "preview"}>
                 <Suspense fallback={null}>
@@ -220,6 +229,7 @@ export const EditorWorkspace = ({
           open
           busy={state.conflictBusy}
           error={state.conflictError}
+          mobile={mobile}
           onOpenChange={onConflictOpenChange}
           onMergeSourceChange={onMergeSourceChange}
           onResolve={onResolveConflict}

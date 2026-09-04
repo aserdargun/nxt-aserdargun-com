@@ -87,11 +87,14 @@ interface FlatNode {
 export interface FileTreeProps {
   readonly tree: readonly ExplorerNode[];
   readonly selectedId?: string | undefined;
+  readonly expandedIds?: ReadonlySet<string> | undefined;
+  readonly onExpandedIdsChange?: ((expandedIds: ReadonlySet<string>) => void) | undefined;
   readonly onSelect?: ((node: ExplorerNode) => void) | undefined;
   readonly onRenameFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onMoveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onTrashFolder?: ((folder: FolderExplorerNode, input: DeleteFolderRequest) => Promise<void>) | undefined;
+  readonly onCreateNoteInFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly now?: (() => Date) | undefined;
 }
 
@@ -137,16 +140,20 @@ const ancestorFolderIds = (
 export const FileTree = ({
   tree,
   selectedId,
+  expandedIds,
+  onExpandedIdsChange,
   onSelect,
   onRenameFolder,
   onMoveFolder,
   onArchiveFolder,
   onTrashFolder,
+  onCreateNoteInFolder,
   now
 }: FileTreeProps): React.JSX.Element => {
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(
+  const [internalExpanded, setInternalExpanded] = useState<ReadonlySet<string>>(
     () => new Set(ancestorFolderIds(tree, selectedId))
   );
+  const expanded = expandedIds ?? internalExpanded;
   const [focusedId, setFocusedId] = useState<string | null>(() => selectedId ?? tree[0]?.id ?? null);
   const [activeSelectedId, setActiveSelectedId] = useState<string | null>(() => selectedId ?? null);
   const [menuFolderId, setMenuFolderId] = useState<string | null>(null);
@@ -154,6 +161,9 @@ export const FileTree = ({
   const itemRefs = useRef(new Map<string, HTMLButtonElement>());
   const treeOwnedFocus = useRef(false);
   const visible = useMemo(() => flattenVisible(tree, expanded), [expanded, tree]);
+  const expandedEmptyFolders = visible.filter(
+    ({ node }) => node.kind === "folder" && expanded.has(node.id) && node.children.length === 0
+  );
   const effectiveFocusedId = visible.some(({ node }) => node.id === focusedId)
     ? focusedId
     : visible.find(({ node }) => node.id === selectedId)?.node.id ?? visible[0]?.node.id ?? null;
@@ -180,12 +190,12 @@ export const FileTree = ({
   useEffect(() => {
     const ancestors = ancestorFolderIds(tree, selectedId);
     if (ancestors.length === 0) return;
-    setExpanded((current) => {
-      const next = new Set(current);
-      for (const id of ancestors) next.add(id);
-      return next.size === current.size ? current : next;
-    });
-  }, [selectedId, tree]);
+    const next = new Set(expanded);
+    for (const id of ancestors) next.add(id);
+    if (next.size === expanded.size) return;
+    if (expandedIds === undefined) setInternalExpanded(next);
+    onExpandedIdsChange?.(next);
+  }, [expanded, expandedIds, onExpandedIdsChange, selectedId, tree]);
 
   const focusAt = (index: number): void => {
     const item = visible[index];
@@ -195,13 +205,12 @@ export const FileTree = ({
   };
 
   const toggle = (id: string, open?: boolean): void => {
-    setExpanded((current) => {
-      const next = new Set(current);
-      const shouldOpen = open ?? !next.has(id);
-      if (shouldOpen) next.add(id);
-      else next.delete(id);
-      return next;
-    });
+    const next = new Set(expanded);
+    const shouldOpen = open ?? !next.has(id);
+    if (shouldOpen) next.add(id);
+    else next.delete(id);
+    if (expandedIds === undefined) setInternalExpanded(next);
+    onExpandedIdsChange?.(next);
   };
 
   const select = (node: ExplorerNode): void => {
@@ -298,6 +307,26 @@ export const FileTree = ({
           </div>
         ))}
       </div>
+      {onCreateNoteInFolder === undefined ? null : expandedEmptyFolders.map(({ node, level }) => {
+        if (node.kind !== "folder") return null;
+        return (
+          <div
+            className="empty-folder-state"
+            style={{ "--tree-level": level + 1 } as React.CSSProperties}
+            key={`empty:${node.id}`}
+          >
+            <span>No notes in this folder</span>
+            <button
+              className="secondary-action touch-target"
+              type="button"
+              aria-label={`New note in ${node.name}`}
+              onClick={() => onCreateNoteInFolder(node)}
+            >
+              New note
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 };

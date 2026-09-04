@@ -6,11 +6,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import * as e2eEnvironment from "../scripts/e2e-environment.mjs";
 import { inspectProcess } from "../scripts/stop-local-core.mjs";
 
 const checkout = process.cwd();
 const runnerPath = join(checkout, "scripts", "run-e2e.mjs");
 const exists = (path) => access(path).then(() => true, () => false);
+
+test("the E2E Vite environment scrubs inherited HMR flags before exact opt-in", () => {
+  assert.equal(typeof e2eEnvironment.createViteServiceEnvironment, "function");
+  const createViteServiceEnvironment = e2eEnvironment.createViteServiceEnvironment;
+  if (typeof createViteServiceEnvironment !== "function") return;
+  const inherited = { KEEP_ME: "yes", NXT_E2E_DISABLE_VITE_HMR: "caller-value" };
+
+  assert.deepEqual(createViteServiceEnvironment(inherited, false), { KEEP_ME: "yes" });
+  assert.deepEqual(createViteServiceEnvironment(inherited, true), {
+    KEEP_ME: "yes",
+    NXT_E2E_DISABLE_VITE_HMR: "1"
+  });
+  assert.deepEqual(e2eEnvironment.createE2eEnvironment(inherited), { KEEP_ME: "yes" });
+});
 
 const waitFor = async (predicate, timeoutMs = 5_000) => {
   const deadline = Date.now() + timeoutMs;

@@ -14,6 +14,7 @@ export const OutlinePanel = ({ source, onNavigate }: { readonly source: string; 
   return (
     <nav className="outline-panel" aria-label="Outline">
       <h2>Outline</h2>
+      {headings.length === 0 ? <p className="empty-info">No headings in this note</p> : null}
       {headings.map((heading) => (
         <button
           className="outline-link touch-target"

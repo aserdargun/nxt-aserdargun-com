@@ -7,17 +7,9 @@ import { vaultClient } from "../api/vault";
 import { NotFoundPage } from "./not-found-page";
 import { OwnerShell } from "./owner-shell";
 import { useTheme } from "./providers";
+import { RouteState } from "./route-state";
 
 const LOGOUT_PATH = "/.auth/logout?post_logout_redirect_uri=/login";
-
-const RouteState = ({ children }: { readonly children: React.ReactNode }): React.JSX.Element => (
-  <div className="route-page">
-    <header className="route-header">
-      <span className="brand">NXT</span>
-    </header>
-    <main className="route-main">{children}</main>
-  </div>
-);
 
 const OwnerVaultGate = ({ noteId }: { readonly noteId?: string }): React.JSX.Element => {
   const navigate = useNavigate();
@@ -27,19 +19,15 @@ const OwnerVaultGate = ({ noteId }: { readonly noteId?: string }): React.JSX.Ele
     queryFn: () => vaultClient.loadCompleteVault()
   });
 
-  if (vault.isPending) {
-    return (
-      <RouteState>
-        <div role="status" aria-label="Loading vault" aria-busy="true" />
-      </RouteState>
-    );
-  }
+  if (vault.isPending) return <RouteState state="loading" title="Loading vault" />;
   if (vault.isError) {
     return (
-      <RouteState>
-        <h1>Error</h1>
-        <p>The vault could not be loaded safely.</p>
-      </RouteState>
+      <RouteState
+        state="error"
+        title="The vault could not be loaded safely"
+        message="The service is temporarily unavailable."
+        onRetry={() => { void vault.refetch(); }}
+      />
     );
   }
 
@@ -76,13 +64,7 @@ const OwnerGate = ({ noteId }: { readonly noteId?: string }): React.JSX.Element 
     queryFn: getSession
   });
 
-  if (session.isPending) {
-    return (
-      <RouteState>
-        <div role="status" aria-label="Loading session" aria-busy="true" />
-      </RouteState>
-    );
-  }
+  if (session.isPending) return <RouteState state="loading" title="Checking owner access" />;
 
   if (session.error instanceof ApiClientError) {
     if (session.error.status === 401 && session.error.code === "UNAUTHORIZED") {
@@ -90,8 +72,7 @@ const OwnerGate = ({ noteId }: { readonly noteId?: string }): React.JSX.Element 
     }
     if (session.error.status === 403 && session.error.code === "FORBIDDEN") {
       return (
-        <RouteState>
-          <h1>{session.error.message}</h1>
+        <RouteState state="forbidden" title={session.error.message}>
           <a className="secondary-link touch-target" href={LOGOUT_PATH}>Sign out</a>
         </RouteState>
       );
@@ -99,15 +80,13 @@ const OwnerGate = ({ noteId }: { readonly noteId?: string }): React.JSX.Element 
   }
 
   if (session.isError) {
-    const message =
-      session.error instanceof Error
-        ? session.error.message
-        : "The service is temporarily unavailable.";
     return (
-      <RouteState>
-        <h1>Error</h1>
-        <p>{message}</p>
-      </RouteState>
+      <RouteState
+        state="error"
+        title="NXT could not verify access"
+        message="The service is temporarily unavailable."
+        onRetry={() => { void session.refetch(); }}
+      />
     );
   }
 

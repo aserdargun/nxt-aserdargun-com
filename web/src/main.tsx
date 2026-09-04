@@ -5,6 +5,7 @@ import { AppProviders } from "./app/providers";
 import { appRoutes } from "./app/router";
 import "./theme/gruvbox.css";
 import "./theme/layout.css";
+import "./theme/workspace.css";
 
 const rootElement = document.getElementById("root");
 

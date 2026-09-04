@@ -6,10 +6,13 @@ export const LoginPage = (): React.JSX.Element => (
       <span className="brand">NXT</span>
     </header>
     <main className="route-main" aria-labelledby="login-title">
-      <h1 id="login-title" className="sr-only">NXT</h1>
-      <a className="primary-link touch-target" href={GITHUB_LOGIN_PATH}>
-        Continue with GitHub
-      </a>
+      <section className="login-panel">
+        <p className="login-owner">Owner workspace</p>
+        <h1 id="login-title">Private Markdown workspace</h1>
+        <p>Owner access only. GitHub verifies identity; notes remain in Google Drive.</p>
+        <a className="primary-link touch-target" href={GITHUB_LOGIN_PATH}>Continue with GitHub</a>
+        <p className="login-trust">Private by default · Unlisted snapshots only</p>
+      </section>
     </main>
   </div>
 );

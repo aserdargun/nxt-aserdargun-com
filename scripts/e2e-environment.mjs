@@ -3,11 +3,18 @@ export const e2eScrubbedKeys = [
   "NXT_NOTES_DRIVE_FOLDER_ID", "NXT_INBOX_DRIVE_FOLDER_ID", "NXT_PLANS_DRIVE_FOLDER_ID", "NXT_ARCHIVE_DRIVE_FOLDER_ID",
   "NXT_ASSETS_DRIVE_FOLDER_ID", "NXT_PUBLISHED_DRIVE_FOLDER_ID", "NXT_VAULT_INDEX_DRIVE_FILE_ID",
   "NXT_PREFERENCES_DRIVE_FILE_ID", "NXT_PUBLICATION_MANIFEST_DRIVE_FILE_ID", "NXT_LOCAL_STORAGE_MODE",
-  "NXT_LOCAL_FIXTURE_ROOT", "NXT_LOCAL_CHECKOUT_ROOT", "NXT_LOCAL_CONTROL_NONCE", "NXT_LOCAL_AUTH_BYPASS"
+  "NXT_LOCAL_FIXTURE_ROOT", "NXT_LOCAL_CHECKOUT_ROOT", "NXT_LOCAL_CONTROL_NONCE", "NXT_LOCAL_AUTH_BYPASS",
+  "NXT_E2E_DISABLE_VITE_HMR"
 ];
 
 export const createE2eEnvironment = (source = process.env) => {
   const environment = { ...source };
   for (const key of e2eScrubbedKeys) delete environment[key];
+  return environment;
+};
+
+export const createViteServiceEnvironment = (source = process.env, e2e = false) => {
+  const environment = createE2eEnvironment(source);
+  if (e2e) environment.NXT_E2E_DISABLE_VITE_HMR = "1";
   return environment;
 };

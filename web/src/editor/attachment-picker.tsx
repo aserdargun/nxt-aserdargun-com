@@ -6,6 +6,7 @@ import {
   type AttachmentClient,
   type UploadedAttachment
 } from "../api/attachments";
+import { StatusCallout } from "../app/status-callout";
 
 export interface AttachmentPickerProps {
   readonly noteId: string;
@@ -174,7 +175,11 @@ export const AttachmentPicker = ({
       />
       {busy ? <span className="sr-only" role="status">Uploading attachment</span> : null}
       {disabledReason === null ? null : <span className="sr-only">{disabledReason}</span>}
-      {message === null ? null : <span className="attachment-message" role="alert">{message}</span>}
+      {message === null ? null : (
+        <div className="attachment-message">
+          <StatusCallout tone="error">{message}</StatusCallout>
+        </div>
+      )}
     </div>
   );
 };

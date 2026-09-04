@@ -1,5 +1,5 @@
 import { MAX_NOTE_SOURCE_BYTES, NoteResponseSchema, type NoteResponse } from "@nxt/contracts";
-import { parseNote } from "@nxt/domain";
+import { parseNote, serializeNote } from "@nxt/domain";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiClientError } from "../api/client";
 import type { NotesClient } from "../api/notes";
@@ -34,6 +34,8 @@ interface AutosaveRuntime {
   title: string;
   path: string | null;
   baseVersion: string;
+  authoritative: NoteResponse | null;
+  pendingCanonicalization: CanonicalizationObligation | null;
   needsReconcile: boolean;
   generation: number;
   localUpdatedAt: string;
@@ -48,6 +50,13 @@ interface AutosaveRuntime {
   changeMerge: (source: string) => void;
   resolve: (resolution: ConflictResolution) => void;
   setConflictOpen: (open: boolean) => void;
+}
+
+interface CanonicalizationObligation {
+  readonly authoritative: NoteResponse;
+  readonly submittedSource: string;
+  readonly version: string;
+  readonly path: string;
 }
 
 interface DurableDraftWrite {
@@ -110,24 +119,6 @@ const verifyResponse = async (response: unknown, noteId?: string): Promise<NoteR
   return value;
 };
 
-const verifyUpdateResponse = async (input: {
-  readonly response: unknown;
-  readonly noteId: string;
-  readonly source: string;
-  readonly expectedVersion: string;
-  readonly expectedPath: string;
-}): Promise<NoteResponse> => {
-  const response = await verifyResponse(input.response, input.noteId);
-  if (
-    response.source !== input.source ||
-    response.version === input.expectedVersion ||
-    response.path !== input.expectedPath
-  ) {
-    throw new ReadbackError();
-  }
-  return response;
-};
-
 const canonicalBody = (value: string): string =>
   `\n${value.replace(/^\r?\n+/u, "").replace(/\r\n/gu, "\n").replace(/\n*$/u, "")}\n`;
 
@@ -146,6 +137,121 @@ const portableMarkdownFileName = (title: string): string => {
     .trim();
   if (sanitized.length === 0 || sanitized === "." || sanitized === "..") throw new ReadbackError();
   return `${sanitized}.md`;
+};
+
+const fold = (value: string): string => value.normalize("NFKC").toLocaleLowerCase("en-US");
+
+const uniqueFolded = (values: readonly string[]): string[] => {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = fold(value);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+interface UpdateProjection {
+  readonly canonicalized: boolean;
+  readonly path: string;
+  readonly serverOwnedAliases: readonly string[];
+  readonly source: string;
+}
+
+const updateProjection = (input: {
+  readonly authoritative: NoteResponse;
+  readonly source: string;
+}): UpdateProjection => {
+  let submitted: NoteResponse["note"];
+  try {
+    submitted = parseNote(input.source);
+  } catch {
+    throw new ReadbackError();
+  }
+  if (submitted.frontmatter.id !== input.authoritative.note.frontmatter.id) {
+    throw new ReadbackError();
+  }
+  const previousTitle = input.authoritative.note.frontmatter.title;
+  if (submitted.frontmatter.title === previousTitle) {
+    return {
+      canonicalized: false,
+      path: input.authoritative.path,
+      serverOwnedAliases: [],
+      source: input.source
+    };
+  }
+
+  const submittedAliasKeys = new Set(submitted.frontmatter.aliases.map(fold));
+  const aliases = uniqueFolded([...submitted.frontmatter.aliases, previousTitle]);
+  const separator = input.authoritative.path.lastIndexOf("/");
+  const parent = separator < 0 ? "" : input.authoritative.path.slice(0, separator + 1);
+  return {
+    canonicalized: true,
+    path: `${parent}${portableMarkdownFileName(submitted.frontmatter.title)}`,
+    serverOwnedAliases: aliases.filter((alias) => !submittedAliasKeys.has(fold(alias))),
+    source: serializeNote({
+      ...submitted,
+      frontmatter: { ...submitted.frontmatter, aliases }
+    })
+  };
+};
+
+const verifyUpdateResponse = async (input: {
+  readonly authoritative: NoteResponse;
+  readonly response: unknown;
+  readonly noteId: string;
+  readonly source: string;
+  readonly expectedVersion: string;
+  readonly expectedPath: string;
+}): Promise<NoteResponse> => {
+  if (
+    input.authoritative.version !== input.expectedVersion ||
+    input.authoritative.path !== input.expectedPath
+  ) {
+    throw new ReadbackError();
+  }
+  const projection = updateProjection({
+    authoritative: input.authoritative,
+    source: input.source
+  });
+  const response = await verifyResponse(input.response, input.noteId);
+  if (
+    response.source !== projection.source ||
+    response.version === input.expectedVersion ||
+    response.path !== projection.path
+  ) {
+    throw new ReadbackError();
+  }
+  return response;
+};
+
+const rebaseQueuedSource = (input: {
+  readonly authoritative: NoteResponse;
+  readonly submittedSource: string;
+  readonly latestSource: string;
+}): string => {
+  const projection = updateProjection({
+    authoritative: input.authoritative,
+    source: input.submittedSource
+  });
+  if (!projection.canonicalized) return input.latestSource;
+
+  let latest: NoteResponse["note"];
+  try {
+    latest = parseNote(input.latestSource);
+  } catch {
+    throw new ReadbackError();
+  }
+  if (latest.frontmatter.id !== input.authoritative.note.frontmatter.id) {
+    throw new ReadbackError();
+  }
+  return serializeNote({
+    ...latest,
+    frontmatter: {
+      ...latest.frontmatter,
+      aliases: uniqueFolded([...latest.frontmatter.aliases, ...projection.serverOwnedAliases])
+    }
+  });
 };
 
 const verifyCreateResponse = async (input: {
@@ -224,6 +330,8 @@ export const useAutosave = ({
       title: "",
       path: null,
       baseVersion: "",
+      authoritative: null,
+      pendingCanonicalization: null,
       needsReconcile: false,
       generation: 0,
       localUpdatedAt: now().toISOString(),
@@ -257,6 +365,8 @@ export const useAutosave = ({
       session.title = response.note.frontmatter.title;
       session.path = response.path;
       session.baseVersion = response.version;
+      session.authoritative = response;
+      session.pendingCanonicalization = null;
       publish({
         source: response.source,
         version: response.version,
@@ -362,6 +472,60 @@ export const useAutosave = ({
       }
     };
 
+    const fulfillPendingCanonicalization = async (): Promise<boolean> => {
+      const obligation = session.pendingCanonicalization;
+      if (obligation === null) return true;
+
+      while (session.active && session.pendingCanonicalization === obligation) {
+        const currentGeneration = session.generation;
+        const currentSource = session.source;
+        const currentUpdatedAt = session.localUpdatedAt;
+        if (currentSource === null) return false;
+
+        let rebasedSource: string;
+        let rebasedTitle: string;
+        try {
+          rebasedSource = rebaseQueuedSource({
+            authoritative: obligation.authoritative,
+            submittedSource: obligation.submittedSource,
+            latestSource: currentSource
+          });
+          rebasedTitle = parseNote(rebasedSource).frontmatter.title;
+        } catch {
+          clearTimer();
+          session.queued = false;
+          publish({ status: "Error" });
+          return false;
+        }
+
+        session.source = rebasedSource;
+        session.title = rebasedTitle;
+        const rebasedWrite = queueDraftWrite({
+          generation: currentGeneration,
+          source: rebasedSource,
+          baseVersion: obligation.version,
+          path: obligation.path,
+          localUpdatedAt: currentUpdatedAt
+        });
+        await rebasedWrite.promise;
+        if (!session.active) return false;
+        if (
+          session.generation === currentGeneration &&
+          session.source === rebasedSource
+        ) {
+          session.pendingCanonicalization = null;
+          publish({
+            source: rebasedSource,
+            status: "Saving",
+            title: rebasedTitle,
+            path: obligation.path
+          });
+          return true;
+        }
+      }
+      return session.pendingCanonicalization === null;
+    };
+
     const startSave = async (): Promise<void> => {
       if (!session.active || session.source === null || session.conflict !== null) return;
       if (session.inFlight) {
@@ -393,6 +557,11 @@ export const useAutosave = ({
           return;
         }
 
+        if (session.pendingCanonicalization !== null) {
+          if (await fulfillPendingCanonicalization()) resumeQueued = true;
+          return;
+        }
+
         if (session.needsReconcile || expectedPath === null) {
           const latest = await verifyResponse(
             await Promise.resolve().then(() => notes.getNote(noteId)),
@@ -405,6 +574,7 @@ export const useAutosave = ({
           }
           session.baseVersion = latest.version;
           session.path = latest.path;
+          session.authoritative = latest;
           expectedVersion = latest.version;
           expectedPath = latest.path;
           const reconciledWrite = queueDraftWrite({
@@ -424,7 +594,10 @@ export const useAutosave = ({
           publish({ path: expectedPath });
         }
 
+        const authoritative = session.authoritative;
+        if (authoritative === null) throw new ReadbackError();
         const response = await verifyUpdateResponse({
+          authoritative,
           response: await Promise.resolve().then(() =>
             notes.updateNote(noteId, {
               expectedVersion,
@@ -440,6 +613,15 @@ export const useAutosave = ({
         session.baseVersion = response.version;
         session.path = response.path;
         session.title = response.note.frontmatter.title;
+        session.authoritative = response;
+        if (response.source !== submittedSource || response.path !== expectedPath) {
+          session.pendingCanonicalization = {
+            authoritative,
+            submittedSource,
+            version: response.version,
+            path: response.path
+          };
+        }
         await Promise.resolve().then(() =>
           drafts.markConfirmed({
             noteId,
@@ -451,22 +633,51 @@ export const useAutosave = ({
         if (session.generation === submittedGeneration && session.source === submittedSource) {
           session.needsReconcile = false;
           applyResponse(response, "Saved");
+        } else if (session.pendingCanonicalization !== null) {
+          if (await fulfillPendingCanonicalization()) resumeQueued = session.queued;
         } else {
           const latestGeneration = session.generation;
           const latestSource = session.source;
           const latestUpdatedAt = session.localUpdatedAt;
           if (latestSource === null) return;
+          let rebasedSource: string;
+          try {
+            rebasedSource = rebaseQueuedSource({
+              authoritative,
+              submittedSource,
+              latestSource
+            });
+          } catch {
+            clearTimer();
+            session.queued = false;
+            publish({ status: "Error" });
+            return;
+          }
+          session.source = rebasedSource;
+          try {
+            session.title = parseNote(rebasedSource).frontmatter.title;
+          } catch {
+            clearTimer();
+            session.queued = false;
+            publish({ status: "Error" });
+            return;
+          }
           const rebasedWrite = queueDraftWrite({
             generation: latestGeneration,
-            source: latestSource,
+            source: rebasedSource,
             baseVersion: response.version,
             path: response.path,
             localUpdatedAt: latestUpdatedAt
           });
           await rebasedWrite.promise;
           if (!session.active) return;
-          if (session.generation === latestGeneration && session.source === latestSource) {
-            publish({ status: "Saving", title: session.title, path: response.path });
+          if (session.generation === latestGeneration && session.source === rebasedSource) {
+            publish({
+              source: rebasedSource,
+              status: "Saving",
+              title: session.title,
+              path: response.path
+            });
           }
           resumeQueued = session.queued;
         }
@@ -646,6 +857,7 @@ export const useAutosave = ({
           let response: NoteResponse;
           try {
             response = await verifyUpdateResponse({
+              authoritative: conflict.drive,
               response: await Promise.resolve().then(() =>
                 notes.updateNote(noteId, {
                   expectedVersion: conflict.drive.version,
@@ -741,6 +953,7 @@ export const useAutosave = ({
       if (!session.active) return;
       const drive = driveResult.value;
 
+      session.authoritative = drive;
       session.title = drive.note.frontmatter.title;
       session.path = drive.path;
       if (draft === null || draft.source === drive.source) {
