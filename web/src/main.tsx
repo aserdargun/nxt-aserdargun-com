@@ -12,6 +12,16 @@ if (rootElement === null) {
   throw new Error("NXT root element is missing.");
 }
 
+const bootShell = document.getElementById("nxt-boot-shell");
+if (bootShell !== null) {
+  bootShell.setAttribute("data-nxt-boot", "dismissing");
+  // Defer removal one frame so the dismissing state can play a fade-out
+  // transition (CSS hooks into data-nxt-boot="dismissing").
+  window.requestAnimationFrame(() => {
+    bootShell.remove();
+  });
+}
+
 const router = createBrowserRouter(appRoutes);
 
 createRoot(rootElement).render(

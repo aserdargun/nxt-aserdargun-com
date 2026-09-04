@@ -11,9 +11,68 @@
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <meta name="description" content="NXT - Next. A private, Obsidian-like Markdown notebook for plans, ideas, and reference notes." />
     <title>NXT - Next</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; height: 100%; background: #1d2021; color: #ebdbb2; }
+      body { font-family: "SFMono-Regular", "Cascadia Code", "Roboto Mono", ui-monospace, monospace; }
+      #nxt-boot-shell {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 18px;
+        background: #1d2021; color: #ebdbb2;
+      }
+      #nxt-boot-shell .nxt-boot-mark {
+        width: 56px; height: 56px; border-radius: 14px;
+        background: #c8ff36; color: #1d2021;
+        display: flex; align-items: center; justify-content: center;
+        font-weight: 700; font-size: 26px; letter-spacing: 0.5px;
+        box-shadow: 0 6px 24px rgba(200, 255, 54, 0.18);
+      }
+      #nxt-boot-shell .nxt-boot-text { font-size: 13px; color: #a89984; letter-spacing: 0.4px; }
+      #nxt-boot-shell .nxt-boot-bar {
+        width: 168px; height: 3px; border-radius: 999px; overflow: hidden;
+        background: #3c3836;
+      }
+      #nxt-boot-shell .nxt-boot-bar::after {
+        content: ""; display: block; height: 100%; width: 38%;
+        background: linear-gradient(90deg, transparent, #c8ff36, transparent);
+        animation: nxt-boot-slide 1.4s ease-in-out infinite;
+      }
+      @keyframes nxt-boot-slide {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(260%); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #nxt-boot-shell .nxt-boot-bar::after { animation: none; width: 60%; background: #c8ff36; }
+      }
+      #nxt-boot-shell[data-nxt-boot="dismissing"] {
+        opacity: 0;
+        transition: opacity 160ms ease-out;
+      }
+    </style>
   </head>
   <body>
+    <div id="nxt-boot-shell" aria-label="Loading NXT">
+      <div class="nxt-boot-mark" aria-hidden>N</div>
+      <div class="nxt-boot-text">Loading NXT</div>
+      <div class="nxt-boot-bar" role="progressbar" aria-label="Loading"></div>
+    </div>
     <div id="root"></div>
+    <script>
+      // Fires a low-priority warmup ping as soon as the document parses, so the
+      // Azure Functions container is awake by the time the user finishes auth
+      // and the React shell needs the actual session/vault data.
+      (function () {
+        try {
+          var img = new Image();
+          img.decoding = "async";
+          img.loading = "eager";
+          img.fetchPriority = "low";
+          img.src = "/api/private/session?_warmup=1&_t=" + Date.now();
+        } catch (error) {
+          // best-effort; never block rendering
+        }
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
