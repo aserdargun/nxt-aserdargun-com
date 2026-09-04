@@ -10,9 +10,11 @@ import {
   Info,
   Inbox,
   MoreVertical,
+  Network,
   Paperclip,
   Search,
   Tags,
+  TreePine,
   Upload
 } from "lucide-react";
 import {
@@ -60,6 +62,7 @@ import type {
 import { ExplorerOperationDialog } from "../explorer/explorer-operation-dialog";
 import { FavoritesPanel } from "../explorer/favorites-panel";
 import { NoteStatsCard } from "../explorer/note-stats-card";
+import { GraphView } from "../explorer/graph-view";
 import { computeNoteStats } from "../editor/note-stats";
 import {
   buildExplorerTree,
@@ -357,6 +360,7 @@ const VaultExplorerRegion = ({
   readonly now?: (() => Date) | undefined;
 }): React.JSX.Element => {
   const [requestedSearch, setRequestedSearch] = useState<string | undefined>();
+  const [view, setView] = useState<"tree" | "graph">("tree");
   const tree = useMemo(() => buildExplorerTree(vault), [vault]);
   const favorites = useMemo(() => {
     const byId = new Map(vault.entries.map((entry) => [entry.id, entry]));
@@ -401,28 +405,65 @@ const VaultExplorerRegion = ({
         />
       </Suspense>
       <div className="explorer-scroll">
-        <section className="explorer-section" aria-labelledby="files-heading">
-          <h2 id="files-heading">Files</h2>
-          <FileTree
-            tree={tree}
-            selectedId={selectedNoteId}
-            onSelect={(node) => {
-              if (node.kind === "note") onNavigateNote?.(node.id);
-            }}
-            onRenameFolder={onRenameFolder}
-            onMoveFolder={onMoveFolder}
-            onArchiveFolder={onArchiveFolder}
-            onTrashFolder={onTrashFolder}
-            onRenameNote={onRenameNote}
-            onMoveNote={onMoveNote}
-            onArchiveNote={onArchiveNote}
-            onTrashNote={onTrashNote}
-            onNewNote={onNewNote}
-            onNewFolder={onNewFolder}
-            newActionsDisabledReason={newActionsDisabledReason}
-            now={now}
-          />
-        </section>
+        <div className="explorer-view-toggle" role="tablist" aria-label="Files view">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "tree"}
+            className={`touch-target explorer-view-button${view === "tree" ? " active" : ""}`}
+            onClick={() => setView("tree")}
+          >
+            <TreePine size={16} strokeWidth={1.75} aria-hidden />
+            <span>Tree</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "graph"}
+            className={`touch-target explorer-view-button${view === "graph" ? " active" : ""}`}
+            onClick={() => setView("graph")}
+          >
+            <Network size={16} strokeWidth={1.75} aria-hidden />
+            <span>Graph</span>
+          </button>
+        </div>
+        {view === "tree" ? (
+          <section className="explorer-section" aria-labelledby="files-heading">
+            <h2 id="files-heading">Files</h2>
+            <FileTree
+              tree={tree}
+              selectedId={selectedNoteId}
+              onSelect={(node) => {
+                if (node.kind === "note") onNavigateNote?.(node.id);
+              }}
+              onRenameFolder={onRenameFolder}
+              onMoveFolder={onMoveFolder}
+              onArchiveFolder={onArchiveFolder}
+              onTrashFolder={onTrashFolder}
+              onRenameNote={onRenameNote}
+              onMoveNote={onMoveNote}
+              onArchiveNote={onArchiveNote}
+              onTrashNote={onTrashNote}
+              onNewNote={onNewNote}
+              onNewFolder={onNewFolder}
+              newActionsDisabledReason={newActionsDisabledReason}
+              now={now}
+            />
+          </section>
+        ) : (
+          <section className="explorer-section" aria-labelledby="graph-heading">
+            <h2 id="graph-heading">Graph</h2>
+            <GraphView
+              entries={vault.entries.map((entry) => ({
+                id: entry.id,
+                title: entry.title,
+                outboundNoteIds: entry.outboundNoteIds
+              }))}
+              {...(selectedNoteId === undefined ? {} : { selectedNoteId })}
+              onSelect={onNavigateNote}
+            />
+          </section>
+        )}
         <FavoritesPanel items={favorites} onOpen={(id) => onNavigateNote?.(id)} />
         <TagsPanel tags={tags} onSelect={(tag) => setRequestedSearch(`tag:${tag}`)} />
       </div>
