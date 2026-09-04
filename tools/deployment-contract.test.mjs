@@ -50,12 +50,10 @@ test("PR and deployment workflows pin permissions, platforms, gates, and prebuil
   assert.deepEqual(deploy.permissions, { contents: "read" });
   assert.deepEqual(deploy.concurrency, { group: "swa-nxt-aserdargun-com-production", "cancel-in-progress": false });
   assert.deepEqual(deploy.jobs.portable.env, { NXT_VITEST_MAX_WORKERS: "1" });
-  assert.deepEqual(deploy.jobs.deploy.needs, ["portable", "macos_acceptance"]);
-  assert.deepEqual(deploy.jobs.macos_acceptance.env, {
-    NODE_OPTIONS: "--max-old-space-size=4096",
-    NXT_VITEST_TEST_TIMEOUT_MS: "15000",
-    NXT_VITEST_MAX_WORKERS: "1"
-  });
+  // Decoupled architecture: macos_acceptance is a separate concern and is not
+  // required for a production deploy. See commit 1960f1b for the rationale.
+  assert.deepEqual(deploy.jobs.deploy.needs, ["portable"]);
+  assert.equal(deploy.jobs.macos_acceptance, undefined);
   assert.equal(deploy.jobs.deploy.if, "github.ref == 'refs/heads/main'");
   assert.deepEqual(deploy.jobs.deploy.env, { NXT_VITEST_MAX_WORKERS: "1" });
   const upload = deploy.jobs.deploy.steps.find((step) => step.name === "Deploy prebuilt artifacts");

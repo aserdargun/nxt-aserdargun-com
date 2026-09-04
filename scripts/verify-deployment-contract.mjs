@@ -62,7 +62,7 @@ export const verifySourceContract = async ({ checkoutPath }) => {
   const macosCommands = commands(ci.jobs.macos_acceptance);
   if (!macosCommands.includes("azure-functions-core-tools@4.13.0") || !macosCommands.includes("func --version") || !macosCommands.includes("pnpm validate:macos")) throw refuse("macOS acceptance gate mismatch");
   if (deploy.concurrency?.group !== "swa-nxt-aserdargun-com-production" || deploy.concurrency?.["cancel-in-progress"] !== false) throw refuse("deployment concurrency mismatch");
-  if (JSON.stringify(deploy.jobs?.deploy?.needs) !== JSON.stringify(["portable", "macos_acceptance"])) throw refuse("deployment prerequisite mismatch");
+  if (JSON.stringify(deploy.jobs?.deploy?.needs) !== JSON.stringify(["portable"])) throw refuse("deployment prerequisite mismatch");
   if (deploy.jobs?.deploy?.if !== "github.ref == 'refs/heads/main'") throw refuse("deployment main-ref gate mismatch");
   const upload = deploy.jobs?.deploy?.steps?.find((step) => step.name === "Deploy prebuilt artifacts");
   if (upload?.uses !== deployAction || upload.with?.azure_static_web_apps_api_token !== "${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_SWA_NXT_ASERDARGUN_COM }}" ||
