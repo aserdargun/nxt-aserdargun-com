@@ -146,7 +146,7 @@ describe("publish and revoke dialogs", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "Copy link" }));
-    const feedback = screen.getByText("Copy unavailable");
+    const feedback = screen.getByText("Copy unavailable.");
     expect(feedback).toBeVisible();
     expect(feedback).toHaveClass("publication-copy-status");
     expect(feedback).toHaveAttribute("aria-live", "polite");
@@ -185,7 +185,7 @@ describe("publish and revoke dialogs", () => {
       await Promise.resolve();
     });
     expect(screen.getByText("Link copied.")).toBeVisible();
-    expect(screen.queryByText("Copy unavailable")).not.toBeInTheDocument();
+    expect(screen.queryByText("Copy unavailable.")).not.toBeInTheDocument();
   });
 
   it("drops an old publication copy completion and allows copying the new link", async () => {
@@ -219,7 +219,7 @@ describe("publish and revoke dialogs", () => {
       await older.promise;
     });
     expect(screen.queryByText("Link copied.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Copy unavailable")).not.toBeInTheDocument();
+    expect(screen.queryByText("Copy unavailable.")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Copy link" }));
     expect(await screen.findByText("Link copied.")).toBeVisible();

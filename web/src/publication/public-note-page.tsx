@@ -10,6 +10,7 @@ export interface PublicNotePageProps {
 }
 
 const normalizeVisibleTitle = (value: string): string => value.normalize("NFC").replace(/\s+/gu, " ").trim();
+const publishedDate = new Intl.DateTimeFormat("en", { dateStyle: "long", timeZone: "UTC" });
 
 const leadingBodyHeadingOwnsTitle = (title: string, html: string): boolean => {
   const firstElement = new DOMParser().parseFromString(html, "text/html").body.firstElementChild;
@@ -64,7 +65,9 @@ export const PublicNotePage = ({ publicId, client = publicClient }: PublicNotePa
     <main className="public-note-page">
       <header className="public-note-header">
         <span className="public-note-brand">NXT</span>
-        <time dateTime={state.note.publishedAt}>Published {new Date(state.note.publishedAt).toLocaleDateString()}</time>
+        <time dateTime={state.note.publishedAt}>
+          Published {publishedDate.format(new Date(state.note.publishedAt))}
+        </time>
       </header>
       <article className="public-note-document">
         {leadingBodyHeadingOwnsTitle(state.note.title, state.note.html) ? null : <h1>{state.note.title}</h1>}

@@ -49,7 +49,7 @@ The storage client uses Drive v3 for normal reads, creates, listings, and revisi
 
 ## Local composition
 
-Task 14 owns the local lifecycle:
+The repository-owned local lifecycle uses:
 
 - Vite: literal `127.0.0.1:5173`.
 - SWA CLI: literal `127.0.0.1:4280`.
@@ -66,8 +66,8 @@ Task 14 owns the local lifecycle:
 CI is split deliberately:
 
 1. Ubuntu portable job: locked install, lint, typecheck, deterministic builds, artifact verification, unit/project/static/deployment/release/backup tests.
-2. macOS acceptance job: exact official Core Tools `4.13.0`, Chromium, Task 14 sandbox lifecycle, and Task 15 real browser journeys.
-3. Main deployment job: waits for both jobs, repeats portable artifact validation, independently checks the exact main ref even for manual dispatch, and uploads the two prebuilt artifacts with the Azure build disabled.
+2. macOS acceptance job: exact official Core Tools `4.13.0`, Chromium, the sandboxed lifecycle, and real browser journeys.
+3. Main deployment workflow: waits for its own portable job, repeats portable artifact validation, independently checks the exact main ref even for manual dispatch, and uploads the two prebuilt artifacts with the Azure build disabled. The separate macOS CI result remains a release-review gate rather than a workflow dependency.
 
 `.github/workflows/deploy-swa-nxt-aserdargun-com.yml` is the only authoritative Azure workflow. It targets the secret name and concurrency group derived from `nxt-aserdargun-com`.
 
@@ -87,4 +87,4 @@ Offline verification uses no-follow opens, validates the closed schema and root/
 
 ## External operation boundaries
 
-Task 16 stops at local source, fake clients/runners, synthetic secrets, and ignored temporary filesystem fixtures. Task 17 owns authorized Drive creation/verification. Task 18 owns authorized GitHub/Azure creation and generated-host publication. Custom domain, DNS, IHS, and certificate work remains a separate later task.
+Local verification stops at source, fake clients/runners, synthetic secrets, and ignored temporary filesystem fixtures. Authorized Drive operations, GitHub/Azure release operations, and custom-domain/DNS/certificate mutations remain separate action-time workflows.

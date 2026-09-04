@@ -70,11 +70,11 @@ export const PublicationStatus = ({
     setCopyStatus(null);
     const clipboard = navigator.clipboard;
     if (clipboard === undefined) {
-      complete("Copy unavailable");
+      complete("Copy unavailable.");
       return;
     }
     void clipboard.writeText(publicUrl).then(() => complete("Link copied.")).catch(() => {
-      complete("Copy unavailable");
+      complete("Copy unavailable.");
     });
   };
 
@@ -122,7 +122,7 @@ export const PublicationStatus = ({
               </Dialog.Close>
             </div>
             <Dialog.Description id="revoke-description">
-              The unlisted public URL must return Not found before NXT reports success.
+              NXT confirms revocation only after the unlisted public URL returns “Not found.”
             </Dialog.Description>
             {error === null ? null : <p role="alert">{error}</p>}
             <div className="dialog-actions">

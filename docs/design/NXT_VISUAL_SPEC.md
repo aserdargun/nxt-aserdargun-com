@@ -1,6 +1,6 @@
 # NXT Visual Implementation Spec
 
-Status: approved NXT 1.1 evolution on 2026-08-29.
+Status: implemented NXT 1.1 baseline with a maintenance refresh on 2026-09-04.
 
 ## Accepted concept set
 
@@ -59,7 +59,7 @@ Light and system themes reuse the same semantic tokens with Gruvbox-light values
 
 ## Exact visible-copy inventory
 
-Primary chrome may use: `NXT`, `Files`, `Favorites`, `Tags`, `Notes`, `Inbox`, `Plans`, `Archive`, `Editor`, `Preview`, `Info`, `Outline`, `Backlinks`, `Add attachment`, `Publish`, `Saved`, `Saving`, `Offline draft`, `Conflict`, `Error`, and the active note path/title supplied by data.
+Primary chrome may use: `NXT`, `Files`, `Tree`, `Graph`, `Favorites`, `Tags`, `Notes`, `Inbox`, `Plans`, `Archive`, `New note`, `New folder`, `Editor`, `Preview`, `Info`, `Outline`, `Backlinks`, `Add attachment`, `Publish`, `Saved`, `Saving`, `Offline draft`, `Conflict`, `Error`, formatting controls, note statistics, and the active note path/title supplied by data.
 
 Conflict UI uses exactly: `Version conflict`, `This note changed in Drive while you were editing.`, `Local draft`, `Drive version`, `Keep Drive version`, `Save local as a new note`, and `Merge versions`.
 

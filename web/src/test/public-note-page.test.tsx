@@ -59,6 +59,17 @@ describe("anonymous public note", () => {
     expect(screen.queryByRole("link", { name: /public notes/iu })).not.toBeInTheDocument();
   });
 
+  it("renders the publication date in a stable English long format", async () => {
+    const { PublicNotePage } = await import("../publication/public-note-page");
+    const getNote = vi.fn().mockResolvedValue(note);
+    render(<PublicNotePage publicId={PUBLIC_ID} client={{ getNote }} />);
+
+    expect(await screen.findByText("Published August 26, 2026")).toHaveAttribute(
+      "datetime",
+      note.publishedAt
+    );
+  });
+
   it("lets an equivalent leading body H1 own the single visible document title", async () => {
     const { PublicNotePage } = await import("../publication/public-note-page");
     const title = "Published plan";

@@ -577,7 +577,7 @@ describe("responsive owner shell", () => {
         const active = document.activeElement;
         visited.push(active instanceof HTMLElement
           ? active.getAttribute("aria-label") ?? active.textContent?.trim().replace(/\s+/gu, " ") ?? active.tagName
-          : String(active));
+          : active?.nodeName ?? "none");
       }
       throw new Error(`Tab order did not reach ${label}. Visited: ${visited.join(" -> ")}`);
     };

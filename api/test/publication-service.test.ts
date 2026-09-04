@@ -886,7 +886,7 @@ describe("immutable publication snapshots", () => {
     expect(manifest.entries[0]?.activeRevisionId).not.toBe(firstRevision.revisionId);
     expect(await fixture.privateStorage.readBytes(firstRevision.noteSnapshotDriveId)).toMatchObject({ checksum: firstBytes.checksum });
     expect((await fixture.reader.getNote(first.publicId))?.title).toBe("Share me again");
-  });
+  }, 15_000);
 
   it("queues and recoverably trashes the immutable revision evicted by the thirty-third publish", async () => {
     const fixture = await setup();

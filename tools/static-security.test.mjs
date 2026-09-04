@@ -20,6 +20,7 @@ test("private routes precede fallback and Entra sign-in is disabled", async () =
     rewrite: "/index.html",
     exclude: ["/api/*", "/.auth/*"]
   });
+  assert.equal(config.auth, undefined, "Free Static Web Apps must not receive Standard-only auth configuration");
 });
 
 test("static policy installs the exact security headers", async () => {

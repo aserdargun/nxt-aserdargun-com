@@ -86,7 +86,7 @@ describe("version conflict dialog", () => {
     expect(dialog.querySelector('.drive-pane .cm-line[data-diff-state="addition"]')).not.toBeNull();
 
     const localTime = within(dialog).getByText("Local draft updated", { exact: false }).querySelector("time");
-    const metadataTime = within(dialog).getByText("Note metadata updated", { exact: false }).querySelector("time");
+    const metadataTime = within(dialog).getByText("Drive note updated", { exact: false }).querySelector("time");
     expect(localTime).toHaveAttribute("datetime", fixtureConflict.localUpdatedAt);
     expect(metadataTime).toHaveAttribute("datetime", fixtureConflict.drive.note.frontmatter.updated);
     expect(dialog.querySelectorAll("time")).toHaveLength(2);

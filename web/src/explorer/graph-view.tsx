@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent
+} from "react";
 import { Network } from "lucide-react";
 import {
   buildGraphModel,
@@ -21,6 +28,7 @@ const NODE_RADIUS = 5;
 const HIGHLIGHT_RADIUS = 9;
 
 const radiusForDegree = (degree: number): number => NODE_RADIUS + Math.min(4, degree * 0.6);
+const visibleTitle = (title: string): string => title.length > 24 ? `${title.slice(0, 23)}…` : title;
 
 const buildTitleLookup = (model: GraphModel): Map<string, string> => {
   const map = new Map<string, string>();
@@ -99,6 +107,11 @@ export const GraphView = ({ entries, selectedNoteId, onSelect }: GraphViewProps)
   };
 
   const onNodeClick = (id: string) => (): void => onSelect?.(id);
+  const onNodeKeyDown = (id: string) => (event: ReactKeyboardEvent<SVGGElement>): void => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    onSelect?.(id);
+  };
 
   if (model.nodes.length === 0) {
     return (
@@ -117,7 +130,7 @@ export const GraphView = ({ entries, selectedNoteId, onSelect }: GraphViewProps)
         viewBox={`0 0 ${layout.width} ${layout.height}`}
         width={layout.width}
         height={layout.height}
-        role="img"
+        role="group"
         aria-label="Note link graph"
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -150,20 +163,33 @@ export const GraphView = ({ entries, selectedNoteId, onSelect }: GraphViewProps)
             const isHighlighted = isSelected || isHovered;
             const title = titleById.get(node.id) ?? node.id;
             return (
-              <g key={node.id} className={`graph-node${isHighlighted ? " graph-node-active" : ""}`}>
+              <g
+                key={node.id}
+                className={`graph-node${isHighlighted ? " graph-node-active" : ""}`}
+                role="button"
+                tabIndex={0}
+                aria-label={title}
+                onClick={onNodeClick(node.id)}
+                onKeyDown={onNodeKeyDown(node.id)}
+                onPointerEnter={() => setHoverId(node.id)}
+                onPointerLeave={() => setHoverId((current) => (current === node.id ? null : current))}
+              >
                 <circle
                   cx={node.x}
                   cy={node.y}
                   r={isHighlighted ? HIGHLIGHT_RADIUS : radiusForDegree(node.degree)}
                   className="graph-node-hit"
                   onPointerDown={onPointerDown(node.id)}
-                  onPointerEnter={() => setHoverId(node.id)}
-                  onPointerLeave={() => setHoverId((current) => (current === node.id ? null : current))}
-                  onClick={onNodeClick(node.id)}
-                  aria-label={title}
+                  aria-hidden
+                />
+                <text
+                  x={node.x + radiusForDegree(node.degree) + 5}
+                  y={node.y + 4}
+                  className="graph-node-label"
+                  aria-hidden
                 >
-                  <title>{title}</title>
-                </circle>
+                  {visibleTitle(title)}
+                </text>
               </g>
             );
           })}

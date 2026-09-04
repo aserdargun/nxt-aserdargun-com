@@ -12,6 +12,15 @@ const tenantId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const resourceId = `/subscriptions/${subscriptionId}/resourceGroups/rg-nxt-aserdargun-com/providers/Microsoft.Web/staticSites/swa-nxt-aserdargun-com`;
 const validAccount = { id: subscriptionId, name: "display-name-is-not-identity", state: "Enabled", tenantId, user: { name: "operator@example.invalid", type: "user" } };
 const validApp = { id: resourceId, name: "swa-nxt-aserdargun-com", resourceGroup: "rg-nxt-aserdargun-com", provisioningState: "Succeeded", sku: { name: "Free" }, location: "West Europe", defaultHostname: "calm-field.azurestaticapps.net" };
+const validHostname = {
+  domainName: "nxt.aserdargun.com",
+  errorMessage: null,
+  id: `${resourceId}/customDomains/nxt.aserdargun.com`,
+  name: "nxt.aserdargun.com",
+  resourceGroup: "rg-nxt-aserdargun-com",
+  status: "Ready",
+  type: "Microsoft.Web/staticSites/customDomains"
+};
 const settings = {
   NXT_ALLOWED_GITHUB_USER: "aserdargun",
   GOOGLE_CLIENT_ID: "desktop-client-id",
@@ -32,13 +41,13 @@ const settings = {
 const source = (input = settings) => `${Object.entries(input).map(([key, value]) => `${key}=${value}`).join("\n")}\n`;
 const loadRelease = () => import("../scripts/azure-static-web-app-release.mjs");
 
-const successRunner = (calls, { account = validAccount, app = validApp, onRest } = {}) => async (file, args) => {
+const successRunner = (calls, { account = validAccount, app = validApp, hostnames = [], onRest } = {}) => async (file, args) => {
   assert.equal(file, "az");
   calls.push(args);
   const key = args.join(" ");
   if (key === "account show --only-show-errors --output json") return { code: 0, stdout: JSON.stringify(account), stderr: "" };
   if (key.startsWith("staticwebapp show ")) return { code: 0, stdout: JSON.stringify(app), stderr: "" };
-  if (key.startsWith("staticwebapp hostname list ")) return { code: 0, stdout: "[]", stderr: "" };
+  if (key.startsWith("staticwebapp hostname list ")) return { code: 0, stdout: JSON.stringify(hostnames), stderr: "" };
   if (args[0] === "rest") {
     await onRest?.(args);
     return { code: 0, stdout: "", stderr: "" };
@@ -109,6 +118,36 @@ test("Azure apply accepts an omitted provisioning state for a verified Static We
     }),
     log: () => undefined
   }));
+});
+
+test("Azure apply accepts only the exact ready NXT custom hostname", async (context) => {
+  const { applyAzureSettings } = await loadRelease();
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "nxt-azure-hostname-")));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const envFile = join(directory, ".env.local");
+  await writeFile(envFile, source(), { mode: 0o600 });
+
+  await assert.doesNotReject(applyAzureSettings({
+    envFile,
+    identity: { repository: "nxt-aserdargun-com" },
+    runAz: successRunner([], { hostnames: [validHostname] }),
+    log: () => undefined
+  }));
+
+  for (const hostnames of [
+    [{ ...validHostname, status: "Validating" }],
+    [{ ...validHostname, domainName: "other.example", name: "other.example" }],
+    [validHostname, { ...validHostname, domainName: "other.example", name: "other.example" }]
+  ]) {
+    const calls = [];
+    await assert.rejects(applyAzureSettings({
+      envFile,
+      identity: { repository: "nxt-aserdargun-com" },
+      runAz: successRunner(calls, { hostnames }),
+      log: () => undefined
+    }), /exact ready custom hostname/u);
+    assert.equal(calls.some((args) => args[0] === "rest"), false);
+  }
 });
 
 test("Azure apply redacts sentinel values from child diagnostics and thrown errors", async (context) => {

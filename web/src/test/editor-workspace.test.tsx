@@ -1545,8 +1545,9 @@ describe("editor load and durable drafts", () => {
     await flushMicrotasks();
     await act(async () => vi.advanceTimersByTimeAsync(1000));
     await flushMicrotasks();
+    vi.useRealTimers();
 
-    expect(screen.getByLabelText("Save status")).toHaveTextContent("Error");
+    await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Error"));
     expect(store.drafts.get(NOTE_ID)?.source).toBe(renamedSource);
   });
 

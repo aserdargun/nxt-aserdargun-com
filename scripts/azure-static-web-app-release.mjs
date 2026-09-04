@@ -260,7 +260,19 @@ export const applyAzureSettings = async ({ envFile, identity, runAz = defaultAzu
     throw refuse("exact Ready Free Static Web App is required");
   }
   const hostnames = parseJson(await runChecked(runAz, ["staticwebapp", "hostname", "list", ...targetArgs.slice(0, 4), "--only-show-errors", "--output", "json"], "Azure hostname verification"), "Azure hostname verification");
-  if (!Array.isArray(hostnames) || hostnames.length !== 0) throw refuse("custom hostnames must be empty");
+  const expectedCustomDomain = "nxt.aserdargun.com";
+  const expectedCustomDomainId = `${expectedResourceId}/customDomains/${expectedCustomDomain}`;
+  const customHostnameIsExact = hostnames?.length === 1 &&
+    hostnames[0]?.domainName === expectedCustomDomain &&
+    hostnames[0]?.name === expectedCustomDomain &&
+    safeString(hostnames[0]?.id).toLowerCase() === expectedCustomDomainId.toLowerCase() &&
+    hostnames[0]?.resourceGroup === "rg-nxt-aserdargun-com" &&
+    hostnames[0]?.status === "Ready" &&
+    hostnames[0]?.errorMessage === null &&
+    hostnames[0]?.type === "Microsoft.Web/staticSites/customDomains";
+  if (!Array.isArray(hostnames) || (hostnames.length !== 0 && !customHostnameIsExact)) {
+    throw refuse("zero custom hostnames or the exact ready custom hostname is required");
+  }
   const sortedKeys = [...settingKeys].sort();
   const payload = await createSecureSettingsPayload({ values, temporaryParent });
   let mutationFailure;

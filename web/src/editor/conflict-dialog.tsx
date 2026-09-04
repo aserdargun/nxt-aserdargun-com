@@ -134,7 +134,7 @@ export const ConflictDialog = ({
                 Drive version
               </h2>
               <p className="conflict-pane-time">
-                Note metadata updated{" "}
+                Drive note updated{" "}
                 <time dateTime={conflict.drive.note.frontmatter.updated}>
                   {formatConflictTimestamp(conflict.drive.note.frontmatter.updated)}
                 </time>

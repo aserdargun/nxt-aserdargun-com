@@ -9,7 +9,7 @@ NXT is a small, private-first Markdown planning and notes application inspired b
 - Private system/publication root: `NXT-PRIVATE-COM`.
 - Web authentication: Azure Static Web Apps GitHub authentication plus an exact, server-side `aserdargun` owner check. The generic `authenticated` role alone is never sufficient.
 - Anonymous publication: only immutable manifest-allowlisted snapshots under `/p/<publicId>`. The public route loads no owner session or private API.
-- Azure target: `rg-nxt-aserdargun-com` / `swa-nxt-aserdargun-com`, West Europe, Free, generated `*.azurestaticapps.net` hostname.
+- Azure target: subscription `d032085b-0266-48cd-b094-b92965fec33d`, `rg-nxt-aserdargun-com` / `swa-nxt-aserdargun-com`, West Europe, Free, generated `nice-island-0e6efe203.7.azurestaticapps.net`, and ready custom hostname `nxt.aserdargun.com`.
 
 The application currently requests Google's full Drive scope because it must create folders, update Markdown and bounded attachments, atomically maintain three private system JSON files, move owner-approved content to Trash, and create/revoke public snapshots. Risk is limited by exact-owner OAuth, two dedicated roots, stored-ID/root-boundary checks, no sharing mutation, read-back verification, bounded operations, and redaction-safe tools. See [Security](docs/SECURITY.md) for the complete rationale.
 
@@ -17,7 +17,7 @@ The application currently requests Google's full Drive scope because it must cre
 
 - Node.js `22.x` and Corepack.
 - pnpm `11.22.0`.
-- macOS for the real local Functions lifecycle. Task 14 uses a host-local child sandbox because installed Core Tools `4.13.0` binds Functions broadly on macOS; do not weaken that profile.
+- macOS for the real local Functions lifecycle. The lifecycle uses a host-local child sandbox because installed Core Tools `4.13.0` binds Functions broadly on macOS; do not weaken that profile.
 - Azure Functions Core Tools exactly `4.13.0`.
 - Chromium installed through Playwright for browser acceptance.
 - For live Drive authorization only: a Google Cloud OAuth client of type **Desktop app**, Drive API enabled, and the intended owner Google account.
@@ -134,7 +134,7 @@ Never bulk-copy an unverified directory into Drive and never use this inventory 
 
 ## CI and Azure Free release
 
-Task 16 creates only local source files. It does **not** create a GitHub repository, Azure resource, Actions secret, Drive resource, DNS record, workflow run, deployment, or custom domain.
+Source verification is local and read-only. It does **not** create a GitHub repository, Azure resource, Actions secret, Drive resource, DNS record, workflow run, deployment, or custom domain.
 
 PR validation lives in `.github/workflows/ci.yml`. Production deployment lives only in:
 
@@ -142,7 +142,7 @@ PR validation lives in `.github/workflows/ci.yml`. Production deployment lives o
 .github/workflows/deploy-swa-nxt-aserdargun-com.yml
 ```
 
-Both workflows use immutable action SHAs. Portable validation runs on Ubuntu. A separate macOS job installs exact Core Tools `4.13.0`, installs Chromium, and runs the real sandboxed lifecycle/browser gate. Deployment is main-only, serialized, waits for both jobs, repeats portable artifact validation, and uploads only verified prebuilt `web/dist` plus `api-dist` with both Azure builds skipped. The deploy job independently requires `github.ref == 'refs/heads/main'`, so a manual `workflow_dispatch` from another ref can validate but cannot deploy.
+Both workflows use immutable action SHAs. PR/branch CI runs portable validation on Ubuntu and a separate macOS acceptance job with exact Core Tools `4.13.0` plus Chromium. The production workflow is main-only and serialized; it waits for its own portable gate, repeats portable artifact validation, and uploads only verified prebuilt `web/dist` plus `api-dist` with both Azure builds skipped. It does not depend on the separate macOS CI job, so a release review must verify both workflow results. The deploy job independently requires `github.ref == 'refs/heads/main'`, so a manual `workflow_dispatch` from another ref can validate but cannot deploy.
 
 Pure source verification is safe in this intentionally named worktree:
 
@@ -162,13 +162,13 @@ Installing production app settings is a manual action-time operation only. The e
 node scripts/azure-static-web-app-release.mjs apply --env-file .env.local
 ```
 
-The command first repeats release identity; binds a valid enabled subscription UUID, tenant, and signed-in user to the exact Free resource ID; and checks Ready/Succeeded provisioning, West Europe, generated hostname, and zero custom hostnames. The environment file is opened with no-follow semantics and the opened device/inode/mode/size must still match the canonical path inspection.
+The command first repeats release identity and requires the active Azure account to resolve the exact Free resource in subscription `d032085b-0266-48cd-b094-b92965fec33d`. It checks the resource ID, provisioning state, West Europe location, generated hostname, and either no custom hostname or the single ready `nxt.aserdargun.com` hostname. The environment file is opened with no-follow semantics and the opened device/inode/mode/size must still match the canonical path inspection.
 
 Azure CLI's `staticwebapp appsettings set` interface accepts settings only as `KEY=value` command arguments, so NXT intentionally does not use it. The release tool writes `{ "properties": { ... } }` to a short-lived mode-`0600` file inside a mode-`0700` temporary directory and invokes the official `az rest` `PUT .../config/appsettings?api-version=2025-05-01 --body @<file>` interface. It retains no-follow handles for both exact created device/inode identities across the call. On normal success and failure returns, cleanup first revalidates and truncates the exact payload inode to zero, syncs it, and closes that handle. It then repairs only the retained directory handle when permissions changed, revalidates each pathname, and makes at most one unlink plus one empty-directory removal attempt. Destructive pathname operations are never retried, and cleanup never recursively removes a directory or foreign entry. A deterministic same-path replacement before cleanup is preserved while the retained original payload inode is zeroed. If cleanup cannot be proven complete, the command fails closed with a generic cleanup state while preserving the primary mutation error. Secret values therefore do not enter the process argument list, logs, or surfaced child errors. Only sorted key names are printed. There is no basename bypass, `--force`, OIDC, or automatic workflow settings mutation.
 
 A POSIX `unlink`/`rmdir` is still pathname-based; even `unlinkat` cannot atomically bind the name to an expected inode. The guarantee therefore covers quiescent normal-return cleanup and deterministic replacements completed before cleanup, not an actively hostile same-UID process racing between the final identity check and syscall. That same UID can already read or replace `.env.local`. A hard process crash can also occur before inode truncation. Treat an interrupted release or generic cleanup-incomplete result as a local secret incident: do not retry blindly, inspect the private temporary area without printing its contents, and remove only the exact leftover `nxt-azure-settings-*` directory after ownership has been established.
 
-Live Task 17/18 operations require a fresh display of exact Google/GitHub/Azure targets and explicit action-time authorization. Local plan approval is not permission to authorize Drive, create a public repository, push, create Azure resources, install secrets/settings, dispatch a workflow, or deploy.
+Live Google, GitHub, and Azure operations require a fresh display of exact targets and explicit action-time authorization. Local plan approval is not permission to authorize Drive, create a public repository, push, create Azure resources, install secrets/settings, dispatch a workflow, or deploy.
 
 ## Secret rotation and incidents
 
@@ -179,6 +179,6 @@ Live Task 17/18 operations require a fresh display of exact Google/GitHub/Azure 
 
 ## Hard custom-domain boundary
 
-**STOP after the Azure-generated `*.azurestaticapps.net` hostname is verified.** Do not create or change Azure custom domains, DNS, IHS/e-destek records, `_dnsauth` TXT, CNAME/A/AAAA/ALIAS records, nameservers, certificates, mail, apex, or `www` under Task 16. Custom-domain work requires the separate domain workflow, fresh exact targets, and a new action-time confirmation.
+Normal releases preserve and verify the existing `nxt.aserdargun.com` mapping. Do not create or change Azure custom domains, DNS, IHS/e-destek records, `_dnsauth` TXT, CNAME/A/AAAA/ALIAS records, nameservers, certificates, mail, apex, or `www` as part of an application deploy. Domain mutations require the separate domain workflow, fresh exact targets, and a new action-time confirmation.
 
 See [Architecture](docs/ARCHITECTURE.md) and [Security](docs/SECURITY.md).

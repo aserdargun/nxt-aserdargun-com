@@ -87,6 +87,7 @@ const verifyStaticConfig = (config) => {
   if (JSON.stringify(config.navigationFallback) !== JSON.stringify({ rewrite: "/index.html", exclude: ["/api/*", "/.auth/*"] })) {
     throw new Error("Invalid Static Web Apps navigation fallback.");
   }
+  if (config.auth !== undefined) throw new Error("Free Static Web Apps cannot use Standard-only auth configuration.");
   const expectedHeaders = {
     "Content-Security-Policy": expectedCsp,
     "Referrer-Policy": "no-referrer",

@@ -14,7 +14,7 @@
     "@nxt/contracts": "workspace:*",
     "@nxt/domain": "workspace:*",
     "file-type": "22.0.2",
-    "googleapis": "176.0.0"
+    "googleapis": "178.0.0"
   },
   "devDependencies": {
     "typescript": "5.9.3",
