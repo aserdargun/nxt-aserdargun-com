@@ -15,6 +15,7 @@ const buildHandle = (overrides: Partial<MarkdownEditorHandle> = {}): MarkdownEdi
   prefixLine: vi.fn(),
   insertAtCursor: vi.fn(),
   getView: () => null,
+  getSlashMenu: () => null,
   ...overrides
 });
 

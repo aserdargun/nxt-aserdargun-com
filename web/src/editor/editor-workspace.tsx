@@ -13,6 +13,8 @@ import { EditorDropzone } from "./editor-dropzone";
 import { FormatToolbar } from "./format-toolbar";
 import { formatAttachmentError, readFileAsBase64 } from "./attachment-helpers";
 import { type MarkdownEditorHandle } from "./markdown-editor";
+import { buildDefaultSlashMenuItems } from "./slash-menu-items";
+import { SlashMenu } from "./slash-menu";
 import { useAutosave, type SaveStatus } from "./use-autosave";
 
 const MarkdownEditor = lazy(async () => {
@@ -117,6 +119,15 @@ export const EditorWorkspace = ({
     () => state.source === null ? null : computeNoteStats(state.source, state.path),
     [state.path, state.source]
   );
+  const slashMenuItems = useMemo(() => buildDefaultSlashMenuItems(), []);
+  const [slashController, setSlashController] = useState<ReturnType<NonNullable<MarkdownEditorHandle["getSlashMenu"]>> | null>(null);
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const next = editorRef.current?.getSlashMenu() ?? null;
+      setSlashController((current) => (current === next ? current : next));
+    }, 250);
+    return () => clearInterval(interval);
+  }, []);
 
   const uploadAndInsertFile = useCallback(async (file: File): Promise<void> => {
     if (state.source === null) return;
@@ -220,12 +231,14 @@ export const EditorWorkspace = ({
                   value={state.source}
                   onChange={onSourceChange}
                   onLimitExceeded={onLimitExceeded}
+                  slashMenuItems={slashMenuItems}
                 />
               </Suspense>
             </EditorDropzone>
           )}
         </div>
         {stats === null ? null : <EditorStatsBar stats={stats} />}
+        {slashController === null ? null : <SlashMenu controller={slashController} />}
       </section>
 
       <div className="context-column">

@@ -5,12 +5,14 @@ import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 import CodeMirror, { EditorState, EditorView, type Extension } from "@uiw/react-codemirror";
+import { createSlashMenu, type SlashMenuController, type SlashMenuItem } from "./slash-menu-extension";
 
 export interface MarkdownEditorHandle {
   readonly wrapSelection: (before: string, after?: string, placeholder?: string) => void;
   readonly prefixLine: (prefix: string) => void;
   readonly insertAtCursor: (text: string) => void;
   readonly getView: () => EditorView | null;
+  readonly getSlashMenu: () => SlashMenuController | null;
 }
 
 export interface MarkdownEditorProps {
@@ -19,6 +21,7 @@ export interface MarkdownEditorProps {
   readonly onLimitExceeded?: () => void;
   readonly readOnly?: boolean;
   readonly onViewReady?: ((view: EditorView) => void) | undefined;
+  readonly slashMenuItems?: readonly SlashMenuItem[] | undefined;
 }
 
 const utf8Size = (value: string): number => new TextEncoder().encode(value).byteLength;
@@ -90,7 +93,7 @@ const fixedExtensions: readonly Extension[] = [
 ];
 
 const MarkdownEditorInner = (
-  { value, onChange, onLimitExceeded, readOnly = false, onViewReady }: MarkdownEditorProps,
+  { value, onChange, onLimitExceeded, readOnly = false, onViewReady, slashMenuItems }: MarkdownEditorProps,
   ref: React.ForwardedRef<MarkdownEditorHandle>
 ): React.JSX.Element => {
   if (utf8Size(value) > MAX_NOTE_SOURCE_BYTES) {
@@ -98,6 +101,7 @@ const MarkdownEditorInner = (
   }
 
   const viewRef = useRef<EditorView | null>(null);
+  const slashControllerRef = useRef<SlashMenuController | null>(null);
 
   useImperativeHandle(ref, () => ({
     wrapSelection: (before, after = before, placeholder = "") => {
@@ -139,8 +143,14 @@ const MarkdownEditorInner = (
       });
       view.focus();
     },
-    getView: () => viewRef.current
+    getView: () => viewRef.current,
+    getSlashMenu: () => slashControllerRef.current
   }), []);
+
+  const slashBundle = useMemo(() => {
+    if (slashMenuItems === undefined) return null;
+    return createSlashMenu(slashMenuItems);
+  }, [slashMenuItems]);
 
   const extensions = useMemo<Extension[]>(
     () => [
@@ -151,9 +161,10 @@ const MarkdownEditorInner = (
         }
         onLimitExceeded?.();
         return [];
-      })
+      }),
+      ...(slashBundle === null ? [] : [slashBundle.extension])
     ],
-    [onLimitExceeded]
+    [onLimitExceeded, slashBundle]
   );
 
   return (
@@ -166,6 +177,7 @@ const MarkdownEditorInner = (
       extensions={extensions}
       onCreateEditor={(view) => {
         viewRef.current = view;
+        slashControllerRef.current = slashBundle?.controller ?? null;
         onViewReady?.(view);
       }}
       basicSetup={{
