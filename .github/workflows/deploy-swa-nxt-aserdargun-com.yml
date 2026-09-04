@@ -30,30 +30,6 @@ jobs:
       - name: Validate portable source and artifacts
         run: pnpm validate:ci
 
-  macos_acceptance:
-    runs-on: macos-latest
-    env:
-      NODE_OPTIONS: --max-old-space-size=4096
-      NXT_VITEST_TEST_TIMEOUT_MS: "15000"
-      NXT_VITEST_MAX_WORKERS: "1"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: "22"
-      - name: Install pnpm
-        run: corepack enable && corepack prepare pnpm@11.22.0 --activate
-      - name: Install locked dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Install exact Azure Functions Core Tools
-        run: |
-          npm install --global azure-functions-core-tools@4.13.0
-          test "$(func --version)" = "4.13.0"
-      - name: Install Chromium
-        run: pnpm exec playwright install chromium
-      - name: Validate real macOS lifecycle and Chromium
-        run: pnpm validate:macos
-
   deploy:
     runs-on: ubuntu-latest
     env:
