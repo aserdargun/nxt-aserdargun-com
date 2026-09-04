@@ -63,6 +63,9 @@
       // and the React shell needs the actual session/vault data.
       (function () {
         try {
+          var pathname = window.location.pathname;
+          var privateRoute = pathname === "/" || pathname === "/login" || pathname === "/app" || pathname.startsWith("/app/");
+          if (!privateRoute) return;
           var img = new Image();
           img.decoding = "async";
           img.loading = "eager";

@@ -34,6 +34,7 @@ describe("FormatToolbar", () => {
     expect(screen.getByLabelText("Code block")).toBeInTheDocument();
     expect(screen.getByLabelText("Link")).toBeInTheDocument();
     expect(screen.getByLabelText(/attachment/i)).toBeInTheDocument();
+    expect(document.querySelector<HTMLInputElement>('input[type="file"]')).not.toBeVisible();
   });
 
   it("forwards bold and italic to the editor handle with Markdown markers", () => {

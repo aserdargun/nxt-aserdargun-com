@@ -216,7 +216,7 @@ export const FormatToolbar = ({
         <input
           ref={fileInputRef}
           type="file"
-          className="visually-hidden"
+          hidden
           onChange={(event) => { void onAttachmentSelected(event); }}
           aria-hidden
           tabIndex={-1}

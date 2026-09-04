@@ -10,9 +10,11 @@ describe("index.html boot shell", () => {
     expect(indexHtml).toMatch(/Loading NXT/u);
   });
 
-  it("includes the warmup ping so the Functions container is warm by the time auth completes", () => {
+  it("warms private routes without leaking private requests into public pages", () => {
     expect(indexHtml).toMatch(/\/api\/private\/session/u);
     expect(indexHtml).toMatch(/_warmup=1/u);
+    expect(indexHtml).toMatch(/pathname\.startsWith\("\/app\/"\)/u);
+    expect(indexHtml).toMatch(/if \(!privateRoute\) return/u);
   });
 
   it("honors prefers-reduced-motion", () => {
