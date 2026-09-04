@@ -1,7 +1,7 @@
 import { ApiErrorSchema } from "@nxt/contracts";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
-import { ApiResponseError, errorResponse, json } from "../src/http/api-response.js";
+import { ApiResponseError, errorResponse, json, typedJson } from "../src/http/api-response.js";
 
 const CANONICAL_REQUEST_ID = "123e4567-e89b-42d3-a456-426614174000";
 const GENERATED_REQUEST_ID_PATTERN =
@@ -390,6 +390,24 @@ describe("json", () => {
 
     expect(response.jsonBody).toBe("[Truncated]");
     expect(Buffer.byteLength(serialized, "utf8")).toBeLessThan(64);
+  });
+});
+
+describe("typedJson", () => {
+  it("serializes a valid null payload as JSON instead of an empty Azure response", () => {
+    const response = typedJson(null, {
+      parse(value: unknown) {
+        expect(value).toBeNull();
+        return null;
+      }
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers).toEqual({
+      "content-type": "application/json; charset=utf-8"
+    });
+    expect(response.body).toBe("null");
+    expect(response.jsonBody).toBeUndefined();
   });
 });
 

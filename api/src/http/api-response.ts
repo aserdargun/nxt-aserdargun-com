@@ -92,6 +92,9 @@ export const typedJson = <T>(value: unknown, schema: { parse(input: unknown): T 
     throw new ApiResponseError("DRIVE_UNAVAILABLE");
   }
   if (new TextEncoder().encode(source).byteLength > MAX_SANITIZATION_OUTPUT_BYTES) throw new ApiResponseError("TOO_LARGE");
+  // Azure Functions treats `jsonBody: null` as an omitted body. Preserve the
+  // JSON contract for nullable responses by sending the serialized token.
+  if (parsed === null) return { status, headers: JSON_HEADERS, body: source };
   return { status, headers: JSON_HEADERS, jsonBody: parsed };
 };
 
