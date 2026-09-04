@@ -46,7 +46,7 @@ test("API build is deterministic and emits the minimal Functions v4 artifact", a
     dependencies: {
       "@azure/functions": "4.16.2",
       "file-type": "22.0.2",
-      "googleapis": "176.0.0"
+      "googleapis": "178.0.0"
     }
   });
   assert.doesNotMatch(await readFile(join(checkout, "api-dist/index.js"), "utf8"), /sourceMappingURL/u);

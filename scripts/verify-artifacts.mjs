@@ -140,7 +140,7 @@ export const verifyArtifacts = async ({ checkoutPath = moduleCheckout } = {}) =>
     dependencies: {
       "@azure/functions": "4.16.2",
       "file-type": "22.0.2",
-      "googleapis": "176.0.0"
+      "googleapis": "178.0.0"
     }
   };
   if (JSON.stringify(apiPackage) !== JSON.stringify(expectedPackage)) throw new Error("Invalid API package contract.");

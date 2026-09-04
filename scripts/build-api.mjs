@@ -12,7 +12,7 @@ const artifactPackage = {
   dependencies: {
     "@azure/functions": "4.16.2",
     "file-type": "22.0.2",
-    "googleapis": "176.0.0"
+    "googleapis": "178.0.0"
   }
 };
 
