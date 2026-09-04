@@ -1,10 +1,18 @@
 import type { WikiTargetResolution } from "@nxt/domain";
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortableAttachmentMarkdown } from "@nxt/domain";
 import { notesClient, type NotesClient } from "../api/notes";
+import { attachmentClient, type AttachmentClient, type UploadedAttachment } from "../api/attachments";
 import { BacklinksPanel, type KnowledgeLink } from "../explorer/backlinks-panel";
 import { OutlinePanel, type OutlineHeading } from "../explorer/outline-panel";
 import { ConflictDialog } from "./conflict-dialog";
 import { browserDraftStore, type DraftStore } from "./draft-store";
+import { EditorStatsBar } from "./editor-stats-bar";
+import { computeNoteStats } from "./note-stats";
+import { EditorDropzone } from "./editor-dropzone";
+import { FormatToolbar } from "./format-toolbar";
+import { formatAttachmentError, readFileAsBase64 } from "./attachment-helpers";
+import { type MarkdownEditorHandle } from "./markdown-editor";
 import { useAutosave, type SaveStatus } from "./use-autosave";
 
 const MarkdownEditor = lazy(async () => {
@@ -49,6 +57,8 @@ export interface EditorWorkspaceProps {
   readonly onStateChange?: ((state: EditorWorkspaceState) => void) | undefined;
   readonly infoRegion?: ReactNode | undefined;
   readonly attachmentInsertion?: AttachmentInsertion | null | undefined;
+  readonly onAttachmentUploaded?: ((attachment: UploadedAttachment) => void | Promise<void>) | undefined;
+  readonly attachmentApi?: AttachmentClient | undefined;
 }
 
 const systemNow = (): Date => new Date();
@@ -79,7 +89,9 @@ export const EditorWorkspace = ({
   showStatus = true,
   onStateChange,
   infoRegion,
-  attachmentInsertion
+  attachmentInsertion,
+  onAttachmentUploaded,
+  attachmentApi = attachmentClient
 }: EditorWorkspaceProps): React.JSX.Element => {
   const [contextTab, setContextTab] = useState<"preview" | "outline" | "backlinks">("preview");
   const [pendingOutlineId, setPendingOutlineId] = useState<string | null>(null);
@@ -98,6 +110,40 @@ export const EditorWorkspace = ({
     now
   });
   const handledInsertionRef = useRef<number | null>(null);
+  const editorRef = useRef<MarkdownEditorHandle | null>(null);
+  const [toolbarError, setToolbarError] = useState<string | null>(null);
+  const [dropBusy, setDropBusy] = useState(false);
+  const stats = useMemo(
+    () => state.source === null ? null : computeNoteStats(state.source, state.path),
+    [state.path, state.source]
+  );
+
+  const uploadAndInsertFile = useCallback(async (file: File): Promise<void> => {
+    if (state.source === null) return;
+    setToolbarError(null);
+    setDropBusy(true);
+    try {
+      const bytesBase64 = await readFileAsBase64(file);
+      const response = await attachmentApi.upload({
+        noteId,
+        name: file.name,
+        declaredMime: file.type.length > 0 ? file.type : "application/octet-stream",
+        bytesBase64
+      });
+      const markdown = createPortableAttachmentMarkdown({
+        notePath: state.path,
+        noteId,
+        name: response.asset.name,
+        inlineImage: response.asset.disposition === "inline" && response.asset.mimeType.startsWith("image/")
+      });
+      editorRef.current?.insertAtCursor(markdown);
+      await onAttachmentUploaded?.(response.asset);
+    } catch (error) {
+      setToolbarError(formatAttachmentError(error));
+    } finally {
+      setDropBusy(false);
+    }
+  }, [attachmentApi, noteId, onAttachmentUploaded, state.path, state.source]);
 
   useEffect(() => {
     onStateChange?.({
@@ -154,17 +200,32 @@ export const EditorWorkspace = ({
             </output>
           ) : null}
         </div>
+        <FormatToolbar
+          noteId={noteId}
+          notePath={state.path}
+          editor={editorRef.current}
+          disabled={state.source === null}
+          onAttachmentUploaded={onAttachmentUploaded}
+          onError={setToolbarError}
+        />
+        {toolbarError === null ? null : (
+          <p role="alert" className="format-toolbar-error">{toolbarError}</p>
+        )}
         <div className="editor-canvas real-editor-canvas" aria-busy={state.source === null}>
           {state.source === null ? null : (
-            <Suspense fallback={null}>
-              <MarkdownEditor
-                value={state.source}
-                onChange={onSourceChange}
-                onLimitExceeded={onLimitExceeded}
-              />
-            </Suspense>
+            <EditorDropzone onFile={(file) => { void uploadAndInsertFile(file); }} disabled={dropBusy}>
+              <Suspense fallback={null}>
+                <MarkdownEditor
+                  ref={editorRef}
+                  value={state.source}
+                  onChange={onSourceChange}
+                  onLimitExceeded={onLimitExceeded}
+                />
+              </Suspense>
+            </EditorDropzone>
           )}
         </div>
+        {stats === null ? null : <EditorStatsBar stats={stats} />}
       </section>
 
       <div className="context-column">

@@ -591,6 +591,220 @@ textarea:focus-visible,
   font-size: 12px;
 }
 
+.format-toolbar {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.format-toolbar[aria-disabled="true"] .format-toolbar-button {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.format-toolbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: nowrap;
+}
+
+.format-toolbar-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.format-toolbar-button:hover:not(:disabled) {
+  background: var(--selection);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.format-toolbar-button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.format-toolbar-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.format-toolbar-sep {
+  display: inline-block;
+  width: 1px;
+  height: 22px;
+  margin: 0 4px;
+  background: var(--border);
+}
+
+.format-toolbar-link {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+}
+
+.format-toolbar-link-input {
+  height: 32px;
+  min-width: 220px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.format-toolbar-link-input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+  border-color: transparent;
+}
+
+.format-toolbar-error {
+  margin: 0;
+  padding: 6px 18px;
+  border-bottom: 1px solid var(--red);
+  background: rgba(251, 73, 52, 0.08);
+  color: var(--red);
+  font-size: 12px;
+}
+
+.editor-dropzone {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.editor-dropzone[data-drop-active="true"] {
+  outline: 2px dashed var(--yellow);
+  outline-offset: -6px;
+}
+
+.editor-dropzone-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(200, 255, 54, 0.08);
+  color: var(--yellow);
+  font-size: 18px;
+  font-weight: 600;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.editor-stats-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 18px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.editor-stats-cell {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.editor-stats-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.editor-stats-label {
+  color: var(--muted);
+}
+
+.editor-stats-sep {
+  color: var(--border);
+}
+
+.info-stats-card {
+  margin: 0 0 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elev);
+}
+
+.info-stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.info-stats-caption {
+  text-align: left;
+  padding: 0 0 8px;
+  color: var(--text);
+  font-weight: 600;
+  caption-side: top;
+}
+
+.info-stats-table th,
+.info-stats-table td {
+  padding: 4px 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+}
+
+.info-stats-table tr:last-child th,
+.info-stats-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.info-stats-table th {
+  width: 38%;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.info-stats-table td {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 .real-editor-canvas {
   padding: 0;
   overflow: hidden;

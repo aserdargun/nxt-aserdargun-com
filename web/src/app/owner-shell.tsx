@@ -59,6 +59,8 @@ import type {
 } from "../explorer/explorer-operation-dialog";
 import { ExplorerOperationDialog } from "../explorer/explorer-operation-dialog";
 import { FavoritesPanel } from "../explorer/favorites-panel";
+import { NoteStatsCard } from "../explorer/note-stats-card";
+import { computeNoteStats } from "../editor/note-stats";
 import {
   buildExplorerTree,
   FileTree,
@@ -556,16 +558,19 @@ const PreviewRegion = ({ hidden }: { readonly hidden: boolean }): React.JSX.Elem
 const InfoRegion = ({
   hidden,
   attachments,
-  publication
+  publication,
+  statsCard
 }: {
   readonly hidden: boolean;
   readonly attachments?: React.ReactNode;
   readonly publication?: React.ReactNode;
+  readonly statsCard?: React.ReactNode;
 }): React.JSX.Element => (
   <section className="context-region info-region" role="region" aria-label="Info" hidden={hidden}>
     <div className="region-toolbar"><span className="region-label">Info</span></div>
     <div className="info-content">
       <h1>Info</h1>
+      {statsCard === undefined ? null : statsCard}
       <section><h2>Outline</h2></section>
       <section><h2>Backlinks</h2></section>
       {attachments === undefined ? null : <section><h2>Attachments</h2>{attachments}</section>}
@@ -790,6 +795,10 @@ export const OwnerShell = ({
       markdown: attachmentMarkdown(attachment)
     });
   }, [attachmentMarkdown, noteId, refreshVault]);
+
+  const refreshAfterAttachment = useCallback(async (): Promise<void> => {
+    await refreshVault();
+  }, [refreshVault]);
 
   const openNoteOperation = useCallback((kind: "rename" | "move", source?: NoteExplorerNode): void => {
     const target = source === null
@@ -1152,6 +1161,9 @@ export const OwnerShell = ({
       <span>Publish</span>
     </button>
   );
+  const noteStatsCard = editorState.source === null ? null : (
+    <NoteStatsCard stats={computeNoteStats(editorState.source, editorState.path)} />
+  );
   const attachmentCards = selectedEntry === undefined || selectedEntry.attachments.length === 0 ? (
     <p className="empty-info">No attachments</p>
   ) : (
@@ -1242,7 +1254,7 @@ export const OwnerShell = ({
             )}
             <div className="context-column">
               <PreviewRegion hidden={isHidden("preview")} />
-              <InfoRegion hidden={isHidden("info")} attachments={attachmentCards} publication={publicationPanel} />
+              <InfoRegion hidden={isHidden("info")} attachments={attachmentCards} publication={publicationPanel} statsCard={noteStatsCard} />
             </div>
           </>
         ) : (
@@ -1263,7 +1275,8 @@ export const OwnerShell = ({
               showStatus={false}
               onStateChange={setEditorState}
               attachmentInsertion={attachmentInsertion}
-              infoRegion={<InfoRegion hidden={isHidden("info")} attachments={attachmentCards} publication={publicationPanel} />}
+              infoRegion={<InfoRegion hidden={isHidden("info")} attachments={attachmentCards} publication={publicationPanel} statsCard={noteStatsCard} />}
+              onAttachmentUploaded={refreshAfterAttachment}
             />
           </Suspense>
         )}
