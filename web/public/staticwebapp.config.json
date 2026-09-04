@@ -4,6 +4,12 @@
     { "route": "/api/private/*", "allowedRoles": ["authenticated"] },
     { "route": "/app/*", "allowedRoles": ["authenticated"] }
   ],
+  "auth": {
+    "loginSessions": {
+      "ttl": "720,0:0:0",
+      "persistentCookies": { "enabled": true }
+    }
+  },
   "navigationFallback": {
     "rewrite": "/index.html",
     "exclude": ["/api/*", "/.auth/*"]
