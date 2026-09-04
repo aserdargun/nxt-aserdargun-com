@@ -21,7 +21,7 @@ const privateNotePath = (noteId: string): `/api/private/notes/${string}` =>
 
 export const createPublicationClient = (anonymous: PublicClient = publicClient): PublicationClient => {
   const getStatus = (noteId: string): Promise<PublicationStatus | null> => requestJson(
-    `${privateNotePath(noteId)}/publication` as `/api/${string}`,
+    `${privateNotePath(noteId)}/share-status` as `/api/${string}`,
     PublicationStatusResponseSchema,
     undefined,
     { method: "GET", cache: "no-store" }

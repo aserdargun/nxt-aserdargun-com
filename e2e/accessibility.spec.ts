@@ -214,7 +214,7 @@ for (const theme of ["dark", "light"] as const) {
       await context.setOffline(false);
     }
 
-    await page.route("**/api/private/notes/*/publication", async (route, request) => {
+    await page.route("**/api/private/notes/*/share-status", async (route, request) => {
       if (request.method() !== "GET") {
         await route.continue();
         return;

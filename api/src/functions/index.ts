@@ -83,7 +83,7 @@ export const task9Routes: Array<{
   handler: HttpHandler;
 }> = [
   { name: "private-notes-publish", method: "POST", route: "private/notes/{noteId}/publish", authLevel: "anonymous", handler: publishNoteHandler },
-  { name: "private-notes-publication-status", method: "GET", route: "private/notes/{noteId}/publication", authLevel: "anonymous", handler: getPublicationStatusHandler },
+  { name: "private-notes-publication-status", method: "GET", route: "private/notes/{noteId}/share-status", authLevel: "anonymous", handler: getPublicationStatusHandler },
   { name: "private-publications-revoke", method: "DELETE", route: "private/publications/{publicId}", authLevel: "anonymous", handler: revokePublicationHandler },
   { name: "public-notes-get", method: "GET", route: "public/notes/{publicId}", authLevel: "anonymous", handler: publicNoteHandler },
   { name: "public-assets-get", method: "GET", route: "public/assets/{publicId}/{assetId}", authLevel: "anonymous", handler: publicAssetHandler }

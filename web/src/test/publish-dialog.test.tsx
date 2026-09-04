@@ -52,7 +52,7 @@ describe("typed publication clients", () => {
     await expect(publicationClient.publish(NOTE_ID, "7")).resolves.toEqual(STATUS);
     expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
       `/api/private/notes/${NOTE_ID}/publish`,
-      `/api/private/notes/${NOTE_ID}/publication`,
+      `/api/private/notes/${NOTE_ID}/share-status`,
       `/api/public/notes/${PUBLIC_ID}`
     ]);
     const body = fetchMock.mock.calls[0]?.[1]?.body;

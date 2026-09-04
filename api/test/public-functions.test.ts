@@ -50,7 +50,7 @@ describe("Task 9 functions", () => {
     expect(task8Routes).toHaveLength(3);
     expect(task9Routes.map(({ method, route }) => `${method} ${route}`)).toEqual([
       "POST private/notes/{noteId}/publish",
-      "GET private/notes/{noteId}/publication",
+      "GET private/notes/{noteId}/share-status",
       "DELETE private/publications/{publicId}",
       "GET public/notes/{publicId}",
       "GET public/assets/{publicId}/{assetId}"
