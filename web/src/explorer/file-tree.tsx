@@ -1,8 +1,9 @@
-import { ChevronRight, File, Folder } from "lucide-react";
+import { ChevronRight, File, FilePlus, Folder, FolderPlus } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { DeleteFolderRequest, FolderDeleteConfirmationSchema } from "@nxt/contracts";
+import type { ArchiveNoteRequest, DeleteFolderRequest, FolderDeleteConfirmationSchema } from "@nxt/contracts";
 import type { CompleteVault } from "../api/vault";
 import { FolderActions } from "./folder-actions";
+import { NoteActions } from "./note-actions";
 
 export interface NoteExplorerNode {
   readonly kind: "note";
@@ -95,6 +96,13 @@ export interface FileTreeProps {
   readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onTrashFolder?: ((folder: FolderExplorerNode, input: DeleteFolderRequest) => Promise<void>) | undefined;
   readonly onCreateNoteInFolder?: ((folder: FolderExplorerNode) => void) | undefined;
+  readonly onRenameNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onMoveNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onArchiveNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onTrashNote?: ((note: NoteExplorerNode, input: ArchiveNoteRequest) => Promise<void>) | undefined;
+  readonly onNewNote?: ((parentId: string | null) => void) | undefined;
+  readonly onNewFolder?: ((parentId: string | null) => void) | undefined;
+  readonly newActionsDisabledReason?: string | null | undefined;
   readonly now?: (() => Date) | undefined;
 }
 
@@ -137,6 +145,13 @@ const ancestorFolderIds = (
   return [];
 };
 
+const findFirstFolderId = (nodes: readonly ExplorerNode[]): string | null => {
+  for (const node of nodes) {
+    if (node.kind === "folder") return node.id;
+  }
+  return null;
+};
+
 export const FileTree = ({
   tree,
   selectedId,
@@ -148,6 +163,13 @@ export const FileTree = ({
   onArchiveFolder,
   onTrashFolder,
   onCreateNoteInFolder,
+  onRenameNote,
+  onMoveNote,
+  onArchiveNote,
+  onTrashNote,
+  onNewNote,
+  onNewFolder,
+  newActionsDisabledReason,
   now
 }: FileTreeProps): React.JSX.Element => {
   const [internalExpanded, setInternalExpanded] = useState<ReadonlySet<string>>(
@@ -156,7 +178,7 @@ export const FileTree = ({
   const expanded = expandedIds ?? internalExpanded;
   const [focusedId, setFocusedId] = useState<string | null>(() => selectedId ?? tree[0]?.id ?? null);
   const [activeSelectedId, setActiveSelectedId] = useState<string | null>(() => selectedId ?? null);
-  const [menuFolderId, setMenuFolderId] = useState<string | null>(null);
+  const [menuNodeId, setMenuNodeId] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
   const itemRefs = useRef(new Map<string, HTMLButtonElement>());
   const treeOwnedFocus = useRef(false);
@@ -218,8 +240,42 @@ export const FileTree = ({
     onSelect?.(node);
   };
 
+  const rootFolderId = tree.length > 0 && tree[0]?.kind === "folder" ? tree[0].id : findFirstFolderId(tree);
+  const newActionsDisabled = newActionsDisabledReason !== null && newActionsDisabledReason !== undefined;
+  const newNoteTitle = newActionsDisabledReason ?? undefined;
+
   return (
     <div className="file-tree-layout">
+      {(onNewNote !== undefined || onNewFolder !== undefined) ? (
+        <div className="file-tree-toolbar" role="toolbar" aria-label="New file actions">
+          {onNewNote !== undefined ? (
+            <button
+              type="button"
+              className="file-tree-toolbar-action touch-target"
+              disabled={newActionsDisabled}
+              title={newNoteTitle}
+              aria-label="New note"
+              onClick={() => onNewNote(rootFolderId)}
+            >
+              <FilePlus size={16} strokeWidth={1.75} aria-hidden />
+              <span>New note</span>
+            </button>
+          ) : null}
+          {onNewFolder !== undefined ? (
+            <button
+              type="button"
+              className="file-tree-toolbar-action touch-target"
+              disabled={newActionsDisabled}
+              title={newNoteTitle}
+              aria-label="New folder"
+              onClick={() => onNewFolder(rootFolderId)}
+            >
+              <FolderPlus size={16} strokeWidth={1.75} aria-hidden />
+              <span>New folder</span>
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       <div
         ref={root}
         className="file-tree"
@@ -253,13 +309,12 @@ export const FileTree = ({
               onFocus={() => setFocusedId(node.id)}
               onClick={() => select(node)}
               onContextMenu={(event) => {
-                if (!isFolder) return;
                 event.preventDefault();
-                setMenuFolderId(node.id);
+                setMenuNodeId(node.id);
               }}
               onKeyDown={(event) => {
-                if (isFolder && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
-                  setMenuFolderId(node.id);
+                if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                  setMenuNodeId(node.id);
                 } else if (event.key === "ArrowDown") focusAt(Math.min(index + 1, visible.length - 1));
                 else if (event.key === "ArrowUp") focusAt(Math.max(index - 1, 0));
                 else if (event.key === "Home") focusAt(0);
@@ -297,13 +352,26 @@ export const FileTree = ({
                 onArchive={onArchiveFolder}
                 onTrash={onTrashFolder}
                 now={now}
-                menuOpen={menuFolderId === node.id}
+                menuOpen={menuNodeId === node.id}
                 onMenuOpenChange={(open) => {
-                  setMenuFolderId(open ? node.id : null);
+                  setMenuNodeId(open ? node.id : null);
                   if (!open) queueMicrotask(() => itemRefs.current.get(node.id)?.focus());
                 }}
               />
-            ) : null}
+            ) : (
+              <NoteActions
+                note={node}
+                onRename={onRenameNote}
+                onMove={onMoveNote}
+                onArchive={onArchiveNote}
+                onTrash={onTrashNote}
+                menuOpen={menuNodeId === node.id}
+                onMenuOpenChange={(open) => {
+                  setMenuNodeId(open ? node.id : null);
+                  if (!open) queueMicrotask(() => itemRefs.current.get(node.id)?.focus());
+                }}
+              />
+            )}
           </div>
         ))}
       </div>

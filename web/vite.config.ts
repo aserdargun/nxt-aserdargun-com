@@ -21,12 +21,39 @@ const assertVisualQaPreviewBinding = (preview: {
   }
 };
 
+const manualChunks = (id: string): string | undefined => {
+  if (!id.includes("node_modules")) return undefined;
+  if (id.includes("lucide-react")) return "icons";
+  if (id.includes("zod") || id.includes("@nxt/contracts")) return "contracts";
+  if (
+    id.includes("@radix-ui") ||
+    id.includes("@tanstack") ||
+    id.includes("react-router") ||
+    id.includes("/react/") ||
+    id.includes("/react-dom/") ||
+    id.includes("/scheduler/")
+  ) return "framework";
+  if (id.includes("minisearch") || id.includes("idb")) return "storage";
+  return undefined;
+};
+
 export default defineConfig({
   ...(process.env.NXT_E2E_DISABLE_VITE_HMR === "1" ? { server: { hmr: false } } : {}),
   preview: {
     host: VISUAL_QA_HOST,
     port: VISUAL_QA_PORT,
     strictPort: true
+  },
+  build: {
+    target: "es2022",
+    cssCodeSplit: true,
+    sourcemap: false,
+    reportCompressedSize: true,
+    rollupOptions: {
+      output: {
+        manualChunks
+      }
+    }
   },
   plugins: [
     {

@@ -6,9 +6,11 @@ import {
   File,
   Folder,
   Inbox,
+  Network,
   Paperclip,
   Search,
   Tags,
+  TreePine,
   Upload
 } from "lucide-react";
 import {
@@ -31,6 +33,7 @@ import {
   useState
 } from "react";
 import { notesClient, type NotesClient } from "../api/notes";
+import type { ArchiveNoteRequest } from "@nxt/contracts";
 import { attachmentClient, type AttachmentClient, type UploadedAttachment } from "../api/attachments";
 import { publicationClient, type PublicationClient } from "../api/publications";
 import {
@@ -42,8 +45,6 @@ import {
 } from "../api/vault";
 import type { DraftStore } from "../editor/draft-store";
 import type { AttachmentInsertion, EditorWorkspaceState } from "../editor/editor-workspace";
-import { AttachmentPicker } from "../editor/attachment-picker";
-import { AttachmentView } from "../editor/attachment-view";
 import type { KnowledgeLink } from "../explorer/backlinks-panel";
 import { useCommandPaletteShortcut } from "../explorer/command-palette-shortcut";
 import type { CommandPaletteAction } from "../explorer/command-catalog";
@@ -53,15 +54,17 @@ import {
   type ExplorerOperationValue
 } from "../explorer/explorer-operation-dialog";
 import { FavoritesPanel } from "../explorer/favorites-panel";
+import { NoteStatsCard } from "../explorer/note-stats-card";
+import { GraphView } from "../explorer/graph-view";
+import { computeNoteStats } from "../editor/note-stats";
 import {
   buildExplorerTree,
   FileTree,
   type FileTreeProps,
-  type FolderExplorerNode
+  type FolderExplorerNode,
+  type NoteExplorerNode
 } from "../explorer/file-tree";
 import { TagsPanel } from "../explorer/tags-panel";
-import { PublishDialog } from "../publication/publish-dialog";
-import { PublicationStatus } from "../publication/publication-status";
 import { MobileDestinationNav, type Destination } from "./mobile-destination-nav";
 import { OwnerOverflowMenu } from "./owner-overflow-menu";
 import { ActiveNotePath, WorkspaceHeader } from "./workspace-header";
@@ -83,6 +86,25 @@ const CommandPalette = lazy(async () => {
   return { default: module.CommandPalette };
 });
 
+const AttachmentPicker = lazy(async () => {
+  const module = await import("../editor/attachment-picker");
+  return { default: module.AttachmentPicker };
+});
+
+const AttachmentView = lazy(async () => {
+  const module = await import("../editor/attachment-view");
+  return { default: module.AttachmentView };
+});
+
+const PublishDialog = lazy(async () => {
+  const module = await import("../publication/publish-dialog");
+  return { default: module.PublishDialog };
+});
+
+const PublicationStatus = lazy(async () => {
+  const module = await import("../publication/publication-status");
+  return { default: module.PublicationStatus };
+});
 const EDITOR_LINES = [
   "# Plans",
   "",
@@ -161,6 +183,13 @@ const VaultExplorerRegion = ({
   onArchiveFolder,
   onTrashFolder,
   onCreateNoteInFolder,
+  onRenameNote,
+  onMoveNote,
+  onArchiveNote,
+  onTrashNote,
+  onNewNote,
+  onNewFolder,
+  newActionsDisabledReason,
   now
 }: {
   readonly hidden: boolean;
@@ -176,8 +205,16 @@ const VaultExplorerRegion = ({
   readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onTrashFolder?: FileTreeProps["onTrashFolder"];
   readonly onCreateNoteInFolder?: FileTreeProps["onCreateNoteInFolder"];
+  readonly onRenameNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onMoveNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onArchiveNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onTrashNote?: FileTreeProps["onTrashNote"];
+  readonly onNewNote?: ((parentId: string | null) => void) | undefined;
+  readonly onNewFolder?: ((parentId: string | null) => void) | undefined;
+  readonly newActionsDisabledReason?: string | null | undefined;
   readonly now?: (() => Date) | undefined;
 }): React.JSX.Element => {
+  const [view, setView] = useState<"tree" | "graph">("tree");
   const tree = useMemo(() => buildExplorerTree(vault), [vault]);
   const favorites = useMemo(() => {
     const byId = new Map(vault.entries.map((entry) => [entry.id, entry]));
@@ -223,24 +260,68 @@ const VaultExplorerRegion = ({
         />
       </Suspense>
       <div className="explorer-scroll">
-        <section className="explorer-section" aria-labelledby="files-heading">
-          <h2 id="files-heading">Files</h2>
-          <FileTree
-            tree={tree}
-            selectedId={selectedNoteId}
-            expandedIds={expandedFolderIds}
-            onExpandedIdsChange={onExpandedFolderIdsChange}
-            onSelect={(node) => {
-              if (node.kind === "note") onNavigateNote?.(node.id);
-            }}
-            onRenameFolder={onRenameFolder}
-            onMoveFolder={onMoveFolder}
-            onArchiveFolder={onArchiveFolder}
-            onTrashFolder={onTrashFolder}
-            onCreateNoteInFolder={onCreateNoteInFolder}
-            now={now}
-          />
-        </section>
+        <div className="explorer-view-toggle" role="tablist" aria-label="Files view">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "tree"}
+            className={`touch-target explorer-view-button${view === "tree" ? " active" : ""}`}
+            onClick={() => setView("tree")}
+          >
+            <TreePine size={16} strokeWidth={1.75} aria-hidden />
+            <span>Tree</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "graph"}
+            className={`touch-target explorer-view-button${view === "graph" ? " active" : ""}`}
+            onClick={() => setView("graph")}
+          >
+            <Network size={16} strokeWidth={1.75} aria-hidden />
+            <span>Graph</span>
+          </button>
+        </div>
+        {view === "tree" ? (
+          <section className="explorer-section" aria-labelledby="files-heading">
+            <h2 id="files-heading">Files</h2>
+            <FileTree
+              tree={tree}
+              selectedId={selectedNoteId}
+              expandedIds={expandedFolderIds}
+              onExpandedIdsChange={onExpandedFolderIdsChange}
+              onSelect={(node) => {
+                if (node.kind === "note") onNavigateNote?.(node.id);
+              }}
+              onRenameFolder={onRenameFolder}
+              onMoveFolder={onMoveFolder}
+              onArchiveFolder={onArchiveFolder}
+              onTrashFolder={onTrashFolder}
+              onCreateNoteInFolder={onCreateNoteInFolder}
+              onRenameNote={onRenameNote}
+              onMoveNote={onMoveNote}
+              onArchiveNote={onArchiveNote}
+              onTrashNote={onTrashNote}
+              onNewNote={onNewNote}
+              onNewFolder={onNewFolder}
+              newActionsDisabledReason={newActionsDisabledReason}
+              now={now}
+            />
+          </section>
+        ) : (
+          <section className="explorer-section" aria-labelledby="graph-heading">
+            <h2 id="graph-heading">Graph</h2>
+            <GraphView
+              entries={vault.entries.map((entry) => ({
+                id: entry.id,
+                title: entry.title,
+                outboundNoteIds: entry.outboundNoteIds
+              }))}
+              {...(selectedNoteId === undefined ? {} : { selectedNoteId })}
+              onSelect={onNavigateNote}
+            />
+          </section>
+        )}
         <FavoritesPanel items={favorites} onOpen={(id) => onNavigateNote?.(id)} />
         <TagsPanel tags={tags} onSelect={(tag) => onSearchQueryChange(`tag:${tag}`)} />
       </div>
@@ -262,6 +343,13 @@ const ExplorerRegion = ({
   onArchiveFolder,
   onTrashFolder,
   onCreateNoteInFolder,
+  onRenameNote,
+  onMoveNote,
+  onArchiveNote,
+  onTrashNote,
+  onNewNote,
+  onNewFolder,
+  newActionsDisabledReason,
   now
 }: {
   readonly hidden: boolean;
@@ -277,6 +365,13 @@ const ExplorerRegion = ({
   readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onTrashFolder?: FileTreeProps["onTrashFolder"];
   readonly onCreateNoteInFolder?: FileTreeProps["onCreateNoteInFolder"];
+  readonly onRenameNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onMoveNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onArchiveNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onTrashNote?: FileTreeProps["onTrashNote"];
+  readonly onNewNote?: ((parentId: string | null) => void) | undefined;
+  readonly onNewFolder?: ((parentId: string | null) => void) | undefined;
+  readonly newActionsDisabledReason?: string | null | undefined;
   readonly now?: (() => Date) | undefined;
 }): React.JSX.Element => vault === undefined
   ? <StaticExplorerRegion hidden={hidden} />
@@ -295,6 +390,13 @@ const ExplorerRegion = ({
       onArchiveFolder={onArchiveFolder}
       onTrashFolder={onTrashFolder}
       onCreateNoteInFolder={onCreateNoteInFolder}
+      onRenameNote={onRenameNote}
+      onMoveNote={onMoveNote}
+      onArchiveNote={onArchiveNote}
+      onTrashNote={onTrashNote}
+      onNewNote={onNewNote}
+      onNewFolder={onNewFolder}
+      newActionsDisabledReason={newActionsDisabledReason}
       now={now}
     />
   );
@@ -396,7 +498,8 @@ const InfoRegion = ({
   publication,
   attachmentDisabledReason,
   publicationDisabledReason,
-  publicationHeadingRef
+  publicationHeadingRef,
+  statsCard
 }: {
   readonly hidden: boolean;
   readonly attachments?: React.ReactNode;
@@ -404,11 +507,13 @@ const InfoRegion = ({
   readonly attachmentDisabledReason?: string | null;
   readonly publicationDisabledReason?: string | null;
   readonly publicationHeadingRef?: React.RefObject<HTMLHeadingElement | null>;
+  readonly statsCard?: React.ReactNode;
 }): React.JSX.Element => (
   <section className="context-region info-region" role="region" aria-label="Info" hidden={hidden}>
     <div className="region-toolbar"><span className="region-label">Info</span></div>
     <div className="info-content">
       <h1>Info</h1>
+      {statsCard === undefined ? null : statsCard}
       {attachments === undefined ? null : (
         <section>
           <h2>Attachments</h2>
@@ -678,19 +783,34 @@ export const OwnerShell = ({
     });
   }, [attachmentMarkdown, noteId, refreshVault]);
 
-  const openNoteOperation = useCallback((kind: "rename" | "move"): void => {
-    if (selectedEntry === undefined || selectedFolder === undefined) return;
+  const refreshAfterAttachment = useCallback(async (): Promise<void> => {
+    await refreshVault();
+  }, [refreshVault]);
+
+  const openNoteOperation = useCallback((kind: "rename" | "move", source?: NoteExplorerNode): void => {
+    const target = source === null
+      ? undefined
+      : (source ?? (selectedEntry === undefined ? undefined : {
+          id: selectedEntry.id,
+          name: selectedEntry.title,
+          path: selectedEntry.path,
+          version: selectedEntry.driveVersion
+        }));
+    if (target === undefined) return;
+    const parentPath = target.path.slice(0, target.path.lastIndexOf("/"));
+    const parentFolder = vault?.folders.find((candidate) => candidate.path === parentPath) ?? selectedFolder;
+    if (parentFolder === undefined) return;
     setOperationError(null);
     setPendingOperation({
       operation: {
         kind,
         selectionKind: "note",
-        initialName: selectedEntry.title,
-        initialFolderId: selectedFolder.id
+        initialName: target.name,
+        initialFolderId: parentFolder.id
       },
-      target: { id: selectedEntry.id, version: selectedEntry.driveVersion }
+      target: { id: target.id, version: target.version }
     });
-  }, [selectedEntry, selectedFolder]);
+  }, [selectedEntry, selectedFolder, vault]);
 
   const openFolderOperation = useCallback((kind: "rename" | "move", folder: FolderExplorerNode): void => {
     if (folder.protected) return;
@@ -758,6 +878,68 @@ export const OwnerShell = ({
       target: null
     });
   }, []);
+
+  const runNoteArchive = useCallback(async (note: NoteExplorerNode): Promise<void> => {
+    await notesApi.archiveNote(note.id, { expectedVersion: note.version });
+    await refreshVault();
+    if (note.id === noteId) {
+      const remaining = vault?.entries.filter((entry) => entry.id !== note.id) ?? [];
+      const fallback = remaining[0]?.id;
+      if (fallback !== undefined) onNavigateNote?.(fallback);
+    }
+  }, [notesApi, noteId, onNavigateNote, refreshVault, vault]);
+
+  const runNoteTrash = useCallback(async (
+    note: NoteExplorerNode,
+    input: ArchiveNoteRequest
+  ): Promise<void> => {
+    try {
+      await notesApi.trashNote(note.id, input);
+    } catch (error) {
+      await refreshVault().catch(() => undefined);
+      throw error;
+    }
+    await refreshVault();
+    if (note.id === noteId) {
+      const remaining = vault?.entries.filter((entry) => entry.id !== note.id) ?? [];
+      const fallback = remaining[0]?.id;
+      if (fallback !== undefined) onNavigateNote?.(fallback);
+    }
+  }, [notesApi, noteId, onNavigateNote, refreshVault, vault]);
+
+  const requestNewNote = useCallback((parentId: string | null): void => {
+    const folder = parentId !== null
+      ? vault?.folders.find((candidate) => candidate.id === parentId)
+      : newNoteFolder;
+    if (folder === undefined) return;
+    setOperationError(null);
+    setPendingOperation({
+      operation: {
+        kind: "new-note",
+        selectionKind: "note",
+        initialName: "",
+        initialFolderId: folder.id
+      },
+      target: null
+    });
+  }, [newNoteFolder, vault]);
+
+  const requestNewFolder = useCallback((parentId: string | null): void => {
+    const folder = parentId !== null
+      ? vault?.folders.find((candidate) => candidate.id === parentId)
+      : selectedFolder ?? plansFolder ?? inboxFolder;
+    if (folder === undefined) return;
+    setOperationError(null);
+    setPendingOperation({
+      operation: {
+        kind: "new-folder",
+        selectionKind: "folder",
+        initialName: "",
+        initialFolderId: folder.id
+      },
+      target: null
+    });
+  }, [inboxFolder, plansFolder, selectedFolder, vault]);
 
   const paletteActions = useMemo<readonly CommandPaletteAction[]>(() => {
     const noVault = "Open a complete vault first.";
@@ -951,12 +1133,19 @@ export const OwnerShell = ({
       <span>Add attachment</span>
     </button>
   ) : (
-    <AttachmentPicker
-      noteId={noteId}
-      client={attachmentApi}
-      disabledReason={attachmentDisabledReason}
-      onUploaded={completeAttachmentUpload}
-    />
+    <Suspense fallback={
+      <button className="text-action touch-target" type="button" disabled aria-busy="true" title="Loading attachment picker">
+        <Paperclip size={19} strokeWidth={1.75} aria-hidden />
+        <span>Add attachment</span>
+      </button>
+    }>
+      <AttachmentPicker
+        noteId={noteId}
+        client={attachmentApi}
+        disabledReason={attachmentDisabledReason}
+        onUploaded={completeAttachmentUpload}
+      />
+    </Suspense>
   );
   const publicationAction = (
     <button
@@ -971,19 +1160,26 @@ export const OwnerShell = ({
       <span>Publish</span>
     </button>
   );
+  const noteStatsCard = editorState.source === null ? null : (
+    <NoteStatsCard stats={computeNoteStats(editorState.source, editorState.path)} />
+  );
   const attachmentCards = selectedEntry === undefined || selectedEntry.attachments.length === 0 ? (
     <p className="empty-info">No attachments</p>
   ) : (
     <div className="attachment-list">
       {selectedEntry.attachments.map((attachment) => (
-        <AttachmentView
-          attachment={attachment}
+        <Suspense
           key={attachment.assetId}
-          onTrash={async (assetId) => {
-            await attachmentApi.trash(assetId);
-            await refreshVault();
-          }}
-        />
+          fallback={<div className="attachment-card-skeleton" aria-busy="true" />}
+        >
+          <AttachmentView
+            attachment={attachment}
+            onTrash={async (assetId) => {
+              await attachmentApi.trash(assetId);
+              await refreshVault();
+            }}
+          />
+        </Suspense>
       ))}
     </div>
   );
@@ -999,17 +1195,19 @@ export const OwnerShell = ({
   ) : currentPublication === null ? (
     <p className="empty-info">Not published</p>
   ) : (
-    <PublicationStatus
-      status={currentPublication}
-      client={publicationApi}
-      revokeOpen={revokeOpen}
-      onRevokeOpenChange={setRevokeOpen}
-      onRevoked={async () => {
-        await refreshVault();
-        publishTriggerRef.current?.focus();
-        setPublicationState({ noteId: noteId ?? null, loading: false, status: null, error: false });
-      }}
-    />
+    <Suspense fallback={<div className="publication-status-skeleton" aria-busy="true" />}>
+      <PublicationStatus
+        status={currentPublication}
+        client={publicationApi}
+        revokeOpen={revokeOpen}
+        onRevokeOpenChange={setRevokeOpen}
+        onRevoked={async () => {
+          await refreshVault();
+          publishTriggerRef.current?.focus();
+          setPublicationState({ noteId: noteId ?? null, loading: false, status: null, error: false });
+        }}
+      />
+    </Suspense>
   );
   const explorerRegion = (
     <ExplorerRegion
@@ -1026,6 +1224,13 @@ export const OwnerShell = ({
       onArchiveFolder={archiveFolder === undefined ? undefined : (folder) => void runFolderArchive(folder)}
       onTrashFolder={runFolderTrash}
       onCreateNoteInFolder={openNewNoteInFolder}
+      onRenameNote={(note) => openNoteOperation("rename", note)}
+      onMoveNote={(note) => openNoteOperation("move", note)}
+      onArchiveNote={(note) => void runNoteArchive(note)}
+      onTrashNote={runNoteTrash}
+      onNewNote={requestNewNote}
+      onNewFolder={requestNewFolder}
+      newActionsDisabledReason={vault === undefined ? "The vault is loading." : null}
       now={now}
     />
   );
@@ -1059,9 +1264,9 @@ export const OwnerShell = ({
                   <ActiveNotePath className="mobile-content-path" path={editorState.path} withIcon />
                 ) : undefined}
               />
-            )}
-            <div className="context-column">
-              <PreviewRegion
+              )}
+              <div className="context-column">
+                <PreviewRegion
                 hidden={isHidden("preview")}
                 mobilePath={layout === "mobile" ? (
                   <ActiveNotePath className="mobile-content-path" path={editorState.path} withIcon />
@@ -1071,10 +1276,11 @@ export const OwnerShell = ({
                 hidden={isHidden("info")}
                 attachments={attachmentCards}
                 publication={publicationPanel}
-                attachmentDisabledReason={attachmentDisabledReason}
-                publicationDisabledReason={publishDisabledReason}
-                publicationHeadingRef={publicationHeadingRef}
-              />
+                  attachmentDisabledReason={attachmentDisabledReason}
+                  publicationDisabledReason={publishDisabledReason}
+                  publicationHeadingRef={publicationHeadingRef}
+                  statsCard={noteStatsCard}
+                />
             </div>
           </>
         ) : (
@@ -1107,8 +1313,10 @@ export const OwnerShell = ({
                   attachmentDisabledReason={attachmentDisabledReason}
                   publicationDisabledReason={publishDisabledReason}
                   publicationHeadingRef={publicationHeadingRef}
+                  statsCard={noteStatsCard}
                 />
               )}
+              onAttachmentUploaded={refreshAfterAttachment}
             />
           </Suspense>
         )}
@@ -1169,19 +1377,21 @@ export const OwnerShell = ({
         />
       </Suspense>
       {!editorIsSaved || noteId === undefined || editorState.version === null ? null : (
-        <PublishDialog
-          open={publishOpen}
-          onOpenChange={setPublishOpen}
-          noteId={noteId}
-          sourceVersion={editorState.version}
-          attachmentCount={referencedAttachmentCount}
-          client={publicationApi}
-          onPublished={async (status) => {
-            setPublicationState({ noteId, loading: false, status, error: false });
-            await refreshVault();
-            if (layout !== "desktop") setActiveDestination("info");
-          }}
-        />
+        <Suspense fallback={null}>
+          <PublishDialog
+            open={publishOpen}
+            onOpenChange={setPublishOpen}
+            noteId={noteId}
+            sourceVersion={editorState.version}
+            attachmentCount={referencedAttachmentCount}
+            client={publicationApi}
+            onPublished={async (status) => {
+              setPublicationState({ noteId, loading: false, status, error: false });
+              await refreshVault();
+              if (layout !== "desktop") setActiveDestination("info");
+            }}
+          />
+        </Suspense>
       )}
       {pendingOperation === null || vault === undefined ? null : (
         <ExplorerOperationDialog
