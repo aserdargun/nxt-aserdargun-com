@@ -22,10 +22,10 @@
       }
       #nxt-boot-shell .nxt-boot-mark {
         width: 56px; height: 56px; border-radius: 14px;
-        background: #c8ff36; color: #1d2021;
+        background: #3b82f6; color: #1d2021;
         display: flex; align-items: center; justify-content: center;
         font-weight: 700; font-size: 26px; letter-spacing: 0.5px;
-        box-shadow: 0 6px 24px rgba(200, 255, 54, 0.18);
+        box-shadow: 0 6px 24px rgba(59, 130, 246, 0.18);
       }
       #nxt-boot-shell .nxt-boot-text { font-size: 13px; color: #a89984; letter-spacing: 0.4px; }
       #nxt-boot-shell .nxt-boot-bar {
@@ -34,7 +34,7 @@
       }
       #nxt-boot-shell .nxt-boot-bar::after {
         content: ""; display: block; height: 100%; width: 38%;
-        background: linear-gradient(90deg, transparent, #c8ff36, transparent);
+        background: linear-gradient(90deg, transparent, #3b82f6, transparent);
         animation: nxt-boot-slide 1.4s ease-in-out infinite;
       }
       @keyframes nxt-boot-slide {
@@ -42,7 +42,7 @@
         100% { transform: translateX(260%); }
       }
       @media (prefers-reduced-motion: reduce) {
-        #nxt-boot-shell .nxt-boot-bar::after { animation: none; width: 60%; background: #c8ff36; }
+        #nxt-boot-shell .nxt-boot-bar::after { animation: none; width: 60%; background: #3b82f6; }
       }
       #nxt-boot-shell[data-nxt-boot="dismissing"] {
         opacity: 0;
