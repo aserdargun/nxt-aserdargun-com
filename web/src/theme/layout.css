@@ -638,7 +638,7 @@ textarea:focus-visible,
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(200, 255, 54, 0.08);
+  background: rgba(59, 130, 246, 0.08);
   color: var(--yellow);
   font-size: 18px;
   font-weight: 600;
@@ -647,7 +647,7 @@ textarea:focus-visible,
 }
 
 .cm-slash-trigger {
-  background: rgba(200, 255, 54, 0.18);
+  background: rgba(59, 130, 246, 0.18);
   border-radius: 2px;
 }
 
