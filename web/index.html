@@ -57,25 +57,7 @@
       <div class="nxt-boot-bar" role="progressbar" aria-label="Loading"></div>
     </div>
     <div id="root"></div>
-    <script>
-      // Fires a low-priority warmup ping as soon as the document parses, so the
-      // Azure Functions container is awake by the time the user finishes auth
-      // and the React shell needs the actual session/vault data.
-      (function () {
-        try {
-          var pathname = window.location.pathname;
-          var privateRoute = pathname === "/" || pathname === "/login" || pathname === "/app" || pathname.startsWith("/app/");
-          if (!privateRoute) return;
-          var img = new Image();
-          img.decoding = "async";
-          img.loading = "eager";
-          img.fetchPriority = "low";
-          img.src = "/api/private/session?_warmup=1&_t=" + Date.now();
-        } catch (error) {
-          // best-effort; never block rendering
-        }
-      })();
-    </script>
+    <script src="/boot-warmup.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
