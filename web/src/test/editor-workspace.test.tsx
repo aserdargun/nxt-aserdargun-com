@@ -664,6 +664,25 @@ describe("production note request boundary", () => {
 });
 
 describe("editor load and durable drafts", () => {
+  it("does not insert a dropped file into a note opened while its upload was pending", async () => {
+    const notes = notesHarness();
+    const pending = deferred<Awaited<ReturnType<AttachmentClient["upload"]>>>();
+    const upload = vi.fn(() => pending.promise);
+    const onAttachmentUploaded = vi.fn();
+    const props = { noteId: NOTE_ID, notes: notes.client, draftStore: new MemoryDraftStore(), hiddenEditor: false, hiddenPreview: false, attachmentApi: { upload, trash: vi.fn() }, onAttachmentUploaded };
+    const view = render(<EditorWorkspace {...props} />);
+    await getEditorView();
+    fireEvent.drop(document.querySelector(".editor-dropzone")!, { dataTransfer: { files: [new File(["x"], "photo.png", { type: "image/png" })], types: ["Files"] } });
+    await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+    const other = response("# Other note", { id: OTHER_NOTE_ID });
+    notes.getNote.mockResolvedValue(other);
+    view.rerender(<EditorWorkspace {...props} noteId={OTHER_NOTE_ID} />);
+    await waitFor(async () => expect((await getEditorView()).state.doc.toString()).toBe(other.source));
+    await act(async () => { pending.resolve({ asset: { assetId: ATTACHMENT_ID, name: "photo.png", mimeType: "image/png", size: 1, disposition: "inline" } }); await Promise.resolve(); });
+    expect((await getEditorView()).state.doc.toString()).toBe(other.source);
+    expect(onAttachmentUploaded).not.toHaveBeenCalled();
+  });
+
   it("retains the Markdown editor DOM node when editor visibility changes", async () => {
     const store = new MemoryDraftStore();
     const notes = notesHarness();
@@ -2086,6 +2105,7 @@ describe("CodeMirror production configuration", () => {
 
       expect(editor.closest(".cm-scroller")).toBe(scrollDOM);
       expect(scrollDOM).toHaveClass("workspace-scroll-target");
+      expect(scrollDOM).toHaveAttribute("tabindex", "0");
       expect(scrollDOM).toContainElement(leadingPath);
       expect(scrollDOM.firstElementChild).toHaveClass("markdown-editor-leading-slot");
       expect(scrollDOM.firstElementChild?.firstElementChild).toBe(leadingPath);
@@ -2126,6 +2146,7 @@ describe("CodeMirror production configuration", () => {
       rendered.rerender(editorElement());
       expect(view.scrollDOM).toBe(scrollDOM);
       expect(scrollDOM).not.toHaveClass("workspace-scroll-target");
+      expect(scrollDOM).toHaveAttribute("tabindex", "0");
       expect(screen.queryByTestId("editor-leading-path")).not.toBeInTheDocument();
 
       rendered.rerender(editorElement(leadingContent));

@@ -130,6 +130,7 @@ export const AttachmentPicker = ({
 
   useEffect(() => {
     const onPaste = (event: ClipboardEvent): void => {
+      if (event.defaultPrevented || disabledReason !== null || busyRef.current) return;
       const files = [...(event.clipboardData?.files ?? [])];
       if (files.length === 0 || !files.every((file) => file.type.startsWith("image/"))) return;
       event.preventDefault();
@@ -137,7 +138,7 @@ export const AttachmentPicker = ({
     };
     document.addEventListener("paste", onPaste);
     return () => document.removeEventListener("paste", onPaste);
-  }, [acceptOne]);
+  }, [acceptOne, disabledReason]);
 
   const disabled = disabledReason !== null || busy;
   return (

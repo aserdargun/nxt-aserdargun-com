@@ -147,6 +147,13 @@ const rgbaRatio = (first: RgbaColor, second: RgbaColor): number => {
 };
 
 describe("NXT 1.1 semantic theme tokens", () => {
+  it("keeps light-theme yellow text readable on every workspace surface", () => {
+    const light = gruvboxCss.slice(gruvboxCss.indexOf(':root[data-theme="light"]'));
+    for (const background of ["--bg", "--surface", "--panel"]) {
+      expect(ratio(hex(light, "--yellow"), hex(light, background))).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
   it("defines semantic tokens in every dark and light theme branch", () => {
     const rules = parseStyleRules(gruvboxCss);
     const tokens = ["--separator", "--control-border", "--text-muted-strong", "--text-warning", "--text-danger", "--warning-border", "--danger-border", "--focus-ring"];

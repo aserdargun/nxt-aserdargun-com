@@ -119,6 +119,13 @@ export const EditorWorkspace = ({
   const editorRef = useRef<MarkdownEditorHandle | null>(null);
   const [toolbarError, setToolbarError] = useState<string | null>(null);
   const [dropBusy, setDropBusy] = useState(false);
+  const uploadSession = useRef({ generation: 0, busy: false });
+  useEffect(() => {
+    uploadSession.current.generation += 1;
+    uploadSession.current.busy = false;
+    setDropBusy(false);
+    return () => { uploadSession.current.generation += 1; };
+  }, [noteId]);
   const stats = useMemo(
     () => state.source === null ? null : computeNoteStats(state.source, state.path),
     [state.path, state.source]
@@ -134,17 +141,22 @@ export const EditorWorkspace = ({
   }, []);
 
   const uploadAndInsertFile = useCallback(async (file: File): Promise<void> => {
-    if (state.source === null) return;
+    if (state.source === null || uploadSession.current.busy) return;
     setToolbarError(null);
+    uploadSession.current.busy = true;
+    const generation = uploadSession.current.generation;
+    const isCurrent = (): boolean => uploadSession.current.generation === generation;
     setDropBusy(true);
     try {
       const bytesBase64 = await readFileAsBase64(file);
+      if (!isCurrent()) return;
       const response = await attachmentApi.upload({
         noteId,
         name: file.name,
         declaredMime: file.type.length > 0 ? file.type : "application/octet-stream",
         bytesBase64
       });
+      if (!isCurrent()) return;
       const markdown = createPortableAttachmentMarkdown({
         notePath: state.path,
         noteId,
@@ -154,9 +166,12 @@ export const EditorWorkspace = ({
       editorRef.current?.insertAtCursor(markdown);
       await onAttachmentUploaded?.(response.asset);
     } catch (error) {
-      setToolbarError(formatAttachmentError(error));
+      if (isCurrent()) setToolbarError(formatAttachmentError(error));
     } finally {
-      setDropBusy(false);
+      if (isCurrent()) {
+        uploadSession.current.busy = false;
+        setDropBusy(false);
+      }
     }
   }, [attachmentApi, noteId, onAttachmentUploaded, state.path, state.source]);
 

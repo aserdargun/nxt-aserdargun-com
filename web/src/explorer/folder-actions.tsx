@@ -8,7 +8,7 @@ export interface FolderActionsProps {
   readonly folder: FolderExplorerNode;
   readonly onRename?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onMove?: ((folder: FolderExplorerNode) => void) | undefined;
-  readonly onArchive?: ((folder: FolderExplorerNode) => void) | undefined;
+  readonly onArchive?: ((folder: FolderExplorerNode) => void | Promise<void>) | undefined;
   readonly onTrash?: ((folder: FolderExplorerNode, input: DeleteFolderRequest) => Promise<void>) | undefined;
   readonly now?: (() => Date) | undefined;
   readonly menuOpen?: boolean | undefined;
@@ -48,6 +48,8 @@ export const FolderActions = ({
   const [error, setError] = useState<string | null>(null);
   const [confirmationStale, setConfirmationStale] = useState(false);
   const menu = useRef<HTMLDivElement>(null);
+  const archivePending = useRef(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
   const menuOpen = controlledMenuOpen ?? localMenuOpen;
   const confirmation = folder.deleteConfirmation;
   const expiration = confirmation === null ? Number.NaN : Date.parse(confirmation.expiresAt);
@@ -85,6 +87,21 @@ export const FolderActions = ({
     action?.();
   };
 
+  const archive = (): void => {
+    if (onArchive === undefined || archivePending.current) return;
+    archivePending.current = true;
+    setBusy(true);
+    setArchiveError(null);
+    void Promise.resolve().then(() => onArchive(folder)).then(() => {
+      setMenuOpen(false);
+    }).catch(() => {
+      setArchiveError("The folder could not be archived. Refresh the vault and try again.");
+    }).finally(() => {
+      archivePending.current = false;
+      setBusy(false);
+    });
+  };
+
   return (
     <Dialog.Root open={trashOpen} onOpenChange={(open) => !busy && setTrashOpen(open)}>
       <div className="folder-actions">
@@ -93,6 +110,7 @@ export const FolderActions = ({
           type="button"
           tabIndex={-1}
           aria-label={`${folder.name} actions`}
+          disabled={busy}
           aria-haspopup="menu"
           aria-expanded={menuOpen}
           onClick={() => setMenuOpen(!menuOpen)}
@@ -101,24 +119,25 @@ export const FolderActions = ({
         </button>
         {menuOpen ? (
           <div ref={menu} className="folder-menu" role="menu" aria-label={`${folder.name} actions`}>
+            {archiveError === null ? null : <p className="folder-menu-reason explorer-error" role="alert">{archiveError}</p>}
             {folder.protected ? (
               <p className="folder-menu-reason">Protected folders cannot be changed.</p>
             ) : (
               <>
-                <button type="button" role="menuitem" onClick={() => run(onRename === undefined ? undefined : () => onRename(folder))}>
+                <button type="button" role="menuitem" disabled={busy || onRename === undefined} onClick={() => run(onRename === undefined ? undefined : () => onRename(folder))}>
                   <Pencil size={15} aria-hidden /> Rename
                 </button>
-                <button type="button" role="menuitem" onClick={() => run(onMove === undefined ? undefined : () => onMove(folder))}>
+                <button type="button" role="menuitem" disabled={busy || onMove === undefined} onClick={() => run(onMove === undefined ? undefined : () => onMove(folder))}>
                   <FolderInput size={15} aria-hidden /> Move
                 </button>
-                <button type="button" role="menuitem" onClick={() => run(onArchive === undefined ? undefined : () => onArchive(folder))}>
-                  <Archive size={15} aria-hidden /> Archive
+                <button type="button" role="menuitem" disabled={busy || onArchive === undefined} onClick={archive}>
+                  <Archive size={15} aria-hidden /> {busy ? "Archiving…" : "Archive"}
                 </button>
                 <Dialog.Trigger asChild>
                   <button
                     type="button"
                     role="menuitem"
-                    disabled={confirmationUnavailable || onTrash === undefined}
+                    disabled={busy || confirmationUnavailable || onTrash === undefined}
                     aria-describedby={confirmationUnavailable ? `${folder.id}-trash-reason` : undefined}
                     onClick={() => setMenuOpen(false)}
                   >

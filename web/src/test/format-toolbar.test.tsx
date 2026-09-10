@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FormatToolbar } from "../editor/format-toolbar";
 import type { MarkdownEditorHandle } from "../editor/markdown-editor";
@@ -130,4 +130,20 @@ describe("FormatToolbar", () => {
     expect(screen.getByLabelText("Bold")).toBeDisabled();
     expect(screen.getByLabelText("Link")).toBeDisabled();
   });
+});
+
+it("does not insert a late attachment into a different note", async () => {
+  let finish!: (value: Awaited<ReturnType<AttachmentClient["upload"]>>) => void;
+  const upload = vi.fn(() => new Promise<Awaited<ReturnType<AttachmentClient["upload"]>>>((resolve) => { finish = resolve; }));
+  const editor = buildHandle();
+  const onUploaded = vi.fn();
+  const props = { noteId: NOTE_ID, notePath: "Notes/Plan.md", editor, attachmentClient: { upload, trash: vi.fn() }, onAttachmentUploaded: onUploaded };
+  const view = render(<FormatToolbar {...props} />);
+  const file = new File([new Uint8Array([1])], "photo.png", { type: "image/png" });
+  fireEvent.change(document.querySelector("input[type=file]")!, { target: { files: [file] } });
+  await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+  view.rerender(<FormatToolbar {...props} noteId="028f47d2-6a34-7b2a-9f21-8a7034963aef" />);
+  await act(async () => { finish({ asset: { assetId: "asset_1", name: "photo.png", mimeType: "image/png", size: 1, disposition: "inline" } }); await Promise.resolve(); });
+  expect(editor.insertAtCursor).not.toHaveBeenCalled();
+  expect(onUploaded).not.toHaveBeenCalled();
 });

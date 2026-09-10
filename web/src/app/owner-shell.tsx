@@ -202,12 +202,12 @@ const VaultExplorerRegion = ({
   readonly onNavigateNote?: ((noteId: string) => void) | undefined;
   readonly onRenameFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onMoveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
-  readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
+  readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void | Promise<void>) | undefined;
   readonly onTrashFolder?: FileTreeProps["onTrashFolder"];
   readonly onCreateNoteInFolder?: FileTreeProps["onCreateNoteInFolder"];
   readonly onRenameNote?: ((note: NoteExplorerNode) => void) | undefined;
   readonly onMoveNote?: ((note: NoteExplorerNode) => void) | undefined;
-  readonly onArchiveNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onArchiveNote?: ((note: NoteExplorerNode) => void | Promise<void>) | undefined;
   readonly onTrashNote?: FileTreeProps["onTrashNote"];
   readonly onNewNote?: ((parentId: string | null) => void) | undefined;
   readonly onNewFolder?: ((parentId: string | null) => void) | undefined;
@@ -283,7 +283,7 @@ const VaultExplorerRegion = ({
           </button>
         </div>
         {view === "tree" ? (
-          <section className="explorer-section" aria-labelledby="files-heading">
+          <div className="explorer-section">
             <h2 id="files-heading">Files</h2>
             <FileTree
               tree={tree}
@@ -307,7 +307,7 @@ const VaultExplorerRegion = ({
               newActionsDisabledReason={newActionsDisabledReason}
               now={now}
             />
-          </section>
+          </div>
         ) : (
           <section className="explorer-section" aria-labelledby="graph-heading">
             <h2 id="graph-heading">Graph</h2>
@@ -362,12 +362,12 @@ const ExplorerRegion = ({
   readonly onNavigateNote?: ((noteId: string) => void) | undefined;
   readonly onRenameFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onMoveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
-  readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
+  readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void | Promise<void>) | undefined;
   readonly onTrashFolder?: FileTreeProps["onTrashFolder"];
   readonly onCreateNoteInFolder?: FileTreeProps["onCreateNoteInFolder"];
   readonly onRenameNote?: ((note: NoteExplorerNode) => void) | undefined;
   readonly onMoveNote?: ((note: NoteExplorerNode) => void) | undefined;
-  readonly onArchiveNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onArchiveNote?: ((note: NoteExplorerNode) => void | Promise<void>) | undefined;
   readonly onTrashNote?: FileTreeProps["onTrashNote"];
   readonly onNewNote?: ((parentId: string | null) => void) | undefined;
   readonly onNewFolder?: ((parentId: string | null) => void) | undefined;
@@ -511,7 +511,7 @@ const InfoRegion = ({
 }): React.JSX.Element => (
   <section className="context-region info-region" role="region" aria-label="Info" hidden={hidden}>
     <div className="region-toolbar"><span className="region-label">Info</span></div>
-    <div className="info-content">
+    <div className="info-content" tabIndex={0} aria-label="Note information">
       <h1>Info</h1>
       {statsCard === undefined ? null : statsCard}
       {attachments === undefined ? null : (
@@ -1221,12 +1221,12 @@ export const OwnerShell = ({
       onNavigateNote={onNavigateNote}
       onRenameFolder={(folder) => openFolderOperation("rename", folder)}
       onMoveFolder={(folder) => openFolderOperation("move", folder)}
-      onArchiveFolder={archiveFolder === undefined ? undefined : (folder) => void runFolderArchive(folder)}
+      onArchiveFolder={archiveFolder === undefined ? undefined : runFolderArchive}
       onTrashFolder={runFolderTrash}
       onCreateNoteInFolder={openNewNoteInFolder}
       onRenameNote={(note) => openNoteOperation("rename", note)}
       onMoveNote={(note) => openNoteOperation("move", note)}
-      onArchiveNote={(note) => void runNoteArchive(note)}
+      onArchiveNote={runNoteArchive}
       onTrashNote={runNoteTrash}
       onNewNote={requestNewNote}
       onNewFolder={requestNewFolder}

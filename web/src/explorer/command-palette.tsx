@@ -48,7 +48,7 @@ export const CommandPalette = ({ open, onOpenChange, actions }: CommandPalettePr
     if (action.disabledReason !== null || busyId !== null) return;
     setBusyId(action.id);
     setError(null);
-    void Promise.resolve(action.run()).then(() => onOpenChange(false)).catch(() => {
+    void Promise.resolve().then(() => action.run()).then(() => onOpenChange(false)).catch(() => {
       setError("The command could not be completed.");
       setBusyId(null);
     });

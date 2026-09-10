@@ -8,7 +8,7 @@ export interface NoteActionsProps {
   readonly note: NoteExplorerNode;
   readonly onRename?: ((note: NoteExplorerNode) => void) | undefined;
   readonly onMove?: ((note: NoteExplorerNode) => void) | undefined;
-  readonly onArchive?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onArchive?: ((note: NoteExplorerNode) => void | Promise<void>) | undefined;
   readonly onTrash?: ((note: NoteExplorerNode, input: ArchiveNoteRequest) => Promise<void>) | undefined;
   readonly menuOpen?: boolean | undefined;
   readonly onMenuOpenChange?: ((open: boolean) => void) | undefined;
@@ -28,6 +28,8 @@ export const NoteActions = ({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const menu = useRef<HTMLDivElement>(null);
+  const archivePending = useRef(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
   const menuOpen = controlledMenuOpen ?? localMenuOpen;
 
   const setMenuOpen = (open: boolean): void => {
@@ -45,6 +47,21 @@ export const NoteActions = ({
     action?.();
   };
 
+  const archive = (): void => {
+    if (onArchive === undefined || archivePending.current) return;
+    archivePending.current = true;
+    setBusy(true);
+    setArchiveError(null);
+    void Promise.resolve().then(() => onArchive(note)).then(() => {
+      setMenuOpen(false);
+    }).catch(() => {
+      setArchiveError("The note could not be archived. Refresh the vault and try again.");
+    }).finally(() => {
+      archivePending.current = false;
+      setBusy(false);
+    });
+  };
+
   return (
     <Dialog.Root open={trashOpen} onOpenChange={(open) => !busy && setTrashOpen(open)}>
       <div className="note-actions">
@@ -53,6 +70,7 @@ export const NoteActions = ({
           type="button"
           tabIndex={-1}
           aria-label={`${note.name} actions`}
+          disabled={busy}
           aria-haspopup="menu"
           aria-expanded={menuOpen}
           onClick={() => setMenuOpen(!menuOpen)}
@@ -61,20 +79,21 @@ export const NoteActions = ({
         </button>
         {menuOpen ? (
           <div ref={menu} className="note-menu" role="menu" aria-label={`${note.name} actions`}>
-            <button type="button" role="menuitem" onClick={() => run(onRename === undefined ? undefined : () => onRename(note))}>
+            {archiveError === null ? null : <p className="folder-menu-reason explorer-error" role="alert">{archiveError}</p>}
+            <button type="button" role="menuitem" disabled={busy || onRename === undefined} onClick={() => run(onRename === undefined ? undefined : () => onRename(note))}>
               <Pencil size={15} aria-hidden /> Rename
             </button>
-            <button type="button" role="menuitem" onClick={() => run(onMove === undefined ? undefined : () => onMove(note))}>
+            <button type="button" role="menuitem" disabled={busy || onMove === undefined} onClick={() => run(onMove === undefined ? undefined : () => onMove(note))}>
               <FolderInput size={15} aria-hidden /> Move
             </button>
-            <button type="button" role="menuitem" onClick={() => run(onArchive === undefined ? undefined : () => onArchive(note))}>
-              <Archive size={15} aria-hidden /> Archive
+            <button type="button" role="menuitem" disabled={busy || onArchive === undefined} onClick={archive}>
+              <Archive size={15} aria-hidden /> {busy ? "Archiving…" : "Archive"}
             </button>
             <Dialog.Trigger asChild>
               <button
                 type="button"
                 role="menuitem"
-                disabled={onTrash === undefined}
+                disabled={busy || onTrash === undefined}
                 onClick={() => setMenuOpen(false)}
               >
                 <Trash2 size={15} aria-hidden /> Move to Trash

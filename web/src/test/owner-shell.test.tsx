@@ -263,6 +263,11 @@ const NOOP_DRAFT_STORE: DraftStore = {
 };
 
 describe("owner feedback states", () => {
+  it("exposes a single Files landmark for assistive navigation", () => {
+    render(<OwnerShell vault={EXPLORER_VAULT} />);
+    expect(screen.getAllByRole("region", { name: "Files" })).toHaveLength(1);
+  });
+
   it("shows the disabled first-note reason as ordinary visible text", () => {
     render(<OwnerShell vault={EMPTY_VAULT} />);
 
@@ -613,9 +618,9 @@ describe("Gruvbox theme contract", () => {
     const rules = parseStyleRules(gruvboxCss);
     const branches = [
       [":root[data-theme=\"dark\"]", undefined, "#d79921", "#d65d0e"],
-      [":root[data-theme=\"light\"]", undefined, "#b57614", "#af3a03"],
+      [":root[data-theme=\"light\"]", undefined, "#704b00", "#af3a03"],
       [":root[data-theme=\"system\"]", undefined, "#d79921", "#d65d0e"],
-      [":root[data-theme=\"system\"]", "prefers-color-scheme: light", "#b57614", "#af3a03"]
+      [":root[data-theme=\"system\"]", "prefers-color-scheme: light", "#704b00", "#af3a03"]
     ] as const;
 
     for (const [selector, media, yellow, orange] of branches) {
@@ -730,7 +735,7 @@ describe("Gruvbox theme contract", () => {
     for (const selector of [
       ".workspace-contextual-row svg",
       ".mobile-content-path svg",
-      '.owner-shell[data-layout="mobile"] .explorer-region svg'
+      '.owner-shell[data-layout="mobile"] .explorer-region svg.lucide'
     ]) {
       const style = getStyleRule(rules, selector);
       expect(style.getPropertyValue("width").trim()).toBe("22px");

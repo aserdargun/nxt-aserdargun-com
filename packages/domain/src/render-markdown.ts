@@ -120,6 +120,22 @@ function rewriteUrls(rewriteUrl: RenderMarkdownOptions["rewriteUrl"]) {
   };
 }
 
+function labelTaskCheckboxes() {
+  return (tree: unknown): void => {
+    const visit = (node: HtmlNode, taskLabel = "Task"): void => {
+      const label = node.tagName === "li"
+        ? textFromHast({ ...node, children: (node.children ?? []).filter((child) => child.tagName !== "ul" && child.tagName !== "ol") }) || "Task"
+        : taskLabel;
+      if (node.tagName === "input" && node.properties?.type === "checkbox") {
+        node.properties.ariaLabel = label;
+        node.properties.disabled = true;
+      }
+      node.children?.forEach((child) => visit(child, label));
+    };
+    visit(tree as HtmlNode);
+  };
+}
+
 function restrictAttachmentUrls() {
   return (tree: unknown): void => {
     const visit = (node: unknown): void => {
@@ -141,7 +157,7 @@ const sanitizerSchema: Options = {
     ...defaultSchema.attributes,
     code: [...(defaultSchema.attributes?.code ?? []), ["className", /^language-[\w-]+$/u, /^hljs(?:-[\w-]+)?$/u]],
     span: [...(defaultSchema.attributes?.span ?? []), ["className", /^hljs(?:-[\w-]+)?$/u]],
-    input: ["type", "checked", "disabled"],
+    input: ["type", "checked", "disabled", "ariaLabel"],
     h1: [...(defaultSchema.attributes?.h1 ?? []), "id"],
     h2: [...(defaultSchema.attributes?.h2 ?? []), "id"],
     h3: [...(defaultSchema.attributes?.h3 ?? []), "id"],
@@ -157,6 +173,7 @@ function createMarkdownProcessor(options: RenderMarkdownOptions = {}) {
     .use(remarkRehype)
     .use(rewriteUrls, options.rewriteUrl)
     .use(restrictAttachmentUrls)
+    .use(labelTaskCheckboxes)
     .use(rehypeHighlight)
     .use(rehypeSanitize, sanitizerSchema)
     .use(rehypeStringify);

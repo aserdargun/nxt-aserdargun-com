@@ -58,3 +58,27 @@ test("configured viewport is overflow-free and honors reduced motion", async ({ 
     expect(durations.transition.every((duration) => duration === 0.01)).toBe(true);
   }
 });
+
+
+test("the note graph occupies its panel and keeps note labels readable", async ({ ownerPage: page }, testInfo) => {
+  if (testInfo.project.name === "mobile-chromium") {
+    await page.getByRole("navigation", { name: "Mobile destinations" }).getByRole("button", { name: "Files", exact: true }).click();
+  }
+  const files = page.getByRole("region", { name: "Files", exact: true });
+  const notes = await files.getByRole("treeitem", { name: "Notes", exact: true }).boundingBox();
+  const actions = await files.getByRole("button", { name: "Notes actions", exact: true }).boundingBox();
+  if (notes === null || actions === null) throw new Error("The note row and actions must be visible.");
+  expect(Math.abs(notes.y + notes.height / 2 - actions.y - actions.height / 2)).toBeLessThan(2);
+  await files.getByRole("tab", { name: "Graph", exact: true }).click();
+  const graph = files.getByRole("group", { name: "Note link graph" });
+  await expect(graph).toBeVisible();
+  const dimensions = await graph.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const panel = element.parentElement!.getBoundingClientRect();
+    return { width: rect.width, height: rect.height, panelWidth: panel.width };
+  });
+  expect(dimensions.width).toBeGreaterThan(200);
+  expect(dimensions.height).toBeGreaterThan(300);
+  expect(Math.abs(dimensions.width - dimensions.panelWidth)).toBeLessThan(4);
+  await expect(graph.getByRole("button").first()).toBeVisible();
+});

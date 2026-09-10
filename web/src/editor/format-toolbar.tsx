@@ -12,7 +12,7 @@ import {
   Paperclip,
   Quote
 } from "lucide-react";
-import { useCallback, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
 import { createPortableAttachmentMarkdown, type WikiTargetResolution } from "@nxt/domain";
 import { attachmentClient, type AttachmentClient, type UploadedAttachment } from "../api/attachments";
 import { formatAttachmentError, readFileAsBase64 } from "./attachment-helpers";
@@ -53,6 +53,13 @@ export const FormatToolbar = ({
 }: FormatToolbarProps): React.JSX.Element => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState(false);
+  const uploadSession = useRef({ generation: 0, busy: false });
+  useEffect(() => {
+    uploadSession.current.generation += 1;
+    uploadSession.current.busy = false;
+    setUploading(false);
+    return () => { uploadSession.current.generation += 1; };
+  }, [noteId]);
   const [linkInputOpen, setLinkInputOpen] = useState(false);
   const [linkValue, setLinkValue] = useState("");
 
@@ -99,16 +106,21 @@ export const FormatToolbar = ({
     const file = event.target.files?.[0];
     if (file === undefined) return;
     event.target.value = "";
-    if (uploading) return;
+    if (disabled || uploadSession.current.busy) return;
+    uploadSession.current.busy = true;
+    const generation = uploadSession.current.generation;
+    const isCurrent = (): boolean => uploadSession.current.generation === generation;
     setUploading(true);
     try {
       const bytesBase64 = await readFileAsBase64(file);
+      if (!isCurrent()) return;
       const response = await attachment.upload({
         noteId,
         name: file.name,
         declaredMime: file.type.length > 0 ? file.type : "application/octet-stream",
         bytesBase64
       });
+      if (!isCurrent()) return;
       const markdown = createPortableAttachmentMarkdown({
         notePath,
         noteId,
@@ -118,9 +130,12 @@ export const FormatToolbar = ({
       editor?.insertAtCursor(markdown);
       await onAttachmentUploaded?.(response.asset);
     } catch (error) {
-      onError?.(formatAttachmentError(error));
+      if (isCurrent()) onError?.(formatAttachmentError(error));
     } finally {
-      setUploading(false);
+      if (isCurrent()) {
+        uploadSession.current.busy = false;
+        setUploading(false);
+      }
     }
   };
 

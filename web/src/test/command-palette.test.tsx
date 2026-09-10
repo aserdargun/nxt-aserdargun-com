@@ -39,6 +39,19 @@ describe("command palette", () => {
     await user.keyboard("{Escape}");
   });
 
+  it("reports a synchronous command failure and allows a retry", async () => {
+    const user = userEvent.setup();
+    const run = vi.fn().mockImplementationOnce(() => { throw new Error("unavailable"); }).mockResolvedValueOnce(undefined);
+    const onOpenChange = vi.fn();
+    render(<CommandPalette open onOpenChange={onOpenChange} actions={[action("open-note", { run })]} />);
+    await user.keyboard("{Enter}");
+    expect(await screen.findByRole("alert")).toHaveTextContent("The command could not be completed.");
+    expect(onOpenChange).not.toHaveBeenCalled();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
   it("restores focus and runs an applicable command keyboard-only", async () => {
     const user = userEvent.setup();
     const openNote = action("open-note");

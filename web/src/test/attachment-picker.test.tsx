@@ -102,6 +102,19 @@ describe("attachment picker", () => {
     expect(upload).not.toHaveBeenCalled();
   });
 
+  it("does not reprocess an image paste already handled by the editor", async () => {
+    const { AttachmentPicker } = await import("../editor/attachment-picker");
+    const upload = vi.fn();
+    const image = testFile();
+    render(<AttachmentPicker noteId={NOTE_ID} client={{ upload, trash: vi.fn() }} onUploaded={vi.fn()} />);
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: { files: [image.file] } });
+    paste.preventDefault();
+    document.dispatchEvent(paste);
+    expect(image.read).not.toHaveBeenCalled();
+    expect(upload).not.toHaveBeenCalled();
+  });
+
   it("preserves ordinary text paste and uploads exactly one pasted image", async () => {
     const { AttachmentPicker } = await import("../editor/attachment-picker");
     const image = testFile();

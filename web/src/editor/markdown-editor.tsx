@@ -202,6 +202,7 @@ const MarkdownEditorInner = (
     slot.className = "markdown-editor-leading-slot";
     slot.hidden = true;
     view.scrollDOM.prepend(slot);
+    view.scrollDOM.tabIndex = 0;
     scrollDOMRef.current = view.scrollDOM;
     leadingSlotRef.current = slot;
     setLeadingSlot(slot);

@@ -1,5 +1,5 @@
 import { Search } from "lucide-react";
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useCallback, useDeferredValue, useEffect, useRef, useState, useTransition } from "react";
 import { createSearchClient, StaleSearchResponseError, type SearchClient } from "./search-client";
 import type { SearchRecord, SearchResultItem } from "./search-worker";
 
@@ -34,7 +34,7 @@ export const SearchPanel = ({
   const [answeredQuery, setAnsweredQuery] = useState<string | null>(null);
   const [error, setError] = useState(false);
   const [isPending, startTransition] = useTransition();
-  const recordKey = useMemo(() => records.map((record) => `${record.id}:${record.favorite ? 1 : 0}:${record.title}:${record.path}`).join("\u0000"), [records]);
+  const [retryAttempt, setRetryAttempt] = useState(0);
 
   useEffect(() => {
     if (requestedQuery === undefined) {
@@ -61,7 +61,7 @@ export const SearchPanel = ({
       active = false;
       created?.terminate();
     };
-  }, [createClient, recordKey, records]);
+  }, [createClient, records, retryAttempt]);
 
   useEffect(() => {
     if (client === null || deferredQuery.trim().length === 0) {
@@ -71,6 +71,7 @@ export const SearchPanel = ({
     }
     let active = true;
     setAnsweredQuery(null);
+    setError(false);
     void client.query(deferredQuery).then((next) => {
       if (active) startTransition(() => {
         setResults(next);
@@ -99,9 +100,16 @@ export const SearchPanel = ({
           onChange={(event) => setQuery(event.currentTarget.value)}
         />
       </div>
-      {error ? <p className="explorer-error" role="alert">Search is unavailable.</p> : null}
+      {error ? (
+        <div className="explorer-error" role="alert">
+          <p>Search is unavailable.</p>
+          <button type="button" className="secondary-action touch-target" onClick={() => setRetryAttempt((attempt) => attempt + 1)}>
+            Retry search
+          </button>
+        </div>
+      ) : null}
       {query.trim().length > 0 ? (
-        <div className="search-results" aria-label="Search results" aria-busy={client === null || isPending || !hasCurrentAnswer}>
+        <div className="search-results" aria-label="Search results" aria-busy={!error && (client === null || isPending || !hasCurrentAnswer)}>
           {hasCurrentAnswer ? results.map((result) => (
             <button className="tree-row touch-target" type="button" key={result.id} onClick={() => onOpenNote(result.id)}>
               <span>{result.title}</span>

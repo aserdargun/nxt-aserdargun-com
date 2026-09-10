@@ -406,6 +406,7 @@
 }
 
 .mobile-title {
+  margin: 0;
   display: block;
   max-width: 100%;
   overflow: hidden;
@@ -476,7 +477,7 @@
 
 .workspace-contextual-row svg,
 .mobile-content-path svg,
-.owner-shell[data-layout="mobile"] .explorer-region svg {
+.owner-shell[data-layout="mobile"] .explorer-region svg.lucide {
   width: 22px;
   height: 22px;
 }

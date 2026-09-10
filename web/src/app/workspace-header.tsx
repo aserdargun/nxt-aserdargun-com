@@ -109,7 +109,7 @@ export const WorkspaceHeader = ({
       <header className="workspace-header" data-layout={layout}>
         <div className="workspace-title-row">
           {filesToggle}
-          <span className="mobile-title">{noteTitle}</span>
+          <h1 className="mobile-title">{noteTitle}</h1>
           {overflowAction}
         </div>
         <div className="workspace-contextual-row" aria-label="Editor actions">
@@ -124,7 +124,7 @@ export const WorkspaceHeader = ({
   return (
     <header className="workspace-header" data-layout={layout} data-compact-tablet={compactTablet ? "true" : "false"}>
       <div className="workspace-header-explorer">
-        <span className="brand shell-brand">NXT</span>
+        <span className="brand shell-brand" role="heading" aria-level={1}>NXT</span>
         {layout === "tablet" ? filesToggle : (
           <button className="command-action touch-target" type="button" onClick={onOpenCommandPalette}>
             <Command size={18} strokeWidth={1.75} aria-hidden />

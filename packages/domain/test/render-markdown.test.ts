@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 import { deriveMarkdownOutline, renderMarkdown } from "../src/index.js";
 
 describe("renderMarkdown", () => {
+  it("names inert task checkboxes from their own text, including nested and formatted tasks", async () => {
+    const rendered = await renderMarkdown('- [ ] Review **evidence**\n  - [x] Record "results"');
+    expect(rendered.html).toContain('aria-label="Review evidence"');
+    expect(rendered.html).toContain('aria-label="Record &#x22;results&#x22;"');
+    expect(rendered.html.match(/disabled/g)).toHaveLength(2);
+    expect(rendered.html).not.toContain('aria-label="Review evidence Record');
+  });
+
   it("sanitizes active markup and preserves GFM", async () => {
     const rendered = await renderMarkdown("<script>alert(1)</script>\n\n- [x] done\n\n[[Plan|Open]]");
     expect(rendered.html).not.toContain("script");

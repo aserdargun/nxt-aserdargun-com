@@ -1051,11 +1051,14 @@ textarea:focus-visible,
 }
 
 .file-tree-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   position: relative;
   min-width: 0;
 }
 
 .file-tree {
+  grid-area: 2 / 1;
   min-width: 0;
 }
 
@@ -1065,8 +1068,9 @@ textarea:focus-visible,
 }
 
 .file-tree-actions {
-  position: absolute;
-  inset: 0 0 auto 0;
+  grid-area: 2 / 1;
+  position: relative;
+  height: 0;
   pointer-events: none;
 }
 
@@ -1244,6 +1248,7 @@ textarea:focus-visible,
 }
 
 .file-tree-toolbar {
+  grid-area: 1 / 1;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;

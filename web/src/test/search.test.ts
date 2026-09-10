@@ -141,6 +141,43 @@ describe("bounded Turkish vault search", () => {
     expect(await screen.findByText("No matching notes")).toBeVisible();
   });
 
+  it("retries a failed initialization without losing the current query", async () => {
+    const query = vi.fn().mockResolvedValue([]);
+    const createClient = vi.fn().mockRejectedValueOnce(new Error("worker failed"))
+      .mockResolvedValueOnce({ query, terminate: vi.fn() });
+    render(createElement(SearchPanel, { records: indexFixture, onOpenNote: vi.fn(), createClient, requestedQuery: "plan" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Search is unavailable.");
+    expect(screen.getByLabelText("Search results")).toHaveAttribute("aria-busy", "false");
+    fireEvent.click(screen.getByRole("button", { name: "Retry search" }));
+    expect(await screen.findByText("No matching notes")).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(query).toHaveBeenLastCalledWith("plan");
+    expect(createClient).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears a failed query state when a subsequent query succeeds", async () => {
+    const query = vi.fn().mockRejectedValueOnce(new Error("temporary failure")).mockResolvedValue([]);
+    const createClient = vi.fn().mockResolvedValue({ query, terminate: vi.fn() });
+    render(createElement(SearchPanel, { records: indexFixture, onOpenNote: vi.fn(), createClient }));
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "first" } });
+    expect(await screen.findByRole("alert")).toBeVisible();
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "second" } });
+    expect(await screen.findByText("No matching notes")).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(createClient).toHaveBeenCalledOnce();
+  });
+
+  it("replaces a failed worker and releases the old client on retry", async () => {
+    const terminate = vi.fn();
+    const createClient = vi.fn().mockResolvedValueOnce({ query: vi.fn().mockRejectedValue(new Error("dead worker")), terminate })
+      .mockResolvedValueOnce({ query: vi.fn().mockResolvedValue([]), terminate: vi.fn() });
+    render(createElement(SearchPanel, { records: indexFixture, onOpenNote: vi.fn(), createClient, requestedQuery: "plan" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Retry search" }));
+    expect(await screen.findByText("No matching notes")).toBeVisible();
+    expect(terminate).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("searches Turkish text, title, tag, folder, and favorite", () => {
     const index = createSearchIndex(indexFixture);
     const results = searchIndex(index, "yıllık tag:plan folder:Plans favorite:true");

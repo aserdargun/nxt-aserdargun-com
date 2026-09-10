@@ -93,12 +93,12 @@ export interface FileTreeProps {
   readonly onSelect?: ((node: ExplorerNode) => void) | undefined;
   readonly onRenameFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onMoveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
-  readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void) | undefined;
+  readonly onArchiveFolder?: ((folder: FolderExplorerNode) => void | Promise<void>) | undefined;
   readonly onTrashFolder?: ((folder: FolderExplorerNode, input: DeleteFolderRequest) => Promise<void>) | undefined;
   readonly onCreateNoteInFolder?: ((folder: FolderExplorerNode) => void) | undefined;
   readonly onRenameNote?: ((note: NoteExplorerNode) => void) | undefined;
   readonly onMoveNote?: ((note: NoteExplorerNode) => void) | undefined;
-  readonly onArchiveNote?: ((note: NoteExplorerNode) => void) | undefined;
+  readonly onArchiveNote?: ((note: NoteExplorerNode) => void | Promise<void>) | undefined;
   readonly onTrashNote?: ((note: NoteExplorerNode, input: ArchiveNoteRequest) => Promise<void>) | undefined;
   readonly onNewNote?: ((parentId: string | null) => void) | undefined;
   readonly onNewFolder?: ((parentId: string | null) => void) | undefined;

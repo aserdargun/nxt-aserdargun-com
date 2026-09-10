@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -57,15 +58,33 @@ export const GraphView = ({ entries, selectedNoteId, onSelect }: GraphViewProps)
   const model = useMemo(() => buildGraphModel(entries), [entries]);
   const [size, setSize] = useState<{ width: number; height: number }>({ width: 600, height: 480 });
   const [hoverId, setHoverId] = useState<string | null>(null);
-  const [drag, setDrag] = useState<{ id: string; pointerId: number } | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<{
+    id: string; pointerId: number; startX: number; startY: number;
+    offsetX: number; offsetY: number; moved: boolean;
+  } | null>(null);
+  const suppressedClick = useRef<string | null>(null);
+  const [positions, setPositions] = useState<ReadonlyMap<string, { x: number; y: number }>>(() => new Map());
+  const resize = useCallback((width: number, height: number): void => {
+    if (width <= 0 || height <= 0) return;
+    setSize((current) => current.width === width && current.height === height ? current : { width, height });
+  }, []);
 
-  const layout: GraphLayout = useMemo(() => {
+  const baseLayout: GraphLayout = useMemo(() => {
     if (model.nodes.length === 0) {
       return { width: size.width, height: size.height, nodes: [], edges: [] };
     }
     return layoutGraphModel(model, size.width, size.height);
   }, [model, size.height, size.width]);
+
+  const layout: GraphLayout = useMemo(() => {
+    return {
+      ...baseLayout,
+      nodes: baseLayout.nodes.map((node) => {
+        const position = positions.get(node.id);
+        return position === undefined ? node : { ...node, x: position.x * baseLayout.width, y: position.y * baseLayout.height };
+      })
+    };
+  }, [baseLayout, positions]);
 
   const titleById = useMemo(() => buildTitleLookup(model), [model]);
   const idToIndex = useMemo(() => new Map(layout.nodes.map((node, index) => [node.id, index])), [layout.nodes]);
@@ -75,38 +94,60 @@ export const GraphView = ({ entries, selectedNoteId, onSelect }: GraphViewProps)
     return null;
   }, [hoverId, selectedNoteId]);
 
-  const onPointerDown = (id: string) => (event: ReactPointerEvent<SVGCircleElement>): void => {
-    if (event.button !== 0) return;
+  const svgPoint = (svg: SVGSVGElement, clientX: number, clientY: number): { x: number; y: number } | null => {
+    const rect = svg.getBoundingClientRect();
+    const scale = Math.min(rect.width / layout.width, rect.height / layout.height);
+    if (scale <= 0) return null;
+    return {
+      x: (clientX - rect.left - (rect.width - layout.width * scale) / 2) / scale,
+      y: (clientY - rect.top - (rect.height - layout.height * scale) / 2) / scale
+    };
+  };
+
+  const onPointerDown = (id: string) => (event: ReactPointerEvent<SVGGElement>): void => {
+    if (event.button !== 0 || dragRef.current !== null) return;
+    const svg = event.currentTarget.ownerSVGElement;
+    const node = layout.nodes[idToIndex.get(id) ?? -1];
+    const point = svg === null ? null : svgPoint(svg, event.clientX, event.clientY);
+    if (node === undefined || point === null) return;
     event.preventDefault();
-    setDrag({ id, pointerId: event.pointerId });
-    (event.target as Element).setPointerCapture(event.pointerId);
+    event.currentTarget.focus();
+    suppressedClick.current = null;
+    dragRef.current = {
+      id, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY,
+      offsetX: node.x - point.x, offsetY: node.y - point.y, moved: false
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const onPointerMove = (event: ReactPointerEvent<SVGSVGElement>): void => {
-    if (drag === null) return;
-    const target = containerRef.current;
-    if (target === null) return;
-    const rect = target.getBoundingClientRect();
-    const localX = event.clientX - rect.left;
-    const localY = event.clientY - rect.top;
-    const layoutNode = layout.nodes[idToIndex.get(drag.id) ?? -1];
-    if (layoutNode === undefined) return;
-    layoutNode.x = localX;
-    layoutNode.y = localY;
-    layoutNode.vx = 0;
-    layoutNode.vy = 0;
-    setSize({ width: rect.width, height: rect.height });
+    const drag = dragRef.current;
+    if (drag === null || event.pointerId !== drag.pointerId) return;
+    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4) return;
+    const point = svgPoint(event.currentTarget, event.clientX, event.clientY);
+    if (point === null) return;
+    drag.moved = true;
+    const x = Math.max(HIGHLIGHT_RADIUS, Math.min(layout.width - HIGHLIGHT_RADIUS, point.x + drag.offsetX));
+    const y = Math.max(HIGHLIGHT_RADIUS, Math.min(layout.height - HIGHLIGHT_RADIUS, point.y + drag.offsetY));
+    setPositions((current) => new Map(current).set(drag.id, { x: x / layout.width, y: y / layout.height }));
   };
 
   const onPointerUp = (event: ReactPointerEvent<SVGSVGElement>): void => {
-    if (drag === null) return;
-    if ((event.target as Element).hasPointerCapture?.(drag.pointerId)) {
-      (event.target as Element).releasePointerCapture(drag.pointerId);
-    }
-    setDrag(null);
+    const drag = dragRef.current;
+    if (drag === null || event.pointerId !== drag.pointerId) return;
+    suppressedClick.current = drag.moved || event.type === "pointercancel" ? drag.id : null;
+    dragRef.current = null;
+    const target = event.target as Element;
+    if (target.hasPointerCapture?.(drag.pointerId)) target.releasePointerCapture(drag.pointerId);
   };
 
-  const onNodeClick = (id: string) => (): void => onSelect?.(id);
+  const onNodeClick = (id: string) => (): void => {
+    if (suppressedClick.current === id) {
+      suppressedClick.current = null;
+      return;
+    }
+    onSelect?.(id);
+  };
   const onNodeKeyDown = (id: string) => (event: ReactKeyboardEvent<SVGGElement>): void => {
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
@@ -123,8 +164,8 @@ export const GraphView = ({ entries, selectedNoteId, onSelect }: GraphViewProps)
   }
 
   return (
-    <div className="graph-view" ref={containerRef}>
-      <ResizeSensor onResize={(width, height) => setSize({ width, height })} />
+    <div className="graph-view">
+      <ResizeSensor onResize={resize} />
       <svg
         className="graph-view-svg"
         viewBox={`0 0 ${layout.width} ${layout.height}`}
@@ -134,7 +175,8 @@ export const GraphView = ({ entries, selectedNoteId, onSelect }: GraphViewProps)
         aria-label="Note link graph"
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerLeave={onPointerUp}
+        onPointerCancel={onPointerUp}
+        onLostPointerCapture={onPointerUp}
       >
         <g className="graph-view-edges">
           {layout.edges.map((edge, index) => {
@@ -169,17 +211,18 @@ export const GraphView = ({ entries, selectedNoteId, onSelect }: GraphViewProps)
                 role="button"
                 tabIndex={0}
                 aria-label={title}
+                onPointerDown={onPointerDown(node.id)}
                 onClick={onNodeClick(node.id)}
                 onKeyDown={onNodeKeyDown(node.id)}
                 onPointerEnter={() => setHoverId(node.id)}
                 onPointerLeave={() => setHoverId((current) => (current === node.id ? null : current))}
               >
+                <circle cx={node.x} cy={node.y} r={22} fill="transparent" aria-hidden />
                 <circle
                   cx={node.x}
                   cy={node.y}
                   r={isHighlighted ? HIGHLIGHT_RADIUS : radiusForDegree(node.degree)}
                   className="graph-node-hit"
-                  onPointerDown={onPointerDown(node.id)}
                   aria-hidden
                 />
                 <text

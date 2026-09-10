@@ -106,7 +106,7 @@ describe("accessible file tree", () => {
     const onSelect = vi.fn();
     render(<>
       <button type="button">Before tree</button>
-      <FileTree tree={treeFixture} selectedId={plansFixture.id} onSelect={onSelect} />
+      <FileTree tree={treeFixture} selectedId={plansFixture.id} onSelect={onSelect} onRenameFolder={vi.fn()} />
       <button type="button">After tree</button>
     </>);
 

@@ -93,6 +93,21 @@ function rewriteUrls(rewriteUrl) {
         visit(tree);
     };
 }
+function labelTaskCheckboxes() {
+    return (tree) => {
+        const visit = (node, taskLabel = "Task") => {
+            const label = node.tagName === "li"
+                ? textFromHast({ ...node, children: (node.children ?? []).filter((child) => child.tagName !== "ul" && child.tagName !== "ol") }) || "Task"
+                : taskLabel;
+            if (node.tagName === "input" && node.properties?.type === "checkbox") {
+                node.properties.ariaLabel = label;
+                node.properties.disabled = true;
+            }
+            node.children?.forEach((child) => visit(child, label));
+        };
+        visit(tree);
+    };
+}
 function restrictAttachmentUrls() {
     return (tree) => {
         const visit = (node) => {
@@ -114,7 +129,7 @@ const sanitizerSchema = {
         ...defaultSchema.attributes,
         code: [...(defaultSchema.attributes?.code ?? []), ["className", /^language-[\w-]+$/u, /^hljs(?:-[\w-]+)?$/u]],
         span: [...(defaultSchema.attributes?.span ?? []), ["className", /^hljs(?:-[\w-]+)?$/u]],
-        input: ["type", "checked", "disabled"],
+        input: ["type", "checked", "disabled", "ariaLabel"],
         h1: [...(defaultSchema.attributes?.h1 ?? []), "id"],
         h2: [...(defaultSchema.attributes?.h2 ?? []), "id"],
         h3: [...(defaultSchema.attributes?.h3 ?? []), "id"],
@@ -129,6 +144,7 @@ function createMarkdownProcessor(options = {}) {
         .use(remarkRehype)
         .use(rewriteUrls, options.rewriteUrl)
         .use(restrictAttachmentUrls)
+        .use(labelTaskCheckboxes)
         .use(rehypeHighlight)
         .use(rehypeSanitize, sanitizerSchema)
         .use(rehypeStringify);
