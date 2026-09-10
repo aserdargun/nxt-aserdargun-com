@@ -1,6 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { Search, X } from "lucide-react";
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { APPROVED_COMMANDS, type CommandId, type CommandPaletteAction } from "./command-catalog";
 
 export { APPROVED_COMMANDS } from "./command-catalog";
@@ -20,15 +20,14 @@ export const CommandPalette = ({ open, onOpenChange, actions }: CommandPalettePr
   const [error, setError] = useState<string | null>(null);
   const restoreFocus = useRef<HTMLElement | null>(null);
   const wasOpen = useRef(false);
-  const deferredQuery = useDeferredValue(query);
   const visible = useMemo(() => {
-    const normalized = deferredQuery.trim().toLocaleLowerCase("tr-TR");
+    const normalized = query.trim().toLocaleLowerCase("tr-TR");
     return actions.flatMap((action) => {
       const command = commandById.get(action.id);
       if (command === undefined || (normalized.length > 0 && !command.label.toLocaleLowerCase("tr-TR").includes(normalized))) return [];
       return [{ command, action }];
     });
-  }, [actions, deferredQuery]);
+  }, [actions, query]);
 
   useEffect(() => {
     if (open && !wasOpen.current) {

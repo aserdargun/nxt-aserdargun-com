@@ -52,6 +52,17 @@ describe("command palette", () => {
     expect(run).toHaveBeenCalledTimes(2);
   });
 
+  it("runs the filtered command when a pasted query is immediately submitted", async () => {
+    const user = userEvent.setup();
+    const newNote = action("new-note");
+    const toggleTheme = action("toggle-theme");
+    render(<CommandPalette open onOpenChange={vi.fn()} actions={[newNote, toggleTheme]} />);
+    await user.paste("Toggle theme");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(toggleTheme.run).toHaveBeenCalledOnce());
+    expect(newNote.run).not.toHaveBeenCalled();
+  });
+
   it("restores focus and runs an applicable command keyboard-only", async () => {
     const user = userEvent.setup();
     const openNote = action("open-note");
