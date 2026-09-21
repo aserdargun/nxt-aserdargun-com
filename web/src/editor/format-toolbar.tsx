@@ -140,7 +140,7 @@ export const FormatToolbar = ({
   };
 
   return (
-    <div className="format-toolbar" role="toolbar" aria-label="Format toolbar" aria-disabled={disabled}>
+    <div className="format-toolbar" role="toolbar" aria-label="Format toolbar" aria-disabled={disabled} tabIndex={disabled ? 0 : undefined}>
       <div className="format-toolbar-group">
         <button
           type="button"

@@ -1,4 +1,40 @@
+import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "./fixtures";
+
+test("a loading mobile toolbar remains keyboard-scrollable and passes accessibility checks", async ({ ownerPage: page }) => {
+  await expect(page.getByLabel("Markdown editor")).toBeVisible();
+  const noteId = new URL(page.url()).pathname.split("/").at(-1);
+  await page.setViewportSize({ width: 390, height: 844 });
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const pattern = `**/api/private/notes/${noteId}`;
+  await page.route(pattern, async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    await held;
+    await route.continue();
+  });
+  try {
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.getByRole("navigation", { name: "Mobile destinations" })
+      .getByRole("button", { name: "Editor", exact: true }).click();
+    await expect(page.getByText("Loading note…", { exact: true })).toBeVisible();
+    const toolbar = page.getByRole("toolbar", { name: "Format toolbar" });
+    await expect(toolbar).toHaveAttribute("aria-disabled", "true");
+    expect(await toolbar.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+    await page.getByRole("button", { name: "More actions" }).click();
+    await expect(page.getByRole("menu", { name: "More actions" })).toBeVisible();
+    const audit = await new AxeBuilder({ page }).analyze();
+    expect(audit.violations.filter(({ impact }) => impact === "serious" || impact === "critical")).toEqual([]);
+    await page.keyboard.press("Escape");
+    await expect(toolbar).toHaveAttribute("tabindex", "0");
+    await toolbar.focus();
+    await expect(toolbar).toBeFocused();
+    await page.keyboard.press("ArrowRight");
+    await expect.poll(() => toolbar.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+  } finally { release(); }
+  await expect(page.getByLabel("Markdown editor")).toBeEditable();
+  await expect(page.getByRole("toolbar", { name: "Format toolbar" })).not.toHaveAttribute("tabindex", "0");
+});
 
 test("editor modules load while the authorized vault response is still pending", async ({ ownerPage: page }) => {
   const errors: string[] = [];
