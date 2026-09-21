@@ -18,7 +18,7 @@ import userEvent from "@testing-library/user-event";
 import { RouterProvider, createMemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { StrictMode, useState } from "react";
-import { ApiClientError, ApiContractError } from "../api/client";
+import { ApiClientError, ApiContractError, ApiTimeoutError } from "../api/client";
 import type { AttachmentClient } from "../api/attachments";
 import { notesClient, type NotesClient } from "../api/notes";
 import type { CompleteVault, VaultClient } from "../api/vault";
@@ -701,7 +701,7 @@ describe("editor load and durable drafts", () => {
     expect(screen.getByRole("textbox", { name: "Markdown editor", hidden: true })).toBe(editor);
   });
 
-  it("restores a differing local draft without silently replacing it", async () => {
+  it.each([false, true])("restores a differing local draft without silently replacing it (read timeout: %s)", async (timeout) => {
     const store = new MemoryDraftStore();
     await store.put({
       noteId: NOTE_ID,
@@ -712,6 +712,7 @@ describe("editor load and durable drafts", () => {
       confirmedAt: null
     });
     const notes = notesHarness();
+    if (timeout) notes.getNote.mockRejectedValueOnce(new ApiTimeoutError());
     render(
       <EditorWorkspace
         noteId={NOTE_ID}
@@ -884,10 +885,10 @@ describe("editor load and durable drafts", () => {
     expect(store.drafts.get(NOTE_ID)?.source).toBe(NEWER_SOURCE);
   });
 
-  it("reports Error instead of Offline draft when no relevant source is durable", async () => {
+  it.each([new TypeError("Failed to fetch"), new ApiTimeoutError()])("offers a working retry after a failed initial read without a durable draft: %s", async (error) => {
     const store = new MemoryDraftStore();
     const notes = notesHarness();
-    notes.getNote.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    notes.getNote.mockRejectedValueOnce(error);
     render(
       <EditorWorkspace
         noteId={NOTE_ID}
@@ -900,6 +901,14 @@ describe("editor load and durable drafts", () => {
 
     await waitFor(() => expect(screen.getByLabelText("Save status")).toHaveTextContent("Error"));
     expect(screen.queryByRole("textbox", { name: "Markdown editor" })).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("The note could not be loaded.");
+    expect(screen.getByRole("region", { name: "Editor" }).querySelector("[aria-busy]"))
+      .toHaveAttribute("aria-busy", "false");
+    await userEvent.setup().click(screen.getByRole("button", { name: "Retry note" }));
+    expect(await screen.findByRole("textbox", { name: "Markdown editor" })).toBeVisible();
+    expect(screen.getByLabelText("Save status")).toHaveTextContent("Saved");
+    expect(notes.getNote).toHaveBeenCalledTimes(2);
+    expect(notes.updateNote).not.toHaveBeenCalled();
   });
 
   it("waits for the matching durable write after the exact 1000ms debounce", async () => {

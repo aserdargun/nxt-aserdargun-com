@@ -67,6 +67,28 @@ const setup = async (
 };
 
 describe("SystemFileStore", () => {
+  it("refuses a repeated folder instead of walking a cyclic tree forever", async () => {
+    const { service } = await setup((storage) => new Proxy(storage, {
+      get(target, property) {
+        if (property === "listChildren") return async (input: { parentId: string }) => ({
+          files: [await storage.get(input.parentId)]
+        });
+        const value = Reflect.get(target, property) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+    }));
+    await expect(service.vaultTree()).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+  });
+
+  it("refuses an externally created folder tree beyond the supported depth", async () => {
+    const { raw, service, ids } = await setup();
+    let parentId = ids.notes.id;
+    for (let depth = 0; depth < 21; depth += 1) {
+      parentId = (await raw.createFolder({ parentId, name: `Level-${depth}` })).id;
+    }
+    await expect(service.vaultTree()).rejects.toMatchObject({ code: "DRIVE_UNAVAILABLE" });
+  });
+
   it("updates only the pinned verified system file and validates the readback checksum", async () => {
     const { raw, indexStore, ids } = await setup();
     const before = await indexStore.read();

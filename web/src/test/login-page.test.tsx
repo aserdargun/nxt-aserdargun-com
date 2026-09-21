@@ -146,6 +146,17 @@ describe("typed session boundary", () => {
 });
 
 describe("session-gated owner route", () => {
+  it("returns to sign-in when Azure rejects an expired session with an HTML 401", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response("<h1>Unauthorized</h1>", {
+      status: 401, headers: { "content-type": "text/html; charset=utf-8" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const router = renderRoute("/app");
+    expect(await screen.findByRole("link", { name: "Continue with GitHub" }, { timeout: 8_000 })).toBeVisible();
+    expect(router.state.location.pathname).toBe("/login");
+    expect(fetchMock.mock.calls.every(([path]) => path === "/api/private/session")).toBe(true);
+  }, 10_000);
+
   it("renders the owner shell only after a valid 200 session", async () => {
     const fetchMock = vi.fn<typeof fetch>((input) => {
       if (input === "/api/private/session") {

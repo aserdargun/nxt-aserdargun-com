@@ -7,9 +7,11 @@ import { ApiClientError } from "../api/client";
 
 const mocks = vi.hoisted(() => ({
   getSession: vi.fn(),
-  loadCompleteVault: vi.fn()
+  loadCompleteVault: vi.fn(),
+  preloadEditor: vi.fn()
 }));
 
+vi.mock("../editor/preload-editor", () => ({ preloadEditor: mocks.preloadEditor }));
 vi.mock("../api/session", () => ({ getSession: mocks.getSession }));
 vi.mock("../api/vault", () => ({
   vaultClient: { loadCompleteVault: mocks.loadCompleteVault }
@@ -46,6 +48,7 @@ afterEach(() => {
   cleanup();
   mocks.getSession.mockReset();
   mocks.loadCompleteVault.mockReset();
+  mocks.preloadEditor.mockReset();
 });
 
 describe("OwnerRoute", () => {
@@ -54,10 +57,12 @@ describe("OwnerRoute", () => {
     mocks.getSession.mockImplementation(() => new Promise((resolve) => { resolveSession = resolve; }));
     renderOwnerRoute();
     expect(await screen.findByRole("status", { name: "Checking owner access" })).toHaveAttribute("aria-busy", "true");
+    expect(mocks.preloadEditor).not.toHaveBeenCalled();
 
     resolveSession?.({ user: { userDetails: "owner" } });
     mocks.loadCompleteVault.mockImplementation(() => new Promise(() => undefined));
     expect(await screen.findByRole("status", { name: "Loading vault" })).toHaveAttribute("aria-busy", "true");
+    expect(mocks.preloadEditor).toHaveBeenCalledOnce();
   });
 
   it("retries a failed session once and renders the owner shell", async () => {
@@ -97,5 +102,7 @@ describe("OwnerRoute", () => {
     renderOwnerRoute();
     expect(await screen.findByRole("heading", { name: "This account cannot access the vault." })).toBeVisible();
     expect(screen.getByRole("link", { name: "Sign out" })).toHaveAttribute("href", "/.auth/logout?post_logout_redirect_uri=/login");
+    expect(mocks.preloadEditor).not.toHaveBeenCalled();
+    expect(mocks.loadCompleteVault).not.toHaveBeenCalled();
   });
 });

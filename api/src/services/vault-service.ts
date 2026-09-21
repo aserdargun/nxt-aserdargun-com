@@ -1099,11 +1099,17 @@ export class VaultService {
     this.assertFolder(root);
     const tree: TreeItem[] = [{ file: root, path: "Notes" }];
     const queue: TreeItem[] = [{ file: root, path: "Notes" }];
+    const seen = new Set([root.id]);
     while (queue.length > 0) {
       const parent = queue.shift() as TreeItem;
       const children = (await this.listAllChildren(parent.file.id)).sort(compareStoredFiles);
       for (const file of children) {
+        if (seen.has(file.id)) throw new ApiResponseError("DRIVE_UNAVAILABLE");
+        seen.add(file.id);
         const item = { file, path: `${parent.path}/${file.name}` };
+        if (file.mimeType === FOLDER_MIME_TYPE && item.path.split("/").length - 1 > MAX_FOLDER_DEPTH) {
+          throw new ApiResponseError("DRIVE_UNAVAILABLE");
+        }
         tree.push(item);
         if (file.mimeType === FOLDER_MIME_TYPE) queue.push(item);
       }

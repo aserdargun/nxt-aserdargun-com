@@ -16,6 +16,7 @@ import type { MarkdownEditorHandle } from "./markdown-editor";
 import { buildDefaultSlashMenuItems } from "./slash-menu-items";
 import { SlashMenu } from "./slash-menu";
 import { useAutosave, type SaveStatus } from "./use-autosave";
+import { StatusCallout } from "../app/status-callout";
 
 const MarkdownEditor = lazy(async () => {
   const module = await import("./markdown-editor");
@@ -107,7 +108,8 @@ export const EditorWorkspace = ({
     onMergeSourceChange,
     onResolveConflict,
     onConflictOpenChange,
-    onLimitExceeded
+    onLimitExceeded,
+    onRetryLoad
   } = useAutosave({
     noteId,
     notes,
@@ -241,8 +243,15 @@ export const EditorWorkspace = ({
         {toolbarError === null ? null : (
           <p role="alert" className="format-toolbar-error">{toolbarError}</p>
         )}
-        <div className="editor-canvas real-editor-canvas" aria-busy={state.source === null}>
-          {state.source === null ? null : (
+        <div className="editor-canvas real-editor-canvas" aria-busy={state.source === null && state.status !== "Error"}>
+          {state.source === null ? (
+            state.status === "Error" ? (
+              <StatusCallout tone="error">
+                <p>The note could not be loaded.</p>
+                <button type="button" className="secondary-action touch-target" onClick={onRetryLoad}>Retry note</button>
+              </StatusCallout>
+            ) : <p role="status">Loading note…</p>
+          ) : (
             <EditorDropzone onFile={(file) => { void uploadAndInsertFile(file); }} disabled={dropBusy}>
               <Suspense fallback={null}>
                 <MarkdownEditor
@@ -284,7 +293,7 @@ export const EditorWorkspace = ({
           </div>
           <div
             className={`preview-content${mobilePath === undefined ? "" : " workspace-scroll-target"}`}
-            aria-busy={state.source === null}
+            aria-busy={state.source === null && state.status !== "Error"}
           >
             {mobilePath}
             {state.source === null ? null : (

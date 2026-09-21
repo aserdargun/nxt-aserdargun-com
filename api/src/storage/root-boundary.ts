@@ -4,6 +4,7 @@ const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const SHORTCUT_MIME_TYPE = "application/vnd.google-apps.shortcut";
 const MAX_FILE_ID_LENGTH = 512;
 const MAX_ANCESTRY_NODES = 100;
+const ANCESTRY_READ_CONCURRENCY = 4;
 
 type TestGraphInput = {
   allowedRootId: string;
@@ -112,8 +113,14 @@ export class RootBoundaryStorage implements StoragePort {
   public async listChildren(input: { parentId: string; pageToken?: string; pageSize: number }, context?: StorageOperationContext): Promise<{ files: StoredFile[]; nextPageToken?: string }> {
     await this.assertInside(input.parentId, context);
     const page = await this.storage.listChildren(input, context);
-    for (const file of page.files) {
-      await this.assertInside(file.id, context);
+    // Check every ancestry afresh, but overlap independent Drive reads. Drain
+    // each bounded batch before failing so no checks outlive the request.
+    for (let offset = 0; offset < page.files.length; offset += ANCESTRY_READ_CONCURRENCY) {
+      const results = await Promise.allSettled(
+        page.files.slice(offset, offset + ANCESTRY_READ_CONCURRENCY)
+          .map((file) => this.assertInside(file.id, context))
+      );
+      for (const result of results) if (result.status === "rejected") throw result.reason;
     }
     return page;
   }

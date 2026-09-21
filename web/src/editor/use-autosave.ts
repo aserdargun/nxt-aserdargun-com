@@ -1,7 +1,7 @@
 import { MAX_NOTE_SOURCE_BYTES, NoteResponseSchema, type NoteResponse } from "@nxt/contracts";
 import { parseNote, serializeNote } from "@nxt/domain";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiClientError } from "../api/client";
+import { ApiClientError, ApiTimeoutError } from "../api/client";
 import type { NotesClient } from "../api/notes";
 import type { ConflictResolution, EditorConflict } from "./conflict-dialog";
 import type { DraftStore, LocalDraft } from "./draft-store";
@@ -288,7 +288,7 @@ const errorMessage = (error: unknown): string =>
     : "The operation could not be completed.";
 
 const isOfflineFailure = (error: unknown): boolean =>
-  error instanceof TypeError ||
+  error instanceof TypeError || error instanceof ApiTimeoutError ||
   (error instanceof ApiClientError && error.code === "DRIVE_UNAVAILABLE");
 
 const draftTitle = (draft: LocalDraft): string => {
@@ -313,8 +313,10 @@ export const useAutosave = ({
   readonly onResolveConflict: (resolution: ConflictResolution) => void;
   readonly onConflictOpenChange: (open: boolean) => void;
   readonly onLimitExceeded: () => void;
+  readonly onRetryLoad: () => void;
 } => {
   const [state, setState] = useState<EditorSessionState>(INITIAL_STATE);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const runtimeRef = useRef<AutosaveRuntime | null>(null);
   const currentFolderIdRef = useRef(currentFolderId);
 
@@ -1016,7 +1018,7 @@ export const useAutosave = ({
       clearTimer();
       if (runtimeRef.current === session) runtimeRef.current = null;
     };
-  }, [drafts, noteId, notes, now]);
+  }, [drafts, noteId, notes, now, loadAttempt]);
 
   const onSourceChange = useCallback((source: string) => runtimeRef.current?.change(source), []);
   const onMergeSourceChange = useCallback((source: string) => runtimeRef.current?.changeMerge(source), []);
@@ -1031,6 +1033,9 @@ export const useAutosave = ({
   const onLimitExceeded = useCallback(() => {
     setState((current) => ({ ...current, status: "Error" }));
   }, []);
+  const onRetryLoad = useCallback(() => {
+    if (state.source === null && state.status === "Error") setLoadAttempt((attempt) => attempt + 1);
+  }, [state.source, state.status]);
 
   return {
     state,
@@ -1038,6 +1043,7 @@ export const useAutosave = ({
     onMergeSourceChange,
     onResolveConflict,
     onConflictOpenChange,
-    onLimitExceeded
+    onLimitExceeded,
+    onRetryLoad
   };
 };

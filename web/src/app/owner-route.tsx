@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect } from "react";
 import { NoteIdSchema } from "@nxt/contracts";
 import { Navigate, useNavigate, useParams } from "react-router-dom";
-import { ApiClientError } from "../api/client";
+import { ApiAuthenticationError, ApiClientError } from "../api/client";
 import { getSession } from "../api/session";
 import { vaultClient } from "../api/vault";
+import { preloadEditor } from "../editor/preload-editor";
 import { NotFoundPage } from "./not-found-page";
 import { OwnerShell } from "./owner-shell";
 import { useTheme } from "./providers";
@@ -14,6 +16,7 @@ const LOGOUT_PATH = "/.auth/logout?post_logout_redirect_uri=/login";
 const OwnerVaultGate = ({ noteId }: { readonly noteId?: string }): React.JSX.Element => {
   const navigate = useNavigate();
   const { mode, setMode } = useTheme();
+  useEffect(preloadEditor, []);
   const vault = useQuery({
     queryKey: ["private-vault"],
     queryFn: () => vaultClient.loadCompleteVault()
@@ -65,6 +68,7 @@ const OwnerGate = ({ noteId }: { readonly noteId?: string }): React.JSX.Element 
   });
 
   if (session.isPending) return <RouteState state="loading" title="Checking owner access" />;
+  if (session.error instanceof ApiAuthenticationError) return <Navigate to="/login" replace />;
 
   if (session.error instanceof ApiClientError) {
     if (session.error.status === 401 && session.error.code === "UNAUTHORIZED") {

@@ -48,12 +48,13 @@ const styleFor = (selector: string, property?: string): CSSStyleDeclaration => {
 
 describe("workspace header", () => {
   it.each([
-    ["Offline draft", "status", "warning"],
-    ["Error", "alert", "error"]
-  ] as const)("keeps %s recovery feedback persistent with the matching tone", (saveStatus, role, tone) => {
+    ["Offline draft", "status", "warning", "Your local recovery draft remains available."],
+    ["Error", "alert", "error", "The note could not be loaded or saved."]
+  ] as const)("keeps %s feedback truthful and persistent with the matching tone", (saveStatus, role, tone, message) => {
     render(<WorkspaceHeader {...createProps({ saveStatus })} />);
 
-    const copy = screen.getByText("Your local recovery draft remains available.");
+    const copy = screen.getByText(message);
+    if (saveStatus === "Error") expect(screen.queryByText("Your local recovery draft remains available.")).not.toBeInTheDocument();
     const callout = copy.closest("[data-tone]");
     expect(callout).toHaveAttribute("role", role);
     expect(callout).toHaveAttribute("data-tone", tone);

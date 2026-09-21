@@ -98,7 +98,9 @@ export const WorkspaceHeader = ({
   const recoveryCallout = saveStatus === "Offline draft" || saveStatus === "Error" ? (
     <div className="workspace-recovery-callout">
       <StatusCallout tone={saveStatus === "Error" ? "error" : "warning"} persistent>
-        Your local recovery draft remains available.
+        {saveStatus === "Offline draft"
+          ? "Your local recovery draft remains available."
+          : "The note could not be loaded or saved."}
       </StatusCallout>
     </div>
   ) : null;
