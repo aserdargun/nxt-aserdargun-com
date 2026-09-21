@@ -200,9 +200,13 @@ for (const theme of ["dark", "light"] as const) {
     expect(contrast(rgb(operationColors.focusRing), rgb(operationColors.adjacentBackground))).toBeGreaterThanOrEqual(3);
     await operationDialog.getByRole("button", { name: "Cancel" }).click();
 
+    // The shell and dialogs can render before the initial note read finishes.
+    // Offline editing must start from a loaded note, not interrupt its setup.
+    const editor = page.getByLabel("Markdown editor");
+    await expect(editor).toBeEditable();
+    await expect(page.getByLabel("Save status")).toHaveText("Saved");
     await context.setOffline(true);
     try {
-      const editor = page.getByLabel("Markdown editor");
       await editor.click();
       await page.keyboard.press("Meta+ArrowDown");
       await page.keyboard.insertText(`Task 8 ${theme} warning contrast\n`);
