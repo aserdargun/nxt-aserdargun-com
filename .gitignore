@@ -11,4 +11,7 @@ api-dist/
 coverage/
 playwright-report/
 test-results/
+# TypeScript's incremental build state is a machine-local cache. Tracking it
+# dirtied the tree on every build and made merges conflict on non-source data.
+*.tsbuildinfo
 .DS_Store
